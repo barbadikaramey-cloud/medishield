@@ -1,0 +1,1124 @@
+{
+  "metrics": {
+    "total_cases": 30,
+    "approved_count": 16,
+    "approval_rate": 0.5333,
+    "expected_approvals": 24,
+    "approved_of_expected": 13,
+    "percent_approved_of_expected": 0.5417,
+    "false_approve_count": 3,
+    "false_approve_rate": 0.1,
+    "false_deny_count": 0,
+    "false_deny_rate": 0.0
+  },
+  "first_failing_rules": {
+    "RULE-P6-CLEAN-PASS": 16,
+    "RULE-P3-AMBIGUITY": 9,
+    "RULE-P5-HARD-REJECT": 4,
+    "RULE-P7-BORDERLINE-REVIEW": 1
+  },
+  "all_failing_rules": {
+    "P3-AMBIGUITY": 28,
+    "P7-BORDERLINE": 10,
+    "P5-HARD-REJECT": 6
+  },
+  "blocker_pairs": {
+    "P3-AMBIGUITY + P7-BORDERLINE": 10,
+    "P3-AMBIGUITY + P5-HARD-REJECT": 6,
+    "P5-HARD-REJECT + P7-BORDERLINE": 2
+  },
+  "confidence_correct": [
+    0.5,
+    0.85,
+    0.85,
+    0.85,
+    0.85,
+    0.85,
+    0.85,
+    0.95,
+    0.85,
+    0.85,
+    0.85,
+    0.85,
+    0.85,
+    0.85,
+    0.85,
+    0.95
+  ],
+  "confidence_wrong": [
+    0.85,
+    0.85,
+    0.85,
+    0.85,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.85,
+    0.5,
+    0.85
+  ],
+  "records": [
+    {
+      "cluster_id": "C_001",
+      "patient_id": "PT_19116",
+      "policy_id": "MED-GLD-6770619",
+      "final_decision": "APPROVE",
+      "rule_id_matched": "RULE-P6-CLEAN-PASS",
+      "escalation_sub_reason": null,
+      "all_failing_checks": [
+        "P3-AMBIGUITY"
+      ],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "ARITHMETIC_DRIFT: Calculated line sum ($0.00) differs from claim header amount ($4095.00)."
+      ],
+      "pol_cov_verdict": "PASS",
+      "pol_cov_conf": 0.95,
+      "fraud_score": 0.05,
+      "fraud_verdict": "PASS",
+      "expected_decision": "ESCALATE",
+      "justification": "Clean Straight-Through Pass (P6): All identity, claims arithmetic, and policy coverage criteria passed with low fraud risk (score: 0.05) and calibrated confidence >= 0.7."
+    },
+    {
+      "cluster_id": "C_002",
+      "patient_id": "PT_99733",
+      "policy_id": "MED-GLD-3728882",
+      "final_decision": "APPROVE",
+      "rule_id_matched": "RULE-P6-CLEAN-PASS",
+      "escalation_sub_reason": null,
+      "all_failing_checks": [
+        "P3-AMBIGUITY"
+      ],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "ARITHMETIC_DRIFT: Calculated line sum ($16750.00) differs from claim header amount ($16825.00)."
+      ],
+      "pol_cov_verdict": "PASS",
+      "pol_cov_conf": 0.95,
+      "fraud_score": 0.0022,
+      "fraud_verdict": "PASS",
+      "expected_decision": "ESCALATE",
+      "justification": "Clean Straight-Through Pass (P6): All identity, claims arithmetic, and policy coverage criteria passed with low fraud risk (score: 0.00) and calibrated confidence >= 0.7."
+    },
+    {
+      "cluster_id": "C_003",
+      "patient_id": "PT_62350",
+      "policy_id": "MED-GLD-4567281",
+      "final_decision": "ESCALATE",
+      "rule_id_matched": "RULE-P3-AMBIGUITY",
+      "escalation_sub_reason": "AMBIGUITY",
+      "all_failing_checks": [
+        "P3-AMBIGUITY",
+        "P7-BORDERLINE"
+      ],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "PASS",
+      "claims_conf": 0.97,
+      "claims_arithmetic_valid": true,
+      "claims_errors": [],
+      "pol_cov_verdict": "INDETERMINATE",
+      "pol_cov_conf": 0.5,
+      "fraud_score": 0.0,
+      "fraud_verdict": "PASS",
+      "expected_decision": "ESCALATE",
+      "justification": "Ambiguity Escalation (P3): Case exhibits insufficient evidence or low OCR quality in core specialist fact (INDETERMINATE). Routed to human reviewer."
+    },
+    {
+      "cluster_id": "C_004",
+      "patient_id": "PT_69470",
+      "policy_id": "MED-GLD-2065818",
+      "final_decision": "ESCALATE",
+      "rule_id_matched": "RULE-P5-HARD-REJECT",
+      "escalation_sub_reason": "RECOMMEND_DENIAL",
+      "all_failing_checks": [
+        "P3-AMBIGUITY",
+        "P5-HARD-REJECT"
+      ],
+      "kyc_verdict": "FAIL",
+      "kyc_conf": 0.95,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "ARITHMETIC_DRIFT: Calculated line sum ($0.00) differs from claim header amount ($23290.00)."
+      ],
+      "pol_cov_verdict": "PASS",
+      "pol_cov_conf": 0.95,
+      "fraud_score": 0.05,
+      "fraud_verdict": "PASS",
+      "expected_decision": "ESCALATE",
+      "justification": "Recommended Denial (P5): Confirmed hard business rule failure requires human confirmation: KYC Identity verification confirmed FAIL (unmatched member or expired identity)."
+    },
+    {
+      "cluster_id": "C_005",
+      "patient_id": "PT_20322",
+      "policy_id": "MED-GLD-3564217",
+      "final_decision": "ESCALATE",
+      "rule_id_matched": "RULE-P7-BORDERLINE-REVIEW",
+      "escalation_sub_reason": "HUMAN_REVIEW",
+      "all_failing_checks": [
+        "P3-AMBIGUITY",
+        "P7-BORDERLINE"
+      ],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "ARITHMETIC_DRIFT: Calculated line sum ($4295.00) differs from claim header amount ($2195.00)."
+      ],
+      "pol_cov_verdict": "PASS",
+      "pol_cov_conf": 0.95,
+      "fraud_score": 0.35,
+      "fraud_verdict": "INDETERMINATE",
+      "expected_decision": "ESCALATE",
+      "justification": "Borderline Escalation (P7): Case requires human adjudication due to medium fraud risk tier (score: 0.35)."
+    },
+    {
+      "cluster_id": "C_006",
+      "patient_id": "PT_39451",
+      "policy_id": "MED-GLD-5446912",
+      "final_decision": "APPROVE",
+      "rule_id_matched": "RULE-P6-CLEAN-PASS",
+      "escalation_sub_reason": null,
+      "all_failing_checks": [
+        "P3-AMBIGUITY"
+      ],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "ARITHMETIC_DRIFT: Calculated line sum ($21700.00) differs from claim header amount ($21735.00)."
+      ],
+      "pol_cov_verdict": "PASS",
+      "pol_cov_conf": 0.95,
+      "fraud_score": 0.0008,
+      "fraud_verdict": "PASS",
+      "expected_decision": "ESCALATE",
+      "justification": "Clean Straight-Through Pass (P6): All identity, claims arithmetic, and policy coverage criteria passed with low fraud risk (score: 0.00) and calibrated confidence >= 0.7."
+    },
+    {
+      "cluster_id": "C_007",
+      "patient_id": "PT_71993",
+      "policy_id": "MED-GLD-4841005",
+      "final_decision": "APPROVE",
+      "rule_id_matched": "RULE-P6-CLEAN-PASS",
+      "escalation_sub_reason": null,
+      "all_failing_checks": [
+        "P3-AMBIGUITY"
+      ],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "ARITHMETIC_DRIFT: Calculated line sum ($0.00) differs from claim header amount ($6400.00)."
+      ],
+      "pol_cov_verdict": "PASS",
+      "pol_cov_conf": 0.95,
+      "fraud_score": 0.05,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Clean Straight-Through Pass (P6): All identity, claims arithmetic, and policy coverage criteria passed with low fraud risk (score: 0.05) and calibrated confidence >= 0.7."
+    },
+    {
+      "cluster_id": "C_008",
+      "patient_id": "PT_82132",
+      "policy_id": "MED-GLD-2016911",
+      "final_decision": "APPROVE",
+      "rule_id_matched": "RULE-P6-CLEAN-PASS",
+      "escalation_sub_reason": null,
+      "all_failing_checks": [
+        "P3-AMBIGUITY"
+      ],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "MISSING_PROVIDER_NPI: Provider NPI could not be extracted.",
+        "ARITHMETIC_DRIFT: Calculated line sum ($130.00) differs from claim header amount ($3530.00)."
+      ],
+      "pol_cov_verdict": "PASS",
+      "pol_cov_conf": 0.95,
+      "fraud_score": 0.05,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Clean Straight-Through Pass (P6): All identity, claims arithmetic, and policy coverage criteria passed with low fraud risk (score: 0.05) and calibrated confidence >= 0.7."
+    },
+    {
+      "cluster_id": "C_009",
+      "patient_id": "PT_17665",
+      "policy_id": "MED-GLD-3762152",
+      "final_decision": "APPROVE",
+      "rule_id_matched": "RULE-P6-CLEAN-PASS",
+      "escalation_sub_reason": null,
+      "all_failing_checks": [
+        "P3-AMBIGUITY"
+      ],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "INVALID_PROVIDER_NPI: Provider NPI must be exactly 10 digits.",
+        "ARITHMETIC_DRIFT: Calculated line sum ($18750.00) differs from claim header amount ($40750.00)."
+      ],
+      "pol_cov_verdict": "PASS",
+      "pol_cov_conf": 0.95,
+      "fraud_score": 0.05,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Clean Straight-Through Pass (P6): All identity, claims arithmetic, and policy coverage criteria passed with low fraud risk (score: 0.05) and calibrated confidence >= 0.7."
+    },
+    {
+      "cluster_id": "C_010",
+      "patient_id": "PT_20745",
+      "policy_id": "MED-GLD-1954280",
+      "final_decision": "ESCALATE",
+      "rule_id_matched": "RULE-P5-HARD-REJECT",
+      "escalation_sub_reason": "RECOMMEND_DENIAL",
+      "all_failing_checks": [
+        "P3-AMBIGUITY",
+        "P5-HARD-REJECT"
+      ],
+      "kyc_verdict": "FAIL",
+      "kyc_conf": 0.9,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "ARITHMETIC_DRIFT: Calculated line sum ($0.00) differs from claim header amount ($3895.00)."
+      ],
+      "pol_cov_verdict": "PASS",
+      "pol_cov_conf": 0.95,
+      "fraud_score": 0.05,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Recommended Denial (P5): Confirmed hard business rule failure requires human confirmation: KYC Identity verification confirmed FAIL (unmatched member or expired identity)."
+    },
+    {
+      "cluster_id": "C_011",
+      "patient_id": "PT_47353",
+      "policy_id": "MED-GLD-8670955",
+      "final_decision": "APPROVE",
+      "rule_id_matched": "RULE-P6-CLEAN-PASS",
+      "escalation_sub_reason": null,
+      "all_failing_checks": [
+        "P3-AMBIGUITY"
+      ],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "ARITHMETIC_DRIFT: Calculated line sum ($9485.00) differs from claim header amount ($11285.00)."
+      ],
+      "pol_cov_verdict": "PASS",
+      "pol_cov_conf": 0.95,
+      "fraud_score": 0.05,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Clean Straight-Through Pass (P6): All identity, claims arithmetic, and policy coverage criteria passed with low fraud risk (score: 0.05) and calibrated confidence >= 0.7."
+    },
+    {
+      "cluster_id": "C_012",
+      "patient_id": "PT_16658",
+      "policy_id": "MED-GLD-5437001",
+      "final_decision": "APPROVE",
+      "rule_id_matched": "RULE-P6-CLEAN-PASS",
+      "escalation_sub_reason": null,
+      "all_failing_checks": [],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "PASS",
+      "claims_conf": 0.97,
+      "claims_arithmetic_valid": true,
+      "claims_errors": [],
+      "pol_cov_verdict": "PASS",
+      "pol_cov_conf": 0.95,
+      "fraud_score": 0.0,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Clean Straight-Through Pass (P6): All identity, claims arithmetic, and policy coverage criteria passed with low fraud risk (score: 0.00) and calibrated confidence >= 0.7."
+    },
+    {
+      "cluster_id": "C_013",
+      "patient_id": "PT_57795",
+      "policy_id": "MED-GLD-8175395",
+      "final_decision": "ESCALATE",
+      "rule_id_matched": "RULE-P3-AMBIGUITY",
+      "escalation_sub_reason": "AMBIGUITY",
+      "all_failing_checks": [
+        "P3-AMBIGUITY",
+        "P5-HARD-REJECT",
+        "P7-BORDERLINE"
+      ],
+      "kyc_verdict": "FAIL",
+      "kyc_conf": 0.95,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "ARITHMETIC_DRIFT: Calculated line sum ($0.00) differs from claim header amount ($90850.00)."
+      ],
+      "pol_cov_verdict": "INDETERMINATE",
+      "pol_cov_conf": 0.5,
+      "fraud_score": 0.05,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Ambiguity Escalation (P3): Case exhibits insufficient evidence or low OCR quality in core specialist fact (INDETERMINATE). Routed to human reviewer."
+    },
+    {
+      "cluster_id": "C_014",
+      "patient_id": "PT_15075",
+      "policy_id": "MED-GLD-3592974",
+      "final_decision": "ESCALATE",
+      "rule_id_matched": "RULE-P3-AMBIGUITY",
+      "escalation_sub_reason": "AMBIGUITY",
+      "all_failing_checks": [
+        "P3-AMBIGUITY",
+        "P5-HARD-REJECT",
+        "P7-BORDERLINE"
+      ],
+      "kyc_verdict": "FAIL",
+      "kyc_conf": 0.9,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "ARITHMETIC_DRIFT: Calculated line sum ($33900.00) differs from claim header amount ($37300.00)."
+      ],
+      "pol_cov_verdict": "INDETERMINATE",
+      "pol_cov_conf": 0.5,
+      "fraud_score": 0.0456,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Ambiguity Escalation (P3): Case exhibits insufficient evidence or low OCR quality in core specialist fact (INDETERMINATE). Routed to human reviewer."
+    },
+    {
+      "cluster_id": "C_015",
+      "patient_id": "PT_24208",
+      "policy_id": "MED-GLD-7685149",
+      "final_decision": "ESCALATE",
+      "rule_id_matched": "RULE-P3-AMBIGUITY",
+      "escalation_sub_reason": "AMBIGUITY",
+      "all_failing_checks": [
+        "P3-AMBIGUITY",
+        "P7-BORDERLINE"
+      ],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "PASS",
+      "claims_conf": 0.97,
+      "claims_arithmetic_valid": true,
+      "claims_errors": [],
+      "pol_cov_verdict": "INDETERMINATE",
+      "pol_cov_conf": 0.5,
+      "fraud_score": 0.0,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Ambiguity Escalation (P3): Case exhibits insufficient evidence or low OCR quality in core specialist fact (INDETERMINATE). Routed to human reviewer."
+    },
+    {
+      "cluster_id": "C_016",
+      "patient_id": "PT_50538",
+      "policy_id": "MED-GLD-1744682",
+      "final_decision": "ESCALATE",
+      "rule_id_matched": "RULE-P3-AMBIGUITY",
+      "escalation_sub_reason": "AMBIGUITY",
+      "all_failing_checks": [
+        "P3-AMBIGUITY",
+        "P7-BORDERLINE"
+      ],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "ARITHMETIC_DRIFT: Calculated line sum ($0.00) differs from claim header amount ($65500.00)."
+      ],
+      "pol_cov_verdict": "INDETERMINATE",
+      "pol_cov_conf": 0.5,
+      "fraud_score": 0.05,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Ambiguity Escalation (P3): Case exhibits insufficient evidence or low OCR quality in core specialist fact (INDETERMINATE). Routed to human reviewer."
+    },
+    {
+      "cluster_id": "C_017",
+      "patient_id": "PT_72021",
+      "policy_id": "MED-GLD-6049101",
+      "final_decision": "ESCALATE",
+      "rule_id_matched": "RULE-P3-AMBIGUITY",
+      "escalation_sub_reason": "AMBIGUITY",
+      "all_failing_checks": [
+        "P3-AMBIGUITY",
+        "P7-BORDERLINE"
+      ],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "ARITHMETIC_DRIFT: Calculated line sum ($4450.00) differs from claim header amount ($47550.00)."
+      ],
+      "pol_cov_verdict": "INDETERMINATE",
+      "pol_cov_conf": 0.5,
+      "fraud_score": 0.05,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Ambiguity Escalation (P3): Case exhibits insufficient evidence or low OCR quality in core specialist fact (INDETERMINATE). Routed to human reviewer."
+    },
+    {
+      "cluster_id": "C_018",
+      "patient_id": "PT_62383",
+      "policy_id": "MED-GLD-4768844",
+      "final_decision": "ESCALATE",
+      "rule_id_matched": "RULE-P3-AMBIGUITY",
+      "escalation_sub_reason": "AMBIGUITY",
+      "all_failing_checks": [
+        "P3-AMBIGUITY",
+        "P7-BORDERLINE"
+      ],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "ARITHMETIC_DRIFT: Calculated line sum ($3400.00) differs from claim header amount ($4500.00)."
+      ],
+      "pol_cov_verdict": "INDETERMINATE",
+      "pol_cov_conf": 0.5,
+      "fraud_score": 0.05,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Ambiguity Escalation (P3): Case exhibits insufficient evidence or low OCR quality in core specialist fact (INDETERMINATE). Routed to human reviewer."
+    },
+    {
+      "cluster_id": "C_019",
+      "patient_id": "PT_81810",
+      "policy_id": "MED-GLD-8793853",
+      "final_decision": "APPROVE",
+      "rule_id_matched": "RULE-P6-CLEAN-PASS",
+      "escalation_sub_reason": null,
+      "all_failing_checks": [
+        "P3-AMBIGUITY"
+      ],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.85,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "ARITHMETIC_DRIFT: Calculated line sum ($0.00) differs from claim header amount ($48350.00)."
+      ],
+      "pol_cov_verdict": "PASS",
+      "pol_cov_conf": 0.95,
+      "fraud_score": 0.05,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Clean Straight-Through Pass (P6): All identity, claims arithmetic, and policy coverage criteria passed with low fraud risk (score: 0.05) and calibrated confidence >= 0.7."
+    },
+    {
+      "cluster_id": "C_020",
+      "patient_id": "PT_30028",
+      "policy_id": "MED-GLD-5013879",
+      "final_decision": "ESCALATE",
+      "rule_id_matched": "RULE-P3-AMBIGUITY",
+      "escalation_sub_reason": "AMBIGUITY",
+      "all_failing_checks": [
+        "P3-AMBIGUITY",
+        "P7-BORDERLINE"
+      ],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "PASS",
+      "claims_conf": 0.97,
+      "claims_arithmetic_valid": true,
+      "claims_errors": [],
+      "pol_cov_verdict": "INDETERMINATE",
+      "pol_cov_conf": 0.5,
+      "fraud_score": 0.0,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Ambiguity Escalation (P3): Case exhibits insufficient evidence or low OCR quality in core specialist fact (INDETERMINATE). Routed to human reviewer."
+    },
+    {
+      "cluster_id": "C_021",
+      "patient_id": "PT_67125",
+      "policy_id": "MED-GLD-1327691",
+      "final_decision": "APPROVE",
+      "rule_id_matched": "RULE-P6-CLEAN-PASS",
+      "escalation_sub_reason": null,
+      "all_failing_checks": [
+        "P3-AMBIGUITY"
+      ],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "ARITHMETIC_DRIFT: Calculated line sum ($45400.00) differs from claim header amount ($45650.00)."
+      ],
+      "pol_cov_verdict": "PASS",
+      "pol_cov_conf": 0.95,
+      "fraud_score": 0.0027,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Clean Straight-Through Pass (P6): All identity, claims arithmetic, and policy coverage criteria passed with low fraud risk (score: 0.00) and calibrated confidence >= 0.7."
+    },
+    {
+      "cluster_id": "C_022",
+      "patient_id": "PT_54236",
+      "policy_id": "MED-GLD-1452421",
+      "final_decision": "APPROVE",
+      "rule_id_matched": "RULE-P6-CLEAN-PASS",
+      "escalation_sub_reason": null,
+      "all_failing_checks": [
+        "P3-AMBIGUITY"
+      ],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "ARITHMETIC_DRIFT: Calculated line sum ($0.00) differs from claim header amount ($4690.00)."
+      ],
+      "pol_cov_verdict": "PASS",
+      "pol_cov_conf": 0.95,
+      "fraud_score": 0.05,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Clean Straight-Through Pass (P6): All identity, claims arithmetic, and policy coverage criteria passed with low fraud risk (score: 0.05) and calibrated confidence >= 0.7."
+    },
+    {
+      "cluster_id": "C_023",
+      "patient_id": "PT_24993",
+      "policy_id": "MED-GLD-6871360",
+      "final_decision": "APPROVE",
+      "rule_id_matched": "RULE-P6-CLEAN-PASS",
+      "escalation_sub_reason": null,
+      "all_failing_checks": [
+        "P3-AMBIGUITY"
+      ],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "MISSING_PROVIDER_NPI: Provider NPI could not be extracted.",
+        "ARITHMETIC_DRIFT: Calculated line sum ($55.00) differs from claim header amount ($42055.00)."
+      ],
+      "pol_cov_verdict": "PASS",
+      "pol_cov_conf": 0.95,
+      "fraud_score": 0.05,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Clean Straight-Through Pass (P6): All identity, claims arithmetic, and policy coverage criteria passed with low fraud risk (score: 0.05) and calibrated confidence >= 0.7."
+    },
+    {
+      "cluster_id": "C_024",
+      "patient_id": "PT_99687",
+      "policy_id": "MED-GLD-6218367",
+      "final_decision": "ESCALATE",
+      "rule_id_matched": "RULE-P5-HARD-REJECT",
+      "escalation_sub_reason": "RECOMMEND_DENIAL",
+      "all_failing_checks": [
+        "P3-AMBIGUITY",
+        "P5-HARD-REJECT"
+      ],
+      "kyc_verdict": "FAIL",
+      "kyc_conf": 0.9,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "ARITHMETIC_DRIFT: Calculated line sum ($22260.00) differs from claim header amount ($116010.00)."
+      ],
+      "pol_cov_verdict": "PASS",
+      "pol_cov_conf": 0.95,
+      "fraud_score": 0.05,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Recommended Denial (P5): Confirmed hard business rule failure requires human confirmation: KYC Identity verification confirmed FAIL (unmatched member or expired identity)."
+    },
+    {
+      "cluster_id": "C_025",
+      "patient_id": "PT_45400",
+      "policy_id": "MED-GLD-6724909",
+      "final_decision": "ESCALATE",
+      "rule_id_matched": "RULE-P3-AMBIGUITY",
+      "escalation_sub_reason": "AMBIGUITY",
+      "all_failing_checks": [
+        "P3-AMBIGUITY",
+        "P7-BORDERLINE"
+      ],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "ARITHMETIC_DRIFT: Calculated line sum ($0.00) differs from claim header amount ($32550.00)."
+      ],
+      "pol_cov_verdict": "INDETERMINATE",
+      "pol_cov_conf": 0.5,
+      "fraud_score": 0.05,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Ambiguity Escalation (P3): Case exhibits insufficient evidence or low OCR quality in core specialist fact (INDETERMINATE). Routed to human reviewer."
+    },
+    {
+      "cluster_id": "C_026",
+      "patient_id": "PT_88139",
+      "policy_id": "MED-GLD-8563202",
+      "final_decision": "APPROVE",
+      "rule_id_matched": "RULE-P6-CLEAN-PASS",
+      "escalation_sub_reason": null,
+      "all_failing_checks": [
+        "P3-AMBIGUITY"
+      ],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "ARITHMETIC_DRIFT: Calculated line sum ($8825.00) differs from claim header amount ($10275.00)."
+      ],
+      "pol_cov_verdict": "PASS",
+      "pol_cov_conf": 0.95,
+      "fraud_score": 0.05,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Clean Straight-Through Pass (P6): All identity, claims arithmetic, and policy coverage criteria passed with low fraud risk (score: 0.05) and calibrated confidence >= 0.7."
+    },
+    {
+      "cluster_id": "C_027",
+      "patient_id": "PT_55056",
+      "policy_id": "MED-GLD-8987516",
+      "final_decision": "APPROVE",
+      "rule_id_matched": "RULE-P6-CLEAN-PASS",
+      "escalation_sub_reason": null,
+      "all_failing_checks": [
+        "P3-AMBIGUITY"
+      ],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "MISSING_PROVIDER_NPI: Provider NPI could not be extracted.",
+        "ARITHMETIC_DRIFT: Calculated line sum ($22095.00) differs from claim header amount ($37495.00)."
+      ],
+      "pol_cov_verdict": "PASS",
+      "pol_cov_conf": 0.95,
+      "fraud_score": 0.05,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Clean Straight-Through Pass (P6): All identity, claims arithmetic, and policy coverage criteria passed with low fraud risk (score: 0.05) and calibrated confidence >= 0.7."
+    },
+    {
+      "cluster_id": "C_028",
+      "patient_id": "PT_39816",
+      "policy_id": "MED-GLD-3005795",
+      "final_decision": "APPROVE",
+      "rule_id_matched": "RULE-P6-CLEAN-PASS",
+      "escalation_sub_reason": null,
+      "all_failing_checks": [
+        "P3-AMBIGUITY"
+      ],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "ARITHMETIC_DRIFT: Calculated line sum ($0.00) differs from claim header amount ($132645.00)."
+      ],
+      "pol_cov_verdict": "PASS",
+      "pol_cov_conf": 0.95,
+      "fraud_score": 0.05,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Clean Straight-Through Pass (P6): All identity, claims arithmetic, and policy coverage criteria passed with low fraud risk (score: 0.05) and calibrated confidence >= 0.7."
+    },
+    {
+      "cluster_id": "C_029",
+      "patient_id": "PT_74454",
+      "policy_id": "MED-GLD-9235577",
+      "final_decision": "APPROVE",
+      "rule_id_matched": "RULE-P6-CLEAN-PASS",
+      "escalation_sub_reason": null,
+      "all_failing_checks": [],
+      "kyc_verdict": "PASS",
+      "kyc_conf": 0.95,
+      "claims_verdict": "PASS",
+      "claims_conf": 0.97,
+      "claims_arithmetic_valid": true,
+      "claims_errors": [],
+      "pol_cov_verdict": "PASS",
+      "pol_cov_conf": 0.95,
+      "fraud_score": 0.0,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Clean Straight-Through Pass (P6): All identity, claims arithmetic, and policy coverage criteria passed with low fraud risk (score: 0.00) and calibrated confidence >= 0.7."
+    },
+    {
+      "cluster_id": "C_030",
+      "patient_id": "PT_41439",
+      "policy_id": "MED-GLD-9767312",
+      "final_decision": "ESCALATE",
+      "rule_id_matched": "RULE-P5-HARD-REJECT",
+      "escalation_sub_reason": "RECOMMEND_DENIAL",
+      "all_failing_checks": [
+        "P3-AMBIGUITY",
+        "P5-HARD-REJECT"
+      ],
+      "kyc_verdict": "FAIL",
+      "kyc_conf": 0.9,
+      "claims_verdict": "CONFLICT",
+      "claims_conf": 0.85,
+      "claims_arithmetic_valid": false,
+      "claims_errors": [
+        "ARITHMETIC_DRIFT: Calculated line sum ($50935.00) differs from claim header amount ($51045.00)."
+      ],
+      "pol_cov_verdict": "PASS",
+      "pol_cov_conf": 0.95,
+      "fraud_score": 0.0011,
+      "fraud_verdict": "PASS",
+      "expected_decision": "APPROVE",
+      "justification": "Recommended Denial (P5): Confirmed hard business rule failure requires human confirmation: KYC Identity verification confirmed FAIL (unmatched member or expired identity)."
+    }
+  ],
+  "preflight": [
+    {
+      "cluster_id": "C_001",
+      "patient_id": "PT_19116",
+      "policy_id": "MED-GLD-6770619",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_002",
+      "patient_id": "PT_99733",
+      "policy_id": "MED-GLD-3728882",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_003",
+      "patient_id": "PT_62350",
+      "policy_id": "MED-GLD-4567281",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_004",
+      "patient_id": "PT_69470",
+      "policy_id": "MED-GLD-2065818",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_005",
+      "patient_id": "PT_20322",
+      "policy_id": "MED-GLD-3564217",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_006",
+      "patient_id": "PT_39451",
+      "policy_id": "MED-GLD-5446912",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_007",
+      "patient_id": "PT_71993",
+      "policy_id": "MED-GLD-4841005",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_008",
+      "patient_id": "PT_82132",
+      "policy_id": "MED-GLD-2016911",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_009",
+      "patient_id": "PT_17665",
+      "policy_id": "MED-GLD-3762152",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_010",
+      "patient_id": "PT_20745",
+      "policy_id": "MED-GLD-1954280",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_011",
+      "patient_id": "PT_47353",
+      "policy_id": "MED-GLD-8670955",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_012",
+      "patient_id": "PT_16658",
+      "policy_id": "MED-GLD-5437001",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_013",
+      "patient_id": "PT_57795",
+      "policy_id": "MED-GLD-8175395",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_014",
+      "patient_id": "PT_15075",
+      "policy_id": "MED-GLD-3592974",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_015",
+      "patient_id": "PT_24208",
+      "policy_id": "MED-GLD-7685149",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_016",
+      "patient_id": "PT_50538",
+      "policy_id": "MED-GLD-1744682",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_017",
+      "patient_id": "PT_72021",
+      "policy_id": "MED-GLD-6049101",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_018",
+      "patient_id": "PT_62383",
+      "policy_id": "MED-GLD-4768844",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_019",
+      "patient_id": "PT_81810",
+      "policy_id": "MED-GLD-8793853",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_020",
+      "patient_id": "PT_30028",
+      "policy_id": "MED-GLD-5013879",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_021",
+      "patient_id": "PT_67125",
+      "policy_id": "MED-GLD-1327691",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_022",
+      "patient_id": "PT_54236",
+      "policy_id": "MED-GLD-1452421",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_023",
+      "patient_id": "PT_24993",
+      "policy_id": "MED-GLD-6871360",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_024",
+      "patient_id": "PT_99687",
+      "policy_id": "MED-GLD-6218367",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_025",
+      "patient_id": "PT_45400",
+      "policy_id": "MED-GLD-6724909",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_026",
+      "patient_id": "PT_88139",
+      "policy_id": "MED-GLD-8563202",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_027",
+      "patient_id": "PT_55056",
+      "policy_id": "MED-GLD-8987516",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_028",
+      "patient_id": "PT_39816",
+      "policy_id": "MED-GLD-3005795",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_029",
+      "patient_id": "PT_74454",
+      "policy_id": "MED-GLD-9235577",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    },
+    {
+      "cluster_id": "C_030",
+      "patient_id": "PT_41439",
+      "policy_id": "MED-GLD-9767312",
+      "sql_member_found": true,
+      "sql_policy_resolves": true,
+      "sql_enr_count": 1,
+      "in_mem_policy_resolves": false,
+      "qdrant_chunks": 0
+    }
+  ]
+}

@@ -1,0 +1,86 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+6 0 obj
+<< /Length 1616 >>
+stream
+BT
+/F2 16 Tf
+50 740 Td
+(HOSPITAL CLINICAL DISCHARGE SUMMARY) Tj
+/F1 10 Tf
+0 -25 Td
+(----------------------------------------------------------------------------------------------------) Tj
+/F2 12 Tf
+0 -22 Td
+(CLINICAL OVERVIEW) Tj
+/F1 10 Tf
+0 -15 Td
+(Patient: Sarah Jenkins                   Age: 39                 Gender: Female) Tj
+0 -15 Td
+(Admission Date: 2025-10-12               Discharge Date: 2025-10-15) Tj
+0 -15 Td
+(Attending: Dr. Robert Vance, MD          Service: General Surgery) Tj
+0 -15 Td
+(----------------------------------------------------------------------------------------------------) Tj
+/F2 12 Tf
+0 -22 Td
+(ADMISSION DIAGNOSIS & HOSPITAL COURSE) Tj
+/F1 10 Tf
+0 -15 Td
+(Admission Diagnosis: Acute Right Lower Quadrant Pain, Fever \(K35.80\)) Tj
+0 -15 Td
+(Course: Patient presented via ER with acute RLQ abdominal guarding.) Tj
+0 -15 Td
+(CT scan demonstrated acute appendicitis without perforation.) Tj
+0 -15 Td
+(Emergency laparoscopic appendectomy performed on 2025-10-12 without complication.) Tj
+0 -15 Td
+(Post-operative course was uneventful. Tolerated regular diet on post-op day 2.) Tj
+0 -15 Td
+(Incision clean, intact, no signs of infection.) Tj
+0 -15 Td
+(----------------------------------------------------------------------------------------------------) Tj
+/F2 12 Tf
+0 -22 Td
+(DISCHARGE INSTRUCTIONS & MEDICATIONS) Tj
+/F1 10 Tf
+0 -15 Td
+(Discharge Condition: Stable, ambulatory, pain well-controlled.) Tj
+0 -15 Td
+(Rx 1: Cefdinir 300mg PO BID x 5 days) Tj
+0 -15 Td
+(Rx 2: Acetaminophen 500mg PO Q6H PRN pain) Tj
+0 -15 Td
+(Follow-up: 2 weeks at Surgical Clinic with Dr. Vance.) Tj
+ET
+endstream
+endobj
+xref
+0 7
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000257 00000 n 
+0000000327 00000 n 
+0000000402 00000 n 
+trailer
+<< /Size 7 /Root 1 0 R >>
+startxref
+2070
+%%EOF

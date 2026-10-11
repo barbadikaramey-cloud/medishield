@@ -1,0 +1,102 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+6 0 obj
+<< /Length 2388 >>
+stream
+BT
+/F2 16 Tf
+50 740 Td
+(HEALTH INSURANCE CLAIM FORM (CMS-1500 / REIMBURSEMENT)) Tj
+/F1 10 Tf
+0 -25 Td
+(----------------------------------------------------------------------------------------------------) Tj
+/F2 12 Tf
+0 -22 Td
+(1. PATIENT AND INSURED INFORMATION) Tj
+/F1 10 Tf
+0 -15 Td
+(Patient Name: Sarah Jenkins              DOB: 1986-07-14         Sex: Female) Tj
+0 -15 Td
+(Address: 742 Evergreen Terrace, Seattle, WA 98101               Phone: \(206\) 555-0192) Tj
+0 -15 Td
+(Insured Policy ID: POL-GOLD-94821        Plan Program: MediShield Gold Comprehensive) Tj
+0 -15 Td
+(Employer / Group Name: NorthWest Tech Solutions \(Group # NW-88402\)) Tj
+0 -15 Td
+(----------------------------------------------------------------------------------------------------) Tj
+/F2 12 Tf
+0 -22 Td
+(2. PHYSICIAN / PROVIDER DETAILS) Tj
+/F1 10 Tf
+0 -15 Td
+(Billing Provider: St. Jude Regional Hospital                     NPI: 1948201948) Tj
+0 -15 Td
+(Attending Physician: Dr. Robert Vance, MD                        License: WA-MD-449210) Tj
+0 -15 Td
+(Facility Address: 1200 Healthcare Blvd, Seattle, WA 98104) Tj
+0 -15 Td
+(----------------------------------------------------------------------------------------------------) Tj
+/F2 12 Tf
+0 -22 Td
+(3. CLINICAL DIAGNOSIS & PROCEDURE CODES) Tj
+/F1 10 Tf
+0 -15 Td
+(Primary Diagnosis \(ICD-10\): K35.80 \(Acute appendicitis, other and unspecified\)) Tj
+0 -15 Td
+(Secondary Diagnosis: R10.0 \(Acute abdomen\)) Tj
+0 -15 Td
+(Dates of Service: 2025-10-12 to 2025-10-15) Tj
+0 -15 Td
+(Line 1: 2025-10-12 | CPT 44970 | Laparoscopic Appendectomy            | Billed: ,200.00) Tj
+0 -15 Td
+(Line 2: 2025-10-12 | CPT 99223 | Initial Hospital Care \(High\)         | Billed:   .00) Tj
+0 -15 Td
+(Line 3: 2025-10-13 | CPT 74176 | CT Scan Abdomen/Pelvis              | Billed:   .00) Tj
+0 -15 Td
+(Line 4: 2025-10-13 | CPT 80053 | Comprehensive Metabolic Panel        | Billed:   .00) Tj
+0 -15 Td
+(----------------------------------------------------------------------------------------------------) Tj
+/F2 12 Tf
+0 -22 Td
+(4. REIMBURSEMENT SUMMARY) Tj
+/F1 10 Tf
+0 -15 Td
+(Total Billed Charges: ,550.00          Amount Paid by Patient: ,550.00) Tj
+0 -15 Td
+(Reimbursement Amount Claimed: ,550.00) Tj
+0 -15 Td
+(Patient Signature: [SIGNED electronically by Sarah Jenkins on 2025-10-16]) Tj
+0 -15 Td
+(Physician Signature: [VERIFIED Dr. Robert Vance, MD on 2025-10-15]) Tj
+ET
+endstream
+endobj
+xref
+0 7
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000257 00000 n 
+0000000327 00000 n 
+0000000402 00000 n 
+trailer
+<< /Size 7 /Root 1 0 R >>
+startxref
+2842
+%%EOF
