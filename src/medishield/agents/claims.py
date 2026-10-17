@@ -733,8 +733,15 @@ class ClaimsAgent:
         seen: set[str] = set()
 
         for doc, page_num, span in spans:
-            if "diagnosis" in span.text.lower() or "icd" in span.text.lower():
+            span_lower = span.text.lower()
+            if any(k in span_lower for k in ("diagnosis", "diagnoses", "icd", "primary", "secondary", "hospital course")):
                 matches = icd_pattern.findall(span.text)
+                # Normalize OCR misreadings of ICD letter 'I' as digit '1' (e.g. ICD-10: 110 -> I10, ICD-10: 125 -> I25)
+                for m in re.finditer(r"ICD(?:-10)?\s*[:\-]?\s*1([0-9]{2}(?:\.[0-9]{1,4})?)", span.text, re.IGNORECASE):
+                    cand = f"I{m.group(1)}"
+                    if cand not in matches:
+                        matches.append(cand)
+
                 for code in matches:
                     if code not in seen and len(code) >= 3:
                         seen.add(code)

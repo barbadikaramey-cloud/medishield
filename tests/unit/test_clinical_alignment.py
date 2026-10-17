@@ -16,7 +16,10 @@ from medishield.db.enums import (
     EscalationSubReason,
     WorkflowState,
 )
-from medishield.domain.clinical_align import DeterministicClinicalAlignmentEngine
+from medishield.domain.clinical_align import (
+    DeterministicClinicalAlignmentEngine,
+    DischargeSummaryParser,
+)
 from medishield.domain.contracts import (
     BedDayBillingRuleContract,
     BedDayReconciliation,
@@ -1839,5 +1842,161 @@ class TestClinicalDecisionRoutingRegressions:
         assert state["decision"] == BusinessDecision.ESCALATE.value
         assert state["rule_id_matched"] == RULE_P3_AMBIGUITY
         assert state["workflow_state"] == WorkflowState.AWAITING_HUMAN.value
+
+
+class TestDischargeSummaryClinicalAlignment:
+    """Tests for Primary, Secondary, and Hospital Course clinical alignment in discharge summaries."""
+
+    def test_discharge_summary_parser_extracts_primary_secondary_course(self) -> None:
+        raw_text = """NORTHWESTERN MEMORIAL HOSPITAL
+DISCHARGE SUMMARY
+Patient Name: John Doe
+AdmitDate: 12/02/2025
+Discharge Date: 12/05/2025
+LOS: 3days
+
+FINAL DIAGNOSES:
+Primary: Coronary artery disease without angina pectoris (ICD-10: I25.10)
+Secondary: Migraine, unspecified, not intractable (ICD-10: G43.909)
+
+PROCEDURES PERFORMED:
+-- Psychotherapy Session, 60 min (CPT: 90837) | Billed: $250.00
+
+HOSPITAL COURSE:
+Patient Christopher Harris was admitted on 12/02/2025 presenting with symptoms consistent with
+coronary artery disease. Complete diagnostic workup including laboratory evaluation and imaging studies was performed.
+The patient was commenced on appropriate pharmacological therapy and responded favorably.
+Vital signs remained stable throughout the hospitalization. The patient was cleared for discharge on 12/05/2025.
+"""
+        analysis = DischargeSummaryParser.parse(raw_text)
+        assert "Coronary artery disease" in analysis.primary_diagnosis_text
+        assert "I25.10" in analysis.primary_icd_codes
+        assert "Migraine" in analysis.secondary_diagnosis_text
+        assert "G43.909" in analysis.secondary_icd_codes
+        assert "90837" in analysis.procedures_cpt_codes
+        assert analysis.has_lab_evaluation is True
+        assert analysis.has_imaging_studies is True
+        assert analysis.has_inpatient_stay is True
+        assert analysis.admission_date == date(2025, 12, 2)
+        assert analysis.discharge_date == date(2025, 12, 5)
+
+    def test_clinical_alignment_secondary_diagnosis_indicates_procedure(self) -> None:
+        """Procedure indicated by Secondary diagnosis (e.g. CPT 44970 indicated by secondary K35.80)."""
+        span = FieldProvenance(
+            document_id="DOC-DISCHARGE-01",
+            page_number=1,
+            text_content="Secondary: Unspecified acute appendicitis (ICD-10: K35.80)",
+            evidence_quality_score=0.95,
+        )
+        # Primary is UTI (N39.0), Secondary is Acute Appendicitis (K35.80)
+        line = DeterministicClinicalAlignmentEngine.evaluate_line_item(
+            line_number=1,
+            service_code="44970",
+            billed_units=1.0,
+            billed_amount=4500.00,
+            service_date=date(2026, 8, 1),
+            performance_status=PerformanceEvidenceStatus.DIRECTLY_DOCUMENTED_PERFORMANCE,
+            supporting_spans=[span],
+            diagnosis_codes=["N39.0"],
+            primary_icd10_codes=["N39.0"],
+            secondary_icd10_codes=["K35.80"],
+            primary_diagnosis_text="Primary: Urinary tract infection (N39.0)",
+            secondary_diagnosis_text="Secondary: Unspecified acute appendicitis (ICD-10: K35.80)",
+            hospital_course_text="Patient underwent laparoscopic appendectomy without complication.",
+        )
+        assert line.indication_status == ClinicalIndicationStatus.EXPLICITLY_INDICATED
+        assert line.line_verdict == AgentVerdict.PASS
+        assert "K35.80" in line.secondary_icd10_codes
+
+    def test_clinical_alignment_hospital_course_substantiates_lab_and_imaging(self) -> None:
+        """Laboratory test (80053) substantiated by hospital course narrative."""
+        span = FieldProvenance(
+            document_id="DOC-DISCHARGE-02",
+            page_number=1,
+            text_content="HOSPITAL COURSE: Complete diagnostic workup including laboratory evaluation and imaging studies was performed.",
+            evidence_quality_score=0.95,
+        )
+        line = DeterministicClinicalAlignmentEngine.evaluate_line_item(
+            line_number=1,
+            service_code="80053",
+            billed_units=1.0,
+            billed_amount=120.00,
+            service_date=date(2026, 8, 1),
+            performance_status=PerformanceEvidenceStatus.DIRECTLY_DOCUMENTED_PERFORMANCE,
+            indication_status=ClinicalIndicationStatus.EXPLICITLY_INDICATED,
+            supporting_spans=[span],
+            hospital_course_text="Complete diagnostic workup including laboratory evaluation and imaging studies was performed.",
+        )
+        assert line.performance_status == PerformanceEvidenceStatus.DIRECTLY_DOCUMENTED_PERFORMANCE
+        assert line.line_verdict == AgentVerdict.PASS
+
+    def test_clinical_alignment_node_with_discharge_summary_primary_secondary_course(self) -> None:
+        """Node 6C verifies multi-line claim with primary, secondary diagnoses and hospital course without escalation."""
+        state = create_initial_case_state("CASE-DISCH-01", execution_id="EXEC-DISCH-01")
+        state["claims_summary"] = {
+            "cpt_codes": [{"value": "44970"}, {"value": "80053"}],
+            "service_lines": [
+                {
+                    "line_number": 1,
+                    "hcpcs": {"value": "44970"},
+                    "service_code": "44970",
+                    "amount": {"value": 4500.0},
+                    "billed_amount": 4500.0,
+                    "units": {"value": 1.0},
+                    "billed_units": 1.0,
+                    "service_date": {"value": "2026-08-01"},
+                },
+                {
+                    "line_number": 2,
+                    "hcpcs": {"value": "80053"},
+                    "service_code": "80053",
+                    "amount": {"value": 120.0},
+                    "billed_amount": 120.0,
+                    "units": {"value": 1.0},
+                    "billed_units": 1.0,
+                    "service_date": {"value": "2026-08-01"},
+                },
+            ],
+            "icd10_codes": [{"value": "N39.0"}],
+        }
+        clin_doc = DocumentReference(
+            document_id="DOC-DISCH-01",
+            object_key="uploads/CASE-DISCH-01/discharge_summary.txt",
+            mime_type="text/plain",
+            checksum="hash456",
+            split_source_page_indices=[1],
+        )
+        clin_doc["doc_type"] = "DISCHARGE_SUMMARY"
+        clin_doc["file_name"] = "discharge_summary.txt"
+        clin_doc["text_content"] = """CITY GENERAL HOSPITAL
+DISCHARGE SUMMARY
+Patient: David Miller
+AdmitDate: 08/01/2026
+Discharge Date: 08/03/2026
+
+FINAL DIAGNOSES:
+Primary: Urinary tract infection, site not specified (ICD-10: N39.0)
+Secondary: Unspecified acute appendicitis (ICD-10: K35.80)
+
+PROCEDURES PERFORMED:
+Laparoscopic Appendectomy (CPT: 44970)
+
+HOSPITAL COURSE:
+Patient David Miller was admitted on 08/01/2026 presenting with symptoms of acute appendicitis.
+Complete diagnostic workup including laboratory evaluation and metabolic panel was performed.
+Patient underwent laparoscopic appendectomy and responded favorably.
+Vital signs remained stable throughout hospitalization.
+Discharged on 08/03/2026 in stable condition.
+"""
+        state["documents"] = [clin_doc]
+
+        # Execute Node 6C
+        state = clinical_alignment_node(state)
+        assert state.get("clinical_alignment_verdict") == AgentVerdict.PASS.value
+        assert state.get("clinical_alignment_confidence", 0.0) >= 0.75
+        summary = state.get("clinical_alignment_summary")
+        assert summary.get("assessment_sufficient") is True
+        assert summary.get("lines_fully_supported_count") == 2
+
 
 

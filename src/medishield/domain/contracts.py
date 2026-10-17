@@ -429,6 +429,7 @@ class LineClinicalEvidence(BaseModel):
 
     # Provenance and Traceability
     primary_icd10_codes: list[str] = Field(default_factory=list)
+    secondary_icd10_codes: list[str] = Field(default_factory=list)
     guideline_citation: GuidelineCitation | None = None
     supporting_spans: list[FieldProvenance] = Field(
         default_factory=list,

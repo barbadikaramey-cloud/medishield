@@ -27,14 +27,19 @@ from medishield.db.enums import (
     EscalationSubReason,
     WorkflowState,
 )
-from medishield.domain.clinical_align import DeterministicClinicalAlignmentEngine
+from medishield.domain.clinical_align import (
+    DeterministicClinicalAlignmentEngine,
+    DischargeSummaryAnalysis,
+)
 from medishield.domain.contracts import (
+    BedDayBillingRuleContract,
     BedDayReconciliation,
     CandidatePolicy,
     ClaimsAgentOutput,
     ClinicalAlignmentOutput,
     ClinicalIndicationStatus,
     ConsistencyCheckReport,
+    FacilityBillingConvention,
     FraudAgentOutput,
     KYCAgentOutput,
     LineClinicalEvidence,
@@ -1041,10 +1046,12 @@ def clinical_alignment_node(
         clinical_texts: list[str] = []
         clinical_spans: list[FieldProvenance] = []
         clinical_doc_ids: list[str] = []
+        disch_analyses: list[DischargeSummaryAnalysis] = []
 
         for d in clinical_docs:
             doc_id = str(d.get("document_id") or "UNKNOWN")
             clinical_doc_ids.append(doc_id)
+            doc_text = ""
             extracted = False
 
             if storage:
@@ -1066,7 +1073,8 @@ def clinical_alignment_node(
                                     )
                                 )
                         if p_texts:
-                            clinical_texts.append("\n".join(p_texts))
+                            doc_text = "\n".join(p_texts)
+                            clinical_texts.append(doc_text)
                             extracted = True
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("Failed to retrieve OCR payload for clinical doc %s: %s", doc_id, exc)
@@ -1076,6 +1084,7 @@ def clinical_alignment_node(
                     if obj_key and storage.exists(obj_key):
                         try:
                             raw = storage.get_bytes(obj_key).decode("utf-8", errors="ignore")
+                            doc_text = raw
                             clinical_texts.append(raw)
                             clinical_spans.append(
                                 FieldProvenance(
@@ -1092,6 +1101,7 @@ def clinical_alignment_node(
 
             if not extracted and d.get("text_content"):
                 raw = str(d["text_content"])
+                doc_text = raw
                 clinical_texts.append(raw)
                 clinical_spans.append(
                     FieldProvenance(
@@ -1103,8 +1113,32 @@ def clinical_alignment_node(
                     )
                 )
 
+            dtype = str(d.get("doc_type", "")).upper()
+            fname = str(d.get("file_name", "")).lower()
+            if (
+                dtype in (DocumentType.DISCHARGE_SUMMARY.value, "DISCHARGE_SUMMARY")
+                or "discharge" in fname
+                or "summary" in fname
+                or "discharge" in doc_text.lower()
+            ) and doc_text:
+                analysis = align_engine.parse_discharge_summary(doc_text)
+                disch_analyses.append(analysis)
+
         combined_text = "\n".join(clinical_texts)
         text_lower = combined_text.lower()
+
+        primary_icd_codes = [c for da in disch_analyses for c in da.primary_icd_codes]
+        secondary_icd_codes = [c for da in disch_analyses for c in da.secondary_icd_codes]
+        all_disch_icd = [c for da in disch_analyses for c in da.all_icd_codes]
+        hospital_course_texts = [da.hospital_course_text for da in disch_analyses if da.hospital_course_text]
+        procedures_performed_texts = [da.procedures_performed_text for da in disch_analyses if da.procedures_performed_text]
+        primary_diag_texts = [da.primary_diagnosis_text for da in disch_analyses if da.primary_diagnosis_text]
+        secondary_diag_texts = [da.secondary_diagnosis_text for da in disch_analyses if da.secondary_diagnosis_text]
+        has_lab = any(da.has_lab_evaluation for da in disch_analyses)
+        has_img = any(da.has_imaging_studies for da in disch_analyses)
+        has_stay = any(da.has_inpatient_stay for da in disch_analyses)
+        admit_date = next((da.admission_date for da in disch_analyses if da.admission_date), None)
+        discharge_date = next((da.discharge_date for da in disch_analyses if da.discharge_date), None)
 
         pol_cov = state.get("policy_coverage_summary") or {}
         pa_present = bool(
@@ -1117,14 +1151,24 @@ def clinical_alignment_node(
         cpt_term_map = {
             "99213": ("99213", "office visit", "outpatient visit", "exam", "evaluation", "established patient", "follow-up", "primary care"),
             "99214": ("99214", "office visit", "moderate complexity", "established patient", "outpatient"),
+            "99215": ("99215", "office visit", "high complexity", "established patient", "outpatient"),
+            "99284": ("99284", "emergency", "ed visit", "emergency department"),
+            "99291": ("99291", "critical care", "intensive care", "icu"),
             "93000": ("93000", "ecg", "ekg", "electrocardiogram", "rhythm", "sinus", "cardiac"),
+            "93306": ("93306", "echo", "echocardiogram", "echocardiography", "cardiac ultrasound"),
             "44970": ("44970", "appendectomy", "appendix", "appendicitis"),
-            "80053": ("80053", "metabolic panel", "cmp", "electrolytes", "renal", "hepatic"),
-            "70553": ("70553", "mri", "brain", "resonance", "neuro"),
-            "27447": ("27447", "knee arthroplasty", "tka", "knee replacement", "osteoarthritis"),
+            "80053": ("80053", "metabolic panel", "cmp", "electrolytes", "renal", "hepatic", "laboratory evaluation", "lab workup", "diagnostic workup"),
+            "36415": ("36415", "venipuncture", "blood draw", "phlebotomy", "venous blood", "laboratory evaluation", "lab workup", "diagnostic workup"),
+            "70553": ("70553", "mri", "brain", "resonance", "neuro", "imaging studies"),
+            "71045": ("71045", "chest x-ray", "chest radiograph", "cxr", "radiography single view", "imaging studies"),
+            "71046": ("71046", "chest x-ray", "chest radiograph", "cxr", "radiography 2 views", "imaging studies"),
+            "71250": ("71250", "ct thorax", "ct chest", "computed tomography", "imaging studies"),
+            "27447": ("27447", "knee arthroplasty", "tka", "knee replacement", "osteoarthritis", "condyle"),
             "47562": ("47562", "cholecystectomy", "laparoscopic", "gallbladder", "cholecystitis"),
-            "71045": ("71045", "chest x-ray", "chest radiograph", "cxr", "radiography single view"),
+            "43239": ("43239", "esophagogastroduodenoscopy", "egd", "endoscopy", "biopsy", "upper gi"),
+            "33533": ("33533", "cabg", "coronary artery bypass", "bypass graft", "coronary artery"),
             "49000": ("49000", "laparotomy", "exploratory laparotomy", "acute abdomen"),
+            "90837": ("90837", "psychotherapy", "therapy session", "psychotherapy session", "mental health", "behavioral"),
             "0120": ("0120", "room and board", "semi-private", "inpatient", "admission"),
         }
 
@@ -1136,6 +1180,9 @@ def clinical_alignment_node(
             for c in raw_icd
             if c
         ]
+        for c in all_disch_icd:
+            if c not in icd_codes:
+                icd_codes.append(c)
 
         for idx, l in enumerate(raw_service_lines):
             line_no = int(l.get("line_number", idx + 1))
@@ -1152,13 +1199,25 @@ def clinical_alignment_node(
                 room_and_board_lines.append((line_no, code, units, amt))
 
             terms = cpt_term_map.get(code.replace("REV_", ""), (code,))
-            found = any(t in text_lower for t in terms) or (code and code.lower() in text_lower)
+            in_terms = any(t in text_lower for t in terms) or (code and code.lower() in text_lower)
+            in_procs = any(code.lower() in p.lower() or any(t in p.lower() for t in terms) for p in procedures_performed_texts)
+            in_course = any(code.lower() in hc.lower() or any(t in hc.lower() for t in terms) for hc in hospital_course_texts)
+            modality_substantiated = (
+                (modality == ServiceModality.LABORATORY_TEST and has_lab)
+                or (modality == ServiceModality.DIAGNOSTIC_IMAGING and has_img)
+                or (modality in (ServiceModality.MEDICAL_VISIT_OR_EVAL, ServiceModality.ROOM_AND_BOARD) and has_stay)
+            )
+
+            found = in_terms or in_procs or in_course or modality_substantiated
 
             if found:
                 perf_status = PerformanceEvidenceStatus.DIRECTLY_DOCUMENTED_PERFORMANCE
                 ind_status = ClinicalIndicationStatus.EXPLICITLY_INDICATED
                 matching_spans = [
-                    s for s in clinical_spans if any(t in s.text_content.lower() for t in terms) or code.lower() in s.text_content.lower()
+                    s for s in clinical_spans
+                    if any(t in s.text_content.lower() for t in terms)
+                    or code.lower() in s.text_content.lower()
+                    or any(k in s.text_content.lower() for k in ("hospital course", "discharge summary", "final diagnoses", "primary", "secondary"))
                 ]
                 if not matching_spans and clinical_spans:
                     matching_spans = [clinical_spans[0]]
@@ -1192,6 +1251,11 @@ def clinical_alignment_node(
                 supporting_spans=matching_spans,
                 clinical_notes_text=combined_text,
                 diagnosis_codes=icd_codes,
+                primary_icd10_codes=primary_icd_codes,
+                secondary_icd10_codes=secondary_icd_codes,
+                primary_diagnosis_text=" ".join(primary_diag_texts),
+                secondary_diagnosis_text=" ".join(secondary_diag_texts),
+                hospital_course_text=" ".join(hospital_course_texts),
             )
             line_assessments.append(line_ev)
 
@@ -1199,10 +1263,26 @@ def clinical_alignment_node(
         bed_day_rec: BedDayReconciliation | None = None
         if room_and_board_lines:
             total_bed_days = sum(units for _, _, units, _ in room_and_board_lines)
+            rule = (
+                BedDayBillingRuleContract(
+                    rule_id="BR-ACUTE-INP-01",
+                    rule_version="2026.1",
+                    facility_type="INPATIENT_ACUTE",
+                    claim_type="INPATIENT",
+                    effective_date=date(2025, 1, 1),
+                    is_approved=True,
+                    convention=FacilityBillingConvention.CALENDAR_DAY_SPAN,
+                )
+                if (admit_date and discharge_date)
+                else None
+            )
             bed_day_rec = align_engine.reconcile_bed_days(
                 billed_bed_days=total_bed_days,
-                admission_datetime=None,
-                discharge_datetime=None,
+                admission_date=admit_date,
+                discharge_date=discharge_date,
+                billing_rule=rule,
+                claim_facility_type="INPATIENT_ACUTE" if rule else None,
+                claim_type="INPATIENT" if rule else None,
             )
 
         # 7. Aggregate with fail-closed error propagation

@@ -7,6 +7,8 @@ Executes deterministic logic with zero generative LLM decisioning.
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, ClassVar, Protocol, runtime_checkable
 
@@ -29,7 +31,100 @@ from medishield.domain.contracts import (
     ServiceModality,
     build_clinical_alignment_output,
 )
+from medishield.domain.faithfulness import parse_medical_date
 from medishield.domain.provenance import FieldProvenance
+
+
+@dataclass
+class DischargeSummaryAnalysis:
+    """Structured extraction of authoritative discharge summary sections (Spec 01 § 4, ADR-015)."""
+
+    primary_diagnosis_text: str = ""
+    primary_icd_codes: list[str] = field(default_factory=list)
+    secondary_diagnosis_text: str = ""
+    secondary_icd_codes: list[str] = field(default_factory=list)
+    procedures_performed_text: str = ""
+    procedures_cpt_codes: list[str] = field(default_factory=list)
+    hospital_course_text: str = ""
+    hospital_course_icd_codes: list[str] = field(default_factory=list)
+    hospital_course_cpt_codes: list[str] = field(default_factory=list)
+    all_icd_codes: list[str] = field(default_factory=list)
+    all_cpt_codes: list[str] = field(default_factory=list)
+    has_lab_evaluation: bool = False
+    has_imaging_studies: bool = False
+    has_inpatient_stay: bool = False
+    admission_date: date | None = None
+    discharge_date: date | None = None
+
+
+class DischargeSummaryParser:
+    """Authoritative deterministic parser for hospital discharge summaries (ADR-015, Spec 01 § 4)."""
+
+    ICD_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"\b([A-TV-Z][0-9]{2}(?:\.[0-9]{1,4})?)\b")
+    CPT_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"\b([0-9]{5})\b")
+
+    @classmethod
+    def parse(cls, text: str) -> DischargeSummaryAnalysis:
+        if not text:
+            return DischargeSummaryAnalysis()
+
+        patterns = {
+            "primary": r"(?:FINAL\s*DIAGNOSES?[\s\S]*?)?(?:Primary(?:\s+Diagnosis)?\s*[:\-]?\s*)([^\n]+(?:\n(?!(?:Secondary|PROCEDURE|HOSPITAL|DISCHARGE))[^\n]+)?)",
+            "secondary": r"(?:Secondary(?:\s+Diagnosis)?\s*[:\-]?\s*)([^\n]+(?:\n(?!(?:PROCEDURE|HOSPITAL|DISCHARGE|Primary))[^\n]+)?)",
+            "procedures": r"(?:PROCEDURES?\s*(?:PERFORMED)?\s*[:\-]?\s*)([^\n]+(?:\n(?!(?:HOSPITAL|DISCHARGE|FINAL|Primary))[^\n]+)*)",
+            "hospital_course": r"(?:HOSPITAL\s*COURSE\s*[:\-]?\s*)([^\n]+(?:\n(?!(?:DISCHARGE|FINAL|PROCEDURE))[^\n]+)*)",
+        }
+        extracted: dict[str, str] = {}
+        for k, pat in patterns.items():
+            m = re.search(pat, text, re.IGNORECASE)
+            extracted[k] = m.group(1).strip() if m else ""
+
+        def _extract_icd(t: str) -> list[str]:
+            codes = cls.ICD_PATTERN.findall(t)
+            # Normalize OCR misreadings of ICD letter 'I' as digit '1' in e.g. ICD-10: 110 -> I10
+            for m in re.finditer(r"ICD(?:-10)?\s*[:\-]?\s*1([0-9]{2}(?:\.[0-9]{1,4})?)", t, re.IGNORECASE):
+                cand = f"I{m.group(1)}"
+                if cand not in codes:
+                    codes.append(cand)
+            return list(dict.fromkeys(codes))
+
+        p_icd = _extract_icd(extracted["primary"])
+        s_icd = _extract_icd(extracted["secondary"])
+        c_icd = _extract_icd(extracted["hospital_course"])
+        all_icd = list(dict.fromkeys(p_icd + s_icd + c_icd))
+
+        proc_cpt = cls.CPT_PATTERN.findall(extracted["procedures"])
+        course_cpt = cls.CPT_PATTERN.findall(extracted["hospital_course"])
+        all_cpt = list(dict.fromkeys(proc_cpt + course_cpt))
+
+        h_course_lower = extracted["hospital_course"].lower()
+        has_lab = any(w in h_course_lower for w in ("laboratory", "lab evaluation", "lab workup", "diagnostic workup", "metabolic panel"))
+        has_imaging = any(w in h_course_lower for w in ("imaging", "radiology", "x-ray", "mri", "ct scan", "ultrasound", "echocardiogram", "diagnostic workup"))
+        has_stay = any(w in h_course_lower for w in ("admitted", "hospitalization", "inpatient", "discharge", "vital signs", "hospital stay"))
+
+        admit_match = re.search(r"(?:Admit(?:Date)?|Admission\s*Date)\s*[:\-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})", text, re.IGNORECASE)
+        disch_match = re.search(r"(?:Discharge\s*Date)\s*[:\-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})", text, re.IGNORECASE)
+        parsed_admit = parse_medical_date(admit_match.group(1)) if admit_match else None
+        parsed_disch = parse_medical_date(disch_match.group(1)) if disch_match else None
+
+        return DischargeSummaryAnalysis(
+            primary_diagnosis_text=extracted["primary"],
+            primary_icd_codes=p_icd,
+            secondary_diagnosis_text=extracted["secondary"],
+            secondary_icd_codes=s_icd,
+            procedures_performed_text=extracted["procedures"],
+            procedures_cpt_codes=proc_cpt,
+            hospital_course_text=extracted["hospital_course"],
+            hospital_course_icd_codes=c_icd,
+            hospital_course_cpt_codes=course_cpt,
+            all_icd_codes=all_icd,
+            all_cpt_codes=all_cpt,
+            has_lab_evaluation=has_lab,
+            has_imaging_studies=has_imaging,
+            has_inpatient_stay=has_stay,
+            admission_date=parsed_admit,
+            discharge_date=parsed_disch,
+        )
 
 
 @runtime_checkable
@@ -207,6 +302,97 @@ class DeterministicClinicalAlignmentEngine:
                 }
             ],
         },
+        "33533": {
+            "guideline_id": "LCD-33533-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Coronary Artery Bypass Graft (CABG)",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "mandatory_criteria": [
+                {
+                    "criterion_id": "CRIT-33533-01",
+                    "description": "Documented coronary artery disease, multivessel disease, or angina pectoris",
+                }
+            ],
+        },
+        "36415": {
+            "guideline_id": "LCD-36415-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Routine Venipuncture for Laboratory Specimen Collection",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "mandatory_criteria": [
+                {
+                    "criterion_id": "CRIT-36415-01",
+                    "description": "Documented physician order for blood specimen or diagnostic laboratory workup",
+                }
+            ],
+        },
+        "43239": {
+            "guideline_id": "LCD-43239-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Esophagogastroduodenoscopy (EGD) with Biopsy",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "mandatory_criteria": [
+                {
+                    "criterion_id": "CRIT-43239-01",
+                    "description": "Documented dyspepsia, GERD, abdominal pain, gastrointestinal bleeding, or ulcer evaluation",
+                }
+            ],
+        },
+        "90837": {
+            "guideline_id": "LCD-90837-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Psychotherapy Services - 60 Minutes",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "mandatory_criteria": [
+                {
+                    "criterion_id": "CRIT-90837-01",
+                    "description": "Documented psychiatric evaluation, depressive disorder, anxiety, or behavioral health management",
+                }
+            ],
+        },
+        "71046": {
+            "guideline_id": "LCD-71046-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Chest Radiography Two Views",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "mandatory_criteria": [
+                {
+                    "criterion_id": "CRIT-71046-01",
+                    "description": "Documented respiratory symptoms, pulmonary evaluation, or chest trauma",
+                }
+            ],
+        },
+        "93306": {
+            "guideline_id": "LCD-93306-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Transthoracic Echocardiography with Doppler",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "mandatory_criteria": [
+                {
+                    "criterion_id": "CRIT-93306-01",
+                    "description": "Documented cardiac symptoms, murmur, heart failure, or ischemic heart disease assessment",
+                }
+            ],
+        },
+        "99215": {
+            "guideline_id": "LCD-99215-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Evaluation and Management Services - Level 5 Established Patient",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "mandatory_criteria": [
+                {
+                    "criterion_id": "CRIT-99215-01",
+                    "description": "Documented high complexity medical decision making or >= 40 minutes visit time",
+                }
+            ],
+        },
     }
 
     # ── Standard Clinical Diagnosis-to-Procedure Indication Map ─────────────
@@ -236,7 +422,42 @@ class DeterministicClinicalAlignmentEngine:
             "anatomy": "Coronary Arteries / Cardiovascular",
             "contraindicated_incompatible_prefixes": ("S52", "F32", "M17"),
         },
+        "43239": {
+            "name": "Esophagogastroduodenoscopy (EGD) with Biopsy",
+            "valid_icd_prefixes": ("K21", "K29", "K25", "K26", "K27", "R10", "K92", "K30"),
+            "anatomy": "Upper Gastrointestinal Tract / Esophagus / Stomach",
+            "contraindicated_incompatible_prefixes": ("S52", "M17"),
+        },
+        "90837": {
+            "name": "Psychotherapy 60 min",
+            "valid_icd_prefixes": ("F32", "F33", "F41", "F43", "F31", "F10", "F90"),
+            "anatomy": "Mental / Behavioral Health",
+            "contraindicated_incompatible_prefixes": ("S52", "M17"),
+        },
+        "93306": {
+            "name": "Transthoracic Echocardiography",
+            "valid_icd_prefixes": ("I25", "I50", "I20", "I21", "I48", "I34", "I35", "R00", "R01", "R07"),
+            "anatomy": "Heart / Cardiovascular",
+            "contraindicated_incompatible_prefixes": ("S52", "M17"),
+        },
+        "36415": {
+            "name": "Venipuncture for Specimen Collection",
+            "valid_icd_prefixes": ("I", "E", "K", "J", "M", "N", "R", "F", "S", "G"),
+            "anatomy": "Venous System / Diagnostic Workup",
+            "contraindicated_incompatible_prefixes": (),
+        },
+        "71046": {
+            "name": "Chest Radiography 2 Views",
+            "valid_icd_prefixes": ("J", "R05", "R06", "R07", "I25", "I50"),
+            "anatomy": "Thorax / Lungs",
+            "contraindicated_incompatible_prefixes": (),
+        },
     }
+
+    @classmethod
+    def parse_discharge_summary(cls, text: str) -> DischargeSummaryAnalysis:
+        """Parses structured sections (Primary, Secondary, Hospital Course, Procedures) from discharge summary."""
+        return DischargeSummaryParser.parse(text)
 
     @classmethod
     def classify_modality(cls, service_code: str) -> ServiceModality:
@@ -564,6 +785,12 @@ class DeterministicClinicalAlignmentEngine:
         clinical_notes_text: str | None = None,
         diagnosis_codes: list[str] | None = None,
         guideline_repo: ClinicalGuidelineRepository | None = None,
+        # Authoritative discharge summary section inputs (Spec 01 § 4, ADR-015)
+        primary_icd10_codes: list[str] | None = None,
+        secondary_icd10_codes: list[str] | None = None,
+        primary_diagnosis_text: str | None = None,
+        secondary_diagnosis_text: str | None = None,
+        hospital_course_text: str | None = None,
     ) -> LineClinicalEvidence:
         """
         Deterministically evaluates clinical alignment for an individual claim line.
@@ -690,25 +917,43 @@ class DeterministicClinicalAlignmentEngine:
         )
         if diag_rule:
             proc_name = diag_rule["name"]
+            all_eval_diags: list[str] = []
             if diagnosis_codes:
-                clean_diag = [str(d).upper().replace(".", "").strip() for d in diagnosis_codes if d]
+                all_eval_diags.extend(diagnosis_codes)
+            if primary_icd10_codes:
+                all_eval_diags.extend(primary_icd10_codes)
+            if secondary_icd10_codes:
+                all_eval_diags.extend(secondary_icd10_codes)
+
+            has_matching_diag = False
+            if all_eval_diags:
+                clean_diag = [str(d).upper().replace(".", "").strip() for d in all_eval_diags if d]
                 valid_prefixes = tuple(p.replace(".", "").upper() for p in diag_rule["valid_icd_prefixes"])
                 has_matching_diag = any(any(d.startswith(p) for p in valid_prefixes) for d in clean_diag)
 
-                if not has_matching_diag:
-                    resolved_indication = ClinicalIndicationStatus.NO_DOCUMENTED_INDICATION
-                    diag_str = ", ".join(diagnosis_codes)
-                    discrepancy_description = (
-                        f"Diagnosis-procedure clinical misalignment: Billed procedure CPT {service_code} "
-                        f"({proc_name}) is unindicated for documented diagnosis code(s) {diag_str}; "
-                        f"no supporting clinical indication for {diag_rule['anatomy']} exists in clinical documentation."
-                    )
-                    clinical_finding_summary = discrepancy_description
+            # Check if condition anatomy or diagnosis keywords are in primary, secondary, or hospital course text
+            diag_keywords = {
+                "27447": ("knee", "osteoarthritis", "arthroplasty", "joint disease", "gonarthrosis", "condyle", "m17"),
+                "44970": ("appendectomy", "appendix", "appendicitis", "lower right abdominal", "rlq", "k35"),
+                "47562": ("cholecystectomy", "cholecystitis", "gallbladder", "cholelithiasis", "biliary", "k80", "k81"),
+                "33533": ("coronary", "cad", "angina", "myocardial", "ischemic heart", "bypass", "i25"),
+                "43239": ("endoscopy", "egd", "gastritis", "dyspepsia", "gerd", "ulcer", "upper gi", "biopsy", "k21"),
+                "90837": ("psychotherapy", "depression", "depressive", "anxiety", "mental health", "behavioral", "f32"),
+            }
+            code_clean = service_code.strip().replace("REV_", "")
+            kw_candidates = diag_keywords.get(code_clean, ())
+            clin_context_text = f"{primary_diagnosis_text or ''} {secondary_diagnosis_text or ''} {hospital_course_text or ''} {clinical_notes_text or ''}".lower()
+            text_indicated = any(kw in clin_context_text for kw in kw_candidates)
+
+            if has_matching_diag or text_indicated:
+                resolved_indication = ClinicalIndicationStatus.EXPLICITLY_INDICATED
+                discrepancy_description = None
             else:
                 resolved_indication = ClinicalIndicationStatus.NO_DOCUMENTED_INDICATION
+                diag_str = ", ".join(all_eval_diags) if all_eval_diags else "None documented"
                 discrepancy_description = (
                     f"Diagnosis-procedure clinical misalignment: Billed procedure CPT {service_code} "
-                    f"({proc_name}) has no documented diagnosis codes; "
+                    f"({proc_name}) is unindicated for documented diagnosis code(s) {diag_str}; "
                     f"no supporting clinical indication for {diag_rule['anatomy']} exists in clinical documentation."
                 )
                 clinical_finding_summary = discrepancy_description
@@ -799,6 +1044,8 @@ class DeterministicClinicalAlignmentEngine:
             prior_auth_verification=resolved_prior_auth_ver,
             repeat_service_status=resolved_repeat,
             supporting_spans=spans,
+            primary_icd10_codes=list(primary_icd10_codes or []),
+            secondary_icd10_codes=list(secondary_icd10_codes or []),
             line_verdict=line_verdict,
             clinical_finding_summary=clinical_finding_summary or f"Clinical evaluation completed: verdict {line_verdict.value}.",
             discrepancy_flag=discrepancy_flag,
