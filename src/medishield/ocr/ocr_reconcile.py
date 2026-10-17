@@ -728,7 +728,9 @@ class GeminiVisionClient:
                     contents.insert(0, types.Part.from_bytes(data=image_bytes, mime_type="image/png"))
 
                 import time
-                models_to_try = [settings.GEMINI_MODEL, "gemini-3.5-flash"]
+                models_to_try = [settings.GEMINI_MODEL] + [
+                    m for m in getattr(settings, "GEMINI_FALLBACK_MODELS", []) if m != settings.GEMINI_MODEL
+                ]
                 response = None
                 last_err = None
                 retries = 0
@@ -748,9 +750,16 @@ class GeminiVisionClient:
                             break
                         except Exception as e:  # noqa: BLE001
                             last_err = e
-                            if "503" in str(e) or "UNAVAILABLE" in str(e):
+                            err_str = str(e)
+                            if "503" in err_str or "UNAVAILABLE" in err_str:
                                 time.sleep(1.5)
                                 continue
+                            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+                                logger.warning(
+                                    "Gemini model '%s' rate limited (429/quota). Cascading to next fallback model.",
+                                    m,
+                                )
+                                break
                             break
                     if response is not None:
                         break
@@ -833,7 +842,9 @@ class GeminiVisionClient:
                 contents.insert(0, types.Part.from_bytes(data=image_bytes, mime_type="image/png"))
 
                 import time
-                models_to_try = [settings.GEMINI_MODEL, "gemini-3.5-flash"]
+                models_to_try = [settings.GEMINI_MODEL] + [
+                    m for m in getattr(settings, "GEMINI_FALLBACK_MODELS", []) if m != settings.GEMINI_MODEL
+                ]
                 response = None
                 last_err = None
                 active_model = settings.GEMINI_MODEL
@@ -855,9 +866,16 @@ class GeminiVisionClient:
                             break
                         except Exception as e:  # noqa: BLE001
                             last_err = e
-                            if "503" in str(e) or "UNAVAILABLE" in str(e):
+                            err_str = str(e)
+                            if "503" in err_str or "UNAVAILABLE" in err_str:
                                 time.sleep(1.5)
                                 continue
+                            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+                                logger.warning(
+                                    "Gemini model '%s' rate limited (429/quota). Cascading to next fallback model.",
+                                    m,
+                                )
+                                break
                             break
                     if response is not None:
                         break
@@ -956,48 +974,69 @@ class HuggingFaceVisionClient:
                 b64_img = base64.b64encode(image_bytes).decode("utf-8")
                 user_content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_img}"}})
 
-            url = f"https://router.huggingface.co/hf-inference/models/{settings.HF_VLM_MODEL}/v1/chat/completions"
-            payload = {
-                "model": settings.HF_VLM_MODEL,
-                "messages": [{"role": "user", "content": user_content}],
-                "max_tokens": 1000,
-                "temperature": 0.0,
-                "response_format": {"type": "json_object"},
-            }
+            models_to_try = [settings.HF_VLM_MODEL] + [
+                m for m in getattr(settings, "HF_VLM_FALLBACK_MODELS", []) if m != settings.HF_VLM_MODEL
+            ]
+            last_hf_err: Exception | None = None
+            for model_name in models_to_try:
+                url = f"https://router.huggingface.co/hf-inference/models/{model_name}/v1/chat/completions"
+                payload = {
+                    "model": model_name,
+                    "messages": [{"role": "user", "content": user_content}],
+                    "max_tokens": 1000,
+                    "temperature": 0.0,
+                    "response_format": {"type": "json_object"},
+                }
+                try:
+                    response = requests.post(url, headers=headers, json=payload, timeout=45)
+                    if response.status_code in (401, 403):
+                        raise VLMProviderError("HuggingFace", "TOKEN_EXPIRED", response.status_code, response.text)
+                    if response.status_code == 429:
+                        logger.warning(
+                            "HuggingFace model '%s' rate limited (429). Cascading to next fallback model.",
+                            model_name,
+                        )
+                        last_hf_err = VLMProviderError("HuggingFace", "RATE_LIMIT_EXCEEDED", 429, response.text)
+                        continue
+                    response.raise_for_status()
 
-            try:
-                response = requests.post(url, headers=headers, json=payload, timeout=45)
-                if response.status_code in (401, 403):
-                    raise VLMProviderError("HuggingFace", "TOKEN_EXPIRED", response.status_code, response.text)
-                if response.status_code == 429:
-                    raise VLMProviderError("HuggingFace", "RATE_LIMIT_EXCEEDED", 429, response.text)
-                response.raise_for_status()
+                    resp_data = response.json()
+                    usage = resp_data.get("usage")
+                    if isinstance(usage, dict):
+                        tokens_to_set = {}
+                        for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                            val = usage.get(k)
+                            if isinstance(val, int) and not isinstance(val, bool) and val >= 0:
+                                tokens_to_set[k] = val
+                        if tokens_to_set:
+                            span.set_summary(**tokens_to_set)
 
-                resp_data = response.json()
-                usage = resp_data.get("usage")
-                if isinstance(usage, dict):
-                    tokens_to_set = {}
-                    for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
-                        val = usage.get(k)
-                        if isinstance(val, int) and not isinstance(val, bool) and val >= 0:
-                            tokens_to_set[k] = val
-                    if tokens_to_set:
-                        span.set_summary(**tokens_to_set)
+                    content = resp_data["choices"][0]["message"]["content"]
+                    res_json = json.loads(content)
+                    span.set_summary(status="SUCCESS")
+                    return res_json.get("fields", {})
+                except VLMProviderError as exc:
+                    if exc.reason == "TOKEN_EXPIRED":
+                        raise
+                    last_hf_err = exc
+                    continue
+                except requests.exceptions.Timeout as exc:
+                    last_hf_err = VLMProviderError("HuggingFace", "TIMEOUT", None, str(exc))
+                    continue
+                except requests.exceptions.HTTPError as exc:
+                    status = exc.response.status_code if exc.response is not None else None
+                    reason = "TOKEN_EXPIRED" if status in (401, 403) else ("RATE_LIMIT_EXCEEDED" if status == 429 else "HTTP_ERROR")
+                    if reason == "TOKEN_EXPIRED":
+                        raise VLMProviderError("HuggingFace", reason, status, str(exc)) from exc
+                    last_hf_err = VLMProviderError("HuggingFace", reason, status, str(exc))
+                    continue
+                except Exception as exc:  # noqa: BLE001
+                    last_hf_err = VLMProviderError("HuggingFace", "EXECUTION_ERROR", None, str(exc))
+                    continue
 
-                content = resp_data["choices"][0]["message"]["content"]
-                res_json = json.loads(content)
-                span.set_summary(status="SUCCESS")
-                return res_json.get("fields", {})
-            except requests.exceptions.Timeout as exc:
-                raise VLMProviderError("HuggingFace", "TIMEOUT", None, str(exc)) from exc
-            except requests.exceptions.HTTPError as exc:
-                status = exc.response.status_code if exc.response is not None else None
-                reason = "TOKEN_EXPIRED" if status in (401, 403) else ("RATE_LIMIT_EXCEEDED" if status == 429 else "HTTP_ERROR")
-                raise VLMProviderError("HuggingFace", reason, status, str(exc)) from exc
-            except VLMProviderError:
-                raise
-            except Exception as exc:
-                raise VLMProviderError("HuggingFace", "EXECUTION_ERROR", None, str(exc)) from exc
+            if last_hf_err is not None:
+                raise last_hf_err
+            raise VLMProviderError("HuggingFace", "EXECUTION_ERROR", None, "All HuggingFace models exhausted.")
 
     def cross_check_table(
         self,
@@ -1047,54 +1086,78 @@ class HuggingFaceVisionClient:
                 {"type": "text", "text": prompt},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_img}"}},
             ]
-            url = f"https://router.huggingface.co/hf-inference/models/{settings.HF_VLM_MODEL}/v1/chat/completions"
-            payload = {
-                "model": settings.HF_VLM_MODEL,
-                "messages": [{"role": "user", "content": user_content}],
-                "max_tokens": 1000,
-                "temperature": 0.0,
-                "response_format": {"type": "json_object"},
-            }
-            try:
-                resp = requests.post(url, headers=headers, json=payload, timeout=45)
-                if resp.status_code in (401, 403):
-                    raise VLMProviderError("HuggingFace", "TOKEN_EXPIRED", resp.status_code, resp.text)
-                if resp.status_code == 429:
-                    raise VLMProviderError("HuggingFace", "RATE_LIMIT_EXCEEDED", 429, resp.text)
-                resp.raise_for_status()
+            models_to_try = [settings.HF_VLM_MODEL] + [
+                m for m in getattr(settings, "HF_VLM_FALLBACK_MODELS", []) if m != settings.HF_VLM_MODEL
+            ]
+            last_hf_err: Exception | None = None
+            active_hf_model = settings.HF_VLM_MODEL
+            for model_name in models_to_try:
+                url = f"https://router.huggingface.co/hf-inference/models/{model_name}/v1/chat/completions"
+                payload = {
+                    "model": model_name,
+                    "messages": [{"role": "user", "content": user_content}],
+                    "max_tokens": 1000,
+                    "temperature": 0.0,
+                    "response_format": {"type": "json_object"},
+                }
+                try:
+                    resp = requests.post(url, headers=headers, json=payload, timeout=45)
+                    if resp.status_code in (401, 403):
+                        raise VLMProviderError("HuggingFace", "TOKEN_EXPIRED", resp.status_code, resp.text)
+                    if resp.status_code == 429:
+                        logger.warning(
+                            "HuggingFace model '%s' rate limited (429). Cascading to next fallback model.",
+                            model_name,
+                        )
+                        last_hf_err = VLMProviderError("HuggingFace", "RATE_LIMIT_EXCEEDED", 429, resp.text)
+                        continue
+                    resp.raise_for_status()
 
-                resp_data = resp.json()
-                usage = resp_data.get("usage")
-                if isinstance(usage, dict):
-                    tokens_to_set = {}
-                    for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
-                        val = usage.get(k)
-                        if isinstance(val, int) and not isinstance(val, bool) and val >= 0:
-                            tokens_to_set[k] = val
-                    if tokens_to_set:
-                        span.set_summary(**tokens_to_set)
+                    resp_data = resp.json()
+                    usage = resp_data.get("usage")
+                    if isinstance(usage, dict):
+                        tokens_to_set = {}
+                        for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                            val = usage.get(k)
+                            if isinstance(val, int) and not isinstance(val, bool) and val >= 0:
+                                tokens_to_set[k] = val
+                        if tokens_to_set:
+                            span.set_summary(**tokens_to_set)
 
-                content = resp_data["choices"][0]["message"]["content"]
-                res_json = json.loads(content)
-                span.set_summary(status="SUCCESS")
-                return _parse_vlm_candidate_rows(
-                    res_json,
-                    case_id=case_id,
-                    document_id=document_id,
-                    page_number=page_number,
-                    model_id="huggingface",
-                    model_version=settings.HF_VLM_MODEL,
-                )
-            except requests.exceptions.Timeout as exc:
-                raise VLMProviderError("HuggingFace", "TIMEOUT", None, str(exc)) from exc
-            except requests.exceptions.HTTPError as exc:
-                status = exc.response.status_code if exc.response is not None else None
-                reason = "TOKEN_EXPIRED" if status in (401, 403) else ("RATE_LIMIT_EXCEEDED" if status == 429 else "HTTP_ERROR")
-                raise VLMProviderError("HuggingFace", reason, status, str(exc)) from exc
-            except VLMProviderError:
-                raise
-            except Exception as exc:
-                raise VLMProviderError("HuggingFace", "EXECUTION_ERROR", None, str(exc)) from exc
+                    content = resp_data["choices"][0]["message"]["content"]
+                    res_json = json.loads(content)
+                    span.set_summary(status="SUCCESS")
+                    active_hf_model = model_name
+                    return _parse_vlm_candidate_rows(
+                        res_json,
+                        case_id=case_id,
+                        document_id=document_id,
+                        page_number=page_number,
+                        model_id="huggingface",
+                        model_version=active_hf_model,
+                    )
+                except VLMProviderError as exc:
+                    if exc.reason == "TOKEN_EXPIRED":
+                        raise
+                    last_hf_err = exc
+                    continue
+                except requests.exceptions.Timeout as exc:
+                    last_hf_err = VLMProviderError("HuggingFace", "TIMEOUT", None, str(exc))
+                    continue
+                except requests.exceptions.HTTPError as exc:
+                    status = exc.response.status_code if exc.response is not None else None
+                    reason = "TOKEN_EXPIRED" if status in (401, 403) else ("RATE_LIMIT_EXCEEDED" if status == 429 else "HTTP_ERROR")
+                    if reason == "TOKEN_EXPIRED":
+                        raise VLMProviderError("HuggingFace", reason, status, str(exc)) from exc
+                    last_hf_err = VLMProviderError("HuggingFace", reason, status, str(exc))
+                    continue
+                except Exception as exc:  # noqa: BLE001
+                    last_hf_err = VLMProviderError("HuggingFace", "EXECUTION_ERROR", None, str(exc))
+                    continue
+
+            if last_hf_err is not None:
+                raise last_hf_err
+            raise VLMProviderError("HuggingFace", "EXECUTION_ERROR", None, "All HuggingFace models exhausted.")
 
 
 class GroqVisionClient:
@@ -1144,50 +1207,72 @@ class GroqVisionClient:
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             }
-            payload = {
-                "model": settings.GROQ_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.0,
-                "response_format": {"type": "json_object"},
-            }
-            try:
-                resp = requests.post(
-                    f"{settings.GROQ_BASE_URL}/chat/completions",
-                    headers=headers,
-                    json=payload,
-                    timeout=settings.GROQ_TIMEOUT_SECONDS,
-                )
-                if resp.status_code in (401, 403):
-                    raise VLMProviderError("Groq", "TOKEN_EXPIRED", resp.status_code, resp.text)
-                if resp.status_code == 429:
-                    raise VLMProviderError("Groq", "RATE_LIMIT_EXCEEDED", 429, resp.text)
-                resp.raise_for_status()
+            models_to_try = [settings.GROQ_MODEL] + [
+                m for m in getattr(settings, "GROQ_FALLBACK_MODELS", []) if m != settings.GROQ_MODEL
+            ]
+            last_groq_err: Exception | None = None
+            for model_name in models_to_try:
+                payload = {
+                    "model": model_name,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.0,
+                    "response_format": {"type": "json_object"},
+                }
+                try:
+                    resp = requests.post(
+                        f"{settings.GROQ_BASE_URL}/chat/completions",
+                        headers=headers,
+                        json=payload,
+                        timeout=settings.GROQ_TIMEOUT_SECONDS,
+                    )
+                    if resp.status_code in (401, 403):
+                        raise VLMProviderError("Groq", "TOKEN_EXPIRED", resp.status_code, resp.text)
+                    if resp.status_code == 429:
+                        logger.warning(
+                            "Groq Vision model '%s' rate limited (429). Cascading to next fallback model.",
+                            model_name,
+                        )
+                        last_groq_err = VLMProviderError("Groq", "RATE_LIMIT_EXCEEDED", 429, resp.text)
+                        continue
+                    resp.raise_for_status()
 
-                resp_data = resp.json()
-                usage = resp_data.get("usage")
-                if isinstance(usage, dict):
-                    tokens_to_set = {}
-                    for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
-                        val = usage.get(k)
-                        if isinstance(val, int) and not isinstance(val, bool) and val >= 0:
-                            tokens_to_set[k] = val
-                    if tokens_to_set:
-                        span.set_summary(**tokens_to_set)
+                    resp_data = resp.json()
+                    usage = resp_data.get("usage")
+                    if isinstance(usage, dict):
+                        tokens_to_set = {}
+                        for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                            val = usage.get(k)
+                            if isinstance(val, int) and not isinstance(val, bool) and val >= 0:
+                                tokens_to_set[k] = val
+                        if tokens_to_set:
+                            span.set_summary(**tokens_to_set)
 
-                content = resp_data["choices"][0]["message"]["content"]
-                res_json = json.loads(content)
-                span.set_summary(status="SUCCESS")
-                return res_json.get("fields", {})
-            except requests.exceptions.Timeout as exc:
-                raise VLMProviderError("Groq", "TIMEOUT", None, str(exc)) from exc
-            except requests.exceptions.HTTPError as exc:
-                status = exc.response.status_code if exc.response is not None else None
-                reason = "TOKEN_EXPIRED" if status in (401, 403) else ("RATE_LIMIT_EXCEEDED" if status == 429 else "HTTP_ERROR")
-                raise VLMProviderError("Groq", reason, status, str(exc)) from exc
-            except VLMProviderError:
-                raise
-            except Exception as exc:
-                raise VLMProviderError("Groq", "EXECUTION_ERROR", None, str(exc)) from exc
+                    content = resp_data["choices"][0]["message"]["content"]
+                    res_json = json.loads(content)
+                    span.set_summary(status="SUCCESS")
+                    return res_json.get("fields", {})
+                except VLMProviderError as exc:
+                    if exc.reason == "TOKEN_EXPIRED":
+                        raise
+                    last_groq_err = exc
+                    continue
+                except requests.exceptions.Timeout as exc:
+                    last_groq_err = VLMProviderError("Groq", "TIMEOUT", None, str(exc))
+                    continue
+                except requests.exceptions.HTTPError as exc:
+                    status = exc.response.status_code if exc.response is not None else None
+                    reason = "TOKEN_EXPIRED" if status in (401, 403) else ("RATE_LIMIT_EXCEEDED" if status == 429 else "HTTP_ERROR")
+                    if reason == "TOKEN_EXPIRED":
+                        raise VLMProviderError("Groq", reason, status, str(exc)) from exc
+                    last_groq_err = VLMProviderError("Groq", reason, status, str(exc))
+                    continue
+                except Exception as exc:  # noqa: BLE001
+                    last_groq_err = VLMProviderError("Groq", "EXECUTION_ERROR", None, str(exc))
+                    continue
+
+            if last_groq_err is not None:
+                raise last_groq_err
+            raise VLMProviderError("Groq", "EXECUTION_ERROR", None, "All Groq Vision models exhausted.")
 
     def cross_check_table(
         self,
@@ -1247,52 +1332,81 @@ class GroqVisionClient:
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
                 }
-                payload = {
-                    "model": settings.GROQ_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.0,
-                    "response_format": {"type": "json_object"},
-                }
-                resp = requests.post(
-                    f"{settings.GROQ_BASE_URL}/chat/completions",
-                    headers=headers,
-                    json=payload,
-                    timeout=settings.GROQ_TIMEOUT_SECONDS,
-                )
-                if resp.status_code in (401, 403):
-                    raise VLMProviderError("Groq", "TOKEN_EXPIRED", resp.status_code, resp.text)
-                if resp.status_code == 429:
-                    raise VLMProviderError("Groq", "RATE_LIMIT_EXCEEDED", 429, resp.text)
-                resp.raise_for_status()
+                models_to_try = [settings.GROQ_MODEL] + [
+                    m for m in getattr(settings, "GROQ_FALLBACK_MODELS", []) if m != settings.GROQ_MODEL
+                ]
+                last_groq_err: Exception | None = None
+                active_groq_model = settings.GROQ_MODEL
+                for model_name in models_to_try:
+                    payload = {
+                        "model": model_name,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.0,
+                        "response_format": {"type": "json_object"},
+                    }
+                    try:
+                        resp = requests.post(
+                            f"{settings.GROQ_BASE_URL}/chat/completions",
+                            headers=headers,
+                            json=payload,
+                            timeout=settings.GROQ_TIMEOUT_SECONDS,
+                        )
+                        if resp.status_code in (401, 403):
+                            raise VLMProviderError("Groq", "TOKEN_EXPIRED", resp.status_code, resp.text)
+                        if resp.status_code == 429:
+                            logger.warning(
+                                "Groq Vision model '%s' rate limited (429). Cascading to next fallback model.",
+                                model_name,
+                            )
+                            last_groq_err = VLMProviderError("Groq", "RATE_LIMIT_EXCEEDED", 429, resp.text)
+                            continue
+                        resp.raise_for_status()
 
-                resp_data = resp.json()
-                usage = resp_data.get("usage")
-                if isinstance(usage, dict):
-                    tokens_to_set = {}
-                    for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
-                        val = usage.get(k)
-                        if isinstance(val, int) and not isinstance(val, bool) and val >= 0:
-                            tokens_to_set[k] = val
-                    if tokens_to_set:
-                        span.set_summary(**tokens_to_set)
+                        resp_data = resp.json()
+                        usage = resp_data.get("usage")
+                        if isinstance(usage, dict):
+                            tokens_to_set = {}
+                            for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                                val = usage.get(k)
+                                if isinstance(val, int) and not isinstance(val, bool) and val >= 0:
+                                    tokens_to_set[k] = val
+                            if tokens_to_set:
+                                span.set_summary(**tokens_to_set)
 
-                content = resp_data["choices"][0]["message"]["content"]
-                res_json = json.loads(content)
-                span.set_summary(status="SUCCESS")
-                return _parse_vlm_candidate_rows(
-                    res_json,
-                    case_id=case_id,
-                    document_id=document_id,
-                    page_number=page_number,
-                    model_id="groq",
-                    model_version=settings.GROQ_MODEL,
-                )
-        except requests.exceptions.Timeout as exc:
-            raise VLMProviderError("Groq", "TIMEOUT", None, str(exc)) from exc
-        except requests.exceptions.HTTPError as exc:
-            status = exc.response.status_code if exc.response is not None else None
-            reason = "TOKEN_EXPIRED" if status in (401, 403) else ("RATE_LIMIT_EXCEEDED" if status == 429 else "HTTP_ERROR")
-            raise VLMProviderError("Groq", reason, status, str(exc)) from exc
+                        content = resp_data["choices"][0]["message"]["content"]
+                        res_json = json.loads(content)
+                        span.set_summary(status="SUCCESS")
+                        active_groq_model = model_name
+                        return _parse_vlm_candidate_rows(
+                            res_json,
+                            case_id=case_id,
+                            document_id=document_id,
+                            page_number=page_number,
+                            model_id="groq",
+                            model_version=active_groq_model,
+                        )
+                    except VLMProviderError as exc:
+                        if exc.reason == "TOKEN_EXPIRED":
+                            raise
+                        last_groq_err = exc
+                        continue
+                    except requests.exceptions.Timeout as exc:
+                        last_groq_err = VLMProviderError("Groq", "TIMEOUT", None, str(exc))
+                        continue
+                    except requests.exceptions.HTTPError as exc:
+                        status = exc.response.status_code if exc.response is not None else None
+                        reason = "TOKEN_EXPIRED" if status in (401, 403) else ("RATE_LIMIT_EXCEEDED" if status == 429 else "HTTP_ERROR")
+                        if reason == "TOKEN_EXPIRED":
+                            raise VLMProviderError("Groq", reason, status, str(exc)) from exc
+                        last_groq_err = VLMProviderError("Groq", reason, status, str(exc))
+                        continue
+                    except Exception as exc:  # noqa: BLE001
+                        last_groq_err = VLMProviderError("Groq", "EXECUTION_ERROR", None, str(exc))
+                        continue
+
+                if last_groq_err is not None:
+                    raise last_groq_err
+                raise VLMProviderError("Groq", "EXECUTION_ERROR", None, "All Groq Vision models exhausted.")
         except VLMProviderError:
             raise
         except Exception as exc:

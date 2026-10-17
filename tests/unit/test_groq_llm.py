@@ -441,3 +441,90 @@ async def test_groq_client_async_fallback_success() -> None:
         assert client.fallback_used is True
         assert client.last_used_model == "openai/gpt-oss-20b"
         assert mock_post.call_count == 2
+
+
+def test_groq_client_multi_model_cascade_on_429() -> None:
+    """Proves that when 120B and 20B are rate-limited, GroqLLMClient cascades to 70B."""
+    client = GroqLLMClient(
+        api_key="gsk_test_mock_key",
+        model="openai/gpt-oss-120b",
+        fallback_models=["openai/gpt-oss-20b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
+    )
+
+    resp_429_1 = MagicMock(spec=httpx.Response, status_code=429, text="Rate limit 120B")
+    resp_429_2 = MagicMock(spec=httpx.Response, status_code=429, text="Rate limit 20B")
+    resp_200 = MagicMock(
+        spec=httpx.Response,
+        status_code=200,
+        json=lambda: {
+            "choices": [{"message": {"role": "assistant", "content": json.dumps({"cascade": "success"})}}],
+            "usage": {"total_tokens": 100},
+        },
+    )
+
+    err1 = httpx.HTTPStatusError("429", request=MagicMock(), response=resp_429_1)
+    err2 = httpx.HTTPStatusError("429", request=MagicMock(), response=resp_429_2)
+
+    with patch("httpx.Client.post", side_effect=[err1, err2, resp_200]) as mock_post:
+        res = client.generate_json("Prompt")
+
+        assert res == {"cascade": "success"}
+        assert client.last_used_model == "llama-3.3-70b-versatile"
+        assert client.fallback_used is True
+        assert mock_post.call_count == 3
+        # Assert model sequence in payloads
+        assert mock_post.call_args_list[0][1]["json"]["model"] == "openai/gpt-oss-120b"
+        assert mock_post.call_args_list[1][1]["json"]["model"] == "openai/gpt-oss-20b"
+        assert mock_post.call_args_list[2][1]["json"]["model"] == "llama-3.3-70b-versatile"
+
+
+@pytest.mark.asyncio
+async def test_groq_client_async_multi_model_cascade_on_429() -> None:
+    """Proves that async GroqLLMClient cascades across multiple models upon rate limits."""
+    client = GroqLLMClient(
+        api_key="gsk_test_mock_key",
+        model="openai/gpt-oss-120b",
+        fallback_models="openai/gpt-oss-20b,llama-3.3-70b-versatile,llama-3.1-8b-instant",
+    )
+
+    resp_429_1 = MagicMock(spec=httpx.Response, status_code=429, text="Rate limit 120B")
+    resp_429_2 = MagicMock(spec=httpx.Response, status_code=429, text="Rate limit 20B")
+    resp_200 = MagicMock(
+        spec=httpx.Response,
+        status_code=200,
+        json=lambda: {
+            "choices": [{"message": {"role": "assistant", "content": json.dumps({"async_cascade": True})}}],
+            "usage": {"total_tokens": 55},
+        },
+    )
+
+    err1 = httpx.HTTPStatusError("429", request=MagicMock(), response=resp_429_1)
+    err2 = httpx.HTTPStatusError("429", request=MagicMock(), response=resp_429_2)
+
+    with patch("httpx.AsyncClient.post", side_effect=[err1, err2, resp_200]) as mock_post:
+        res = await client.generate_json_async("Prompt async")
+
+        assert res == {"async_cascade": True}
+        assert client.last_used_model == "llama-3.3-70b-versatile"
+        assert client.fallback_used is True
+        assert mock_post.call_count == 3
+
+
+def test_groq_client_all_models_rate_limited_exhaustion() -> None:
+    """Proves that when all models in the cascade are rate-limited, final error is raised."""
+    client = GroqLLMClient(
+        api_key="gsk_test_mock_key",
+        model="openai/gpt-oss-120b",
+        fallback_models=["openai/gpt-oss-20b", "llama-3.3-70b-versatile"],
+    )
+
+    resp_429 = MagicMock(spec=httpx.Response, status_code=429, text="Rate limited across board")
+    err = httpx.HTTPStatusError("429", request=MagicMock(), response=resp_429)
+
+    with (
+        patch("httpx.Client.post", side_effect=[err, err, err]) as mock_post,
+        pytest.raises(GroqLLMError, match="HTTP 429"),
+    ):
+        client.generate_json("Prompt")
+
+    assert mock_post.call_count == 3

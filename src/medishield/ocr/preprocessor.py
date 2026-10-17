@@ -458,17 +458,44 @@ class OCRPreprocessorEngine:
                         inputs={},
                     ) as vlm_span:
                         vlm_span.set_summary(provider="google")
-                        response = client.models.generate_content(
-                            model=settings.GEMINI_MODEL,
-                            contents=[
-                                types.Part.from_bytes(data=content, mime_type=gemini_mime),
-                                prompt,
-                            ],
-                            config=types.GenerateContentConfig(
-                                response_mime_type="application/json",
-                                temperature=0.0
-                            ),
-                        )
+                        models_to_try = [settings.GEMINI_MODEL] + [
+                            m for m in getattr(settings, "GEMINI_FALLBACK_MODELS", []) if m != settings.GEMINI_MODEL
+                        ]
+                        response = None
+                        last_vlm_e = None
+                        for m in models_to_try:
+                            try:
+                                response = client.models.generate_content(
+                                    model=m,
+                                    contents=[
+                                        types.Part.from_bytes(data=content, mime_type=gemini_mime),
+                                        prompt,
+                                    ],
+                                    config=types.GenerateContentConfig(
+                                        response_mime_type="application/json",
+                                        temperature=0.0,
+                                    ),
+                                )
+                                if response and response.text:
+                                    break
+                            except Exception as e:  # noqa: BLE001
+                                last_vlm_e = e
+                                err_str = str(e)
+                                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+                                    import logging
+
+                                    logging.getLogger(__name__).warning(
+                                        "Gemini VLM model '%s' rate limited on ID extraction. Cascading to next fallback model.",
+                                        m,
+                                    )
+                                    continue
+                                continue
+
+                        if response is None:
+                            if last_vlm_e is not None:
+                                raise last_vlm_e
+                            raise RuntimeError("Gemini VLM extraction produced no response.")
+
                         prompt_toks = 0
                         comp_toks = 0
                         if hasattr(response, "usage_metadata") and response.usage_metadata:

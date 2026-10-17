@@ -60,17 +60,46 @@ class GroqLLMClient:
         api_key: str | None = None,
         model: str | None = None,
         fallback_model: Any = _DEFAULT_FALLBACK,
+        fallback_models: list[str] | str | None = None,
         base_url: str | None = None,
         timeout_seconds: float | None = None,
         max_retries: int | None = None,
     ) -> None:
         self.api_key = api_key if api_key is not None else settings.GROQ_API_KEY
         self.model = model if model is not None else settings.GROQ_MODEL
-        self.fallback_model: str | None = (
-            getattr(settings, "GROQ_FALLBACK_MODEL", "openai/gpt-oss-20b")
-            if fallback_model is _DEFAULT_FALLBACK
-            else fallback_model
-        )
+
+        # Resolve ordered fallback models list
+        candidates: list[str] = []
+        if fallback_models is not None:
+            if isinstance(fallback_models, str):
+                candidates = [m.strip() for m in fallback_models.split(",") if m.strip()]
+            else:
+                candidates = [m.strip() for m in fallback_models if m.strip()]
+        elif fallback_model is not _DEFAULT_FALLBACK:
+            if fallback_model:
+                if isinstance(fallback_model, str):
+                    candidates = [m.strip() for m in fallback_model.split(",") if m.strip()]
+                else:
+                    candidates = [m.strip() for m in fallback_model if m.strip()]
+        else:
+            cfg_models = getattr(settings, "GROQ_FALLBACK_MODELS", None)
+            if cfg_models:
+                candidates = list(cfg_models)
+            legacy_fb = getattr(settings, "GROQ_FALLBACK_MODEL", None)
+            if legacy_fb and legacy_fb not in candidates:
+                candidates.insert(0, legacy_fb)
+
+        # De-duplicate while preserving order, excluding primary model
+        seen = {self.model}
+        self.fallback_models: list[str] = []
+        for cand in candidates:
+            if cand and cand not in seen:
+                seen.add(cand)
+                self.fallback_models.append(cand)
+
+        # Retain backward-compatible singular reference to top fallback model
+        self.fallback_model: str | None = self.fallback_models[0] if self.fallback_models else None
+
         self.base_url = (base_url if base_url is not None else settings.GROQ_BASE_URL).rstrip("/")
         self.timeout_seconds = (
             timeout_seconds if timeout_seconds is not None else settings.GROQ_TIMEOUT_SECONDS
@@ -149,7 +178,7 @@ class GroqLLMClient:
         """
         Synchronously requests structured JSON completion from Groq API.
         Attempts primary model (default: openai/gpt-oss-120b); if transient failure
-        or rate-limiting occurs, seamlessly fails over to fallback_model (default: openai/gpt-oss-20b).
+        or rate-limiting occurs, seamlessly cascades through fallback_models.
         """
         self.last_used_model = None
         self.fallback_used = False
@@ -164,54 +193,56 @@ class GroqLLMClient:
             headers = self._prepare_headers()
             endpoint = f"{self.base_url}/chat/completions"
 
+            models_to_try = [self.model] + self.fallback_models
+            last_error: Exception | None = None
+
             transport = httpx.HTTPTransport(retries=self.max_retries)
             with httpx.Client(transport=transport, timeout=self.timeout_seconds) as client:
-                primary_payload = self._build_payload(
-                    prompt, system_prompt, temperature, max_tokens, model=self.model
-                )
-                primary_error: Exception | None = None
-                try:
-                    response = client.post(endpoint, json=primary_payload, headers=headers)
-                    response.raise_for_status()
-                    data = response.json()
-                    result = self._extract_json_choice(data)
-                    self._record_telemetry_usage(span, data)
-                    self.last_used_model = self.model
-                    return result
-                except (httpx.HTTPStatusError, httpx.RequestError, GroqLLMError) as exc:
-                    primary_error = exc
-                    logger.warning("Groq primary model '%s' failed: %s", self.model, exc)
-
-                if self.fallback_model and self.fallback_model != self.model:
-                    logger.info(
-                        "Failing over to Groq fallback model '%s' (primary '%s' failed)",
-                        self.fallback_model,
-                        self.model,
-                    )
-                    fallback_payload = self._build_payload(
-                        prompt, system_prompt, temperature, max_tokens, model=self.fallback_model
+                for idx, current_model in enumerate(models_to_try):
+                    is_fallback = idx > 0
+                    if is_fallback:
+                        logger.info(
+                            "Failing over to Groq fallback model '%s' (primary/prior model failed: %s)",
+                            current_model,
+                            last_error,
+                        )
+                    payload = self._build_payload(
+                        prompt, system_prompt, temperature, max_tokens, model=current_model
                     )
                     try:
-                        response = client.post(endpoint, json=fallback_payload, headers=headers)
+                        response = client.post(endpoint, json=payload, headers=headers)
                         response.raise_for_status()
                         data = response.json()
                         result = self._extract_json_choice(data)
                         self._record_telemetry_usage(span, data)
-                        self.last_used_model = self.fallback_model
-                        self.fallback_used = True
-                        return result
-                    except (httpx.HTTPStatusError, httpx.RequestError, GroqLLMError) as fb_exc:
-                        logger.error(
-                            "Groq fallback model '%s' also failed: %s (primary error: %s)",
-                            self.fallback_model,
-                            fb_exc,
-                            primary_error,
+                        self.last_used_model = current_model
+                        self.fallback_used = is_fallback
+                        span.set_summary(
+                            fallback_used=is_fallback,
+                            failover_stage=idx,
                         )
-                        self._raise_groq_error(fb_exc)
+                        return result
+                    except (httpx.HTTPStatusError, httpx.RequestError, GroqLLMError) as exc:
+                        last_error = exc
+                        is_rate_limit = (
+                            isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429
+                        ) or ("rate limit" in str(exc).lower()) or ("429" in str(exc))
 
-                if primary_error is not None:
-                    self._raise_groq_error(primary_error)
-                raise GroqLLMError("Groq LLM generation failed without response.")
+                        if is_rate_limit:
+                            logger.warning(
+                                "Groq rate limit (429) on model '%s'. Cascading to next fallback model.",
+                                current_model,
+                            )
+                        else:
+                            logger.warning(
+                                "Groq model '%s' failed: %s. Cascading to next fallback model.",
+                                current_model,
+                                exc,
+                            )
+
+                if last_error is not None:
+                    self._raise_groq_error(last_error)
+                raise GroqLLMError("Groq LLM generation failed across all models.")
 
     async def generate_json_async(
         self,
@@ -223,7 +254,7 @@ class GroqLLMClient:
         """
         Asynchronously requests structured JSON completion from Groq API.
         Attempts primary model (default: openai/gpt-oss-120b); if transient failure
-        or rate-limiting occurs, seamlessly fails over to fallback_model (default: openai/gpt-oss-20b).
+        or rate-limiting occurs, seamlessly cascades through fallback_models.
         """
         self.last_used_model = None
         self.fallback_used = False
@@ -238,54 +269,56 @@ class GroqLLMClient:
             headers = self._prepare_headers()
             endpoint = f"{self.base_url}/chat/completions"
 
+            models_to_try = [self.model] + self.fallback_models
+            last_error: Exception | None = None
+
             transport = httpx.AsyncHTTPTransport(retries=self.max_retries)
             async with httpx.AsyncClient(transport=transport, timeout=self.timeout_seconds) as client:
-                primary_payload = self._build_payload(
-                    prompt, system_prompt, temperature, max_tokens, model=self.model
-                )
-                primary_error: Exception | None = None
-                try:
-                    response = await client.post(endpoint, json=primary_payload, headers=headers)
-                    response.raise_for_status()
-                    data = response.json()
-                    result = self._extract_json_choice(data)
-                    self._record_telemetry_usage(span, data)
-                    self.last_used_model = self.model
-                    return result
-                except (httpx.HTTPStatusError, httpx.RequestError, GroqLLMError) as exc:
-                    primary_error = exc
-                    logger.warning("Groq primary model '%s' failed: %s", self.model, exc)
-
-                if self.fallback_model and self.fallback_model != self.model:
-                    logger.info(
-                        "Failing over to Groq fallback model '%s' (primary '%s' failed)",
-                        self.fallback_model,
-                        self.model,
-                    )
-                    fallback_payload = self._build_payload(
-                        prompt, system_prompt, temperature, max_tokens, model=self.fallback_model
+                for idx, current_model in enumerate(models_to_try):
+                    is_fallback = idx > 0
+                    if is_fallback:
+                        logger.info(
+                            "Failing over to Groq async fallback model '%s' (primary/prior model failed: %s)",
+                            current_model,
+                            last_error,
+                        )
+                    payload = self._build_payload(
+                        prompt, system_prompt, temperature, max_tokens, model=current_model
                     )
                     try:
-                        response = await client.post(endpoint, json=fallback_payload, headers=headers)
+                        response = await client.post(endpoint, json=payload, headers=headers)
                         response.raise_for_status()
                         data = response.json()
                         result = self._extract_json_choice(data)
                         self._record_telemetry_usage(span, data)
-                        self.last_used_model = self.fallback_model
-                        self.fallback_used = True
-                        return result
-                    except (httpx.HTTPStatusError, httpx.RequestError, GroqLLMError) as fb_exc:
-                        logger.error(
-                            "Groq fallback model '%s' also failed: %s (primary error: %s)",
-                            self.fallback_model,
-                            fb_exc,
-                            primary_error,
+                        self.last_used_model = current_model
+                        self.fallback_used = is_fallback
+                        span.set_summary(
+                            fallback_used=is_fallback,
+                            failover_stage=idx,
                         )
-                        self._raise_groq_error(fb_exc)
+                        return result
+                    except (httpx.HTTPStatusError, httpx.RequestError, GroqLLMError) as exc:
+                        last_error = exc
+                        is_rate_limit = (
+                            isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429
+                        ) or ("rate limit" in str(exc).lower()) or ("429" in str(exc))
 
-                if primary_error is not None:
-                    self._raise_groq_error(primary_error)
-                raise GroqLLMError("Groq LLM generation failed without response.")
+                        if is_rate_limit:
+                            logger.warning(
+                                "Groq async rate limit (429) on model '%s'. Cascading to next fallback model.",
+                                current_model,
+                            )
+                        else:
+                            logger.warning(
+                                "Groq async model '%s' failed: %s. Cascading to next fallback model.",
+                                current_model,
+                                exc,
+                            )
+
+                if last_error is not None:
+                    self._raise_groq_error(last_error)
+                raise GroqLLMError("Groq async LLM generation failed across all models.")
 
     def _extract_json_choice(self, api_response: dict[str, Any]) -> dict[str, Any]:
         try:

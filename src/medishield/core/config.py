@@ -1,6 +1,6 @@
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -109,7 +109,15 @@ class Settings(BaseSettings):
     )
     GROQ_FALLBACK_MODEL: str | None = Field(
         default="openai/gpt-oss-20b",
-        description="Fallback Groq model identifier when primary model (e.g. gpt-oss-120b) fails, rate limits, or is unavailable",
+        description="Legacy fallback Groq model identifier when primary model fails, rate limits, or is unavailable",
+    )
+    GROQ_FALLBACK_MODELS: list[str] | str = Field(
+        default_factory=lambda: [
+            "openai/gpt-oss-20b",
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+        ],
+        description="Ordered list of Groq fallback models when primary model (e.g. gpt-oss-120b) hits rate limits or errors",
     )
     GROQ_BASE_URL: str = Field(
         default="https://api.groq.com/openai/v1",
@@ -130,8 +138,16 @@ class Settings(BaseSettings):
         description="Gemini API Key for VLM OCR extraction (local dev only)",
     )
     GEMINI_MODEL: str = Field(
-        default="gemini-3.8-flash",
+        default="gemini-2.5-flash",
         description="Gemini model identifier for VLM extraction",
+    )
+    GEMINI_FALLBACK_MODELS: list[str] | str = Field(
+        default_factory=lambda: [
+            "gemini-2.0-flash",
+            "gemini-1.5-flash",
+            "gemini-2.0-flash-lite",
+        ],
+        description="Ordered list of Gemini fallback models when primary model hits rate limits or errors",
     )
     HF_API_KEY: str | None = Field(
         default=None,
@@ -141,10 +157,43 @@ class Settings(BaseSettings):
         default="mistralai/Pixtral-12B-2409",
         description="Hugging Face VLM model identifier for OCR assistance",
     )
+    HF_VLM_FALLBACK_MODELS: list[str] | str = Field(
+        default_factory=lambda: [
+            "Qwen/Qwen2-VL-7B-Instruct",
+            "meta-llama/Llama-3.2-11B-Vision-Instruct",
+        ],
+        description="Ordered list of Hugging Face VLM fallback models when primary hits rate limits",
+    )
     ENABLE_MODEL_FALLBACK: bool = Field(
         default=False,
         description="Explicit authorization gate for external model/VLM fallback (Spec 05)",
     )
+
+    @field_validator(
+        "GROQ_FALLBACK_MODELS",
+        "GEMINI_FALLBACK_MODELS",
+        "HF_VLM_FALLBACK_MODELS",
+        mode="after",
+    )
+    @classmethod
+    def _parse_models_list(cls, v: Any) -> list[str]:
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                return []
+            if v.startswith("[") and v.endswith("]"):
+                try:
+                    import json
+
+                    parsed = json.loads(v)
+                    if isinstance(parsed, list):
+                        return [str(item).strip() for item in parsed if str(item).strip()]
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            return [part.strip() for part in v.split(",") if part.strip()]
+        if isinstance(v, (list, tuple)):
+            return [str(item).strip() for item in v if str(item).strip()]
+        return []
 
 
 settings = Settings()

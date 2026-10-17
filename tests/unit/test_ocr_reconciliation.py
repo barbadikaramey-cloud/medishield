@@ -1,6 +1,8 @@
 """Unit tests for OCR reconciliation, geometric extraction, and claims validation (Spec 05 § 5)."""
 
 
+import json
+
 from medishield.agents.claims import ClaimsAgent
 from medishield.db.enums import AgentVerdict
 from medishield.domain.contracts import (
@@ -608,6 +610,95 @@ def test_extract_service_lines_preserves_cms1500_rows_with_rendering_provider_np
     assert len(lines) == 1
     assert lines[0].hcpcs.value == "36415"
     assert lines[0].amount.value == 35.00
+
+
+def test_gemini_vision_client_rate_limit_cascades_to_fallback_model() -> None:
+    """Proves that GeminiVisionClient cascades to secondary model when primary hits 429 quota."""
+    from unittest.mock import MagicMock, patch
+
+    from medishield.ocr.ocr_reconcile import GeminiVisionClient
+
+    client = GeminiVisionClient(api_key="mock_gemini_key")
+
+    mock_resp_200 = MagicMock()
+    mock_resp_200.text = json.dumps({"fields": {"total_amount": {"value": 250.0, "span_id": "sp-1"}}})
+    mock_resp_200.usage_metadata = MagicMock(prompt_token_count=10, candidates_token_count=10, total_token_count=20)
+
+    # 1st call (primary model) raises 429 RESOURCE_EXHAUSTED; 2nd call (fallback model) succeeds
+    calls: list[str] = []
+
+    def mock_generate_content(model: str, **kwargs):
+        calls.append(model)
+        if len(calls) == 1:
+            raise RuntimeError("429 RESOURCE_EXHAUSTED: quota exceeded for model")
+        return mock_resp_200
+
+    with patch("google.genai.Client") as mock_genai_cls:
+        mock_genai_inst = MagicMock()
+        mock_genai_inst.models.generate_content.side_effect = mock_generate_content
+        mock_genai_cls.return_value = mock_genai_inst
+
+        fields = client.read_fields(image_bytes=b"fake_img", spans_with_ids=[], field_queries=["total_amount"])
+
+        assert fields == {"total_amount": {"value": 250.0, "span_id": "sp-1"}}
+        assert len(calls) == 2
+        # First model was primary, second was fallback
+        assert calls[0] != calls[1]
+
+
+def test_huggingface_vision_client_rate_limit_cascades_to_fallback_model() -> None:
+    """Proves that HuggingFaceVisionClient cascades to secondary model when primary hits 429."""
+    from unittest.mock import MagicMock, patch
+
+    import requests
+
+    from medishield.ocr.ocr_reconcile import HuggingFaceVisionClient
+
+    client = HuggingFaceVisionClient(api_key="mock_hf_key")
+
+    resp_429 = MagicMock(spec=requests.Response, status_code=429, text="Rate limit hit")
+    resp_200 = MagicMock(spec=requests.Response, status_code=200)
+    resp_200.json.return_value = {
+        "choices": [{"message": {"content": json.dumps({"fields": {"cpt_code": {"value": "99213", "span_id": "sp-1"}}})}}],
+        "usage": {"total_tokens": 50},
+    }
+
+    with patch("requests.post", side_effect=[resp_429, resp_200]) as mock_post:
+        fields = client.read_fields(image_bytes=b"fake_img", spans_with_ids=[], field_queries=["cpt_code"])
+
+        assert fields == {"cpt_code": {"value": "99213", "span_id": "sp-1"}}
+        assert mock_post.call_count == 2
+        # Verify different models in URL/payload
+        url1 = mock_post.call_args_list[0][0][0]
+        url2 = mock_post.call_args_list[1][0][0]
+        assert url1 != url2
+
+
+def test_groq_vision_client_rate_limit_cascades_to_fallback_model() -> None:
+    """Proves that GroqVisionClient cascades to secondary model when primary hits 429."""
+    from unittest.mock import MagicMock, patch
+
+    import requests
+
+    from medishield.ocr.ocr_reconcile import GroqVisionClient
+
+    client = GroqVisionClient(api_key="mock_groq_key")
+
+    resp_429 = MagicMock(spec=requests.Response, status_code=429, text="Rate limit hit")
+    resp_200 = MagicMock(spec=requests.Response, status_code=200)
+    resp_200.json.return_value = {
+        "choices": [{"message": {"content": json.dumps({"fields": {"total": {"value": 500.0, "span_id": "sp-2"}}})}}],
+        "usage": {"total_tokens": 40},
+    }
+
+    with patch("requests.post", side_effect=[resp_429, resp_200]) as mock_post:
+        fields = client.read_fields(image_bytes=b"fake_img", spans_with_ids=[], field_queries=["total"])
+
+        assert fields == {"total": {"value": 500.0, "span_id": "sp-2"}}
+        assert mock_post.call_count == 2
+        model1 = mock_post.call_args_list[0][1]["json"]["model"]
+        model2 = mock_post.call_args_list[1][1]["json"]["model"]
+        assert model1 != model2
 
 
 
