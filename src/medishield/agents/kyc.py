@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
+from medishield.core.tracing import trace_span
 from medishield.db.enums import AgentVerdict
 from medishield.domain.contracts import (
     KYCAgentOutput,
@@ -122,15 +123,32 @@ class InMemoryMemberRepository:
         self._members[member.member_id] = member
 
     def find_member(self, member_id: str) -> MemberRecord | None:
-        clean_id = member_id.strip().upper()
-        if clean_id in self._members:
-            return self._members[clean_id]
-        for m in self._members.values():
-            if m.policy_id and m.policy_id.upper() == clean_id:
-                return m
-            if m.member_id.upper() == clean_id:
-                return m
-        return None
+        with trace_span(
+            name="db_member_lookup",
+            run_type="retriever",
+            component="member_repository",
+            operation="find_member",
+            inputs={},
+        ) as span:
+            clean_id = member_id.strip().upper()
+            result: MemberRecord | None = None
+            if clean_id in self._members:
+                result = self._members[clean_id]
+            else:
+                for m in self._members.values():
+                    if m.policy_id and m.policy_id.upper() == clean_id:
+                        result = m
+                        break
+                    if m.member_id.upper() == clean_id:
+                        result = m
+                        break
+
+            span.set_summary(
+                status="SUCCESS",
+                member_matched=bool(result is not None),
+                is_complete=bool(result is not None),
+            )
+            return result
 
 
 class SqlMemberRepository:
@@ -145,57 +163,75 @@ class SqlMemberRepository:
         return self._session_or_factory
 
     def find_member(self, member_id: str) -> MemberRecord | None:
-        from sqlalchemy import func
+        with trace_span(
+            name="db_member_lookup",
+            run_type="retriever",
+            component="member_repository",
+            operation="find_member",
+            inputs={},
+        ) as span:
+            from sqlalchemy import func
 
-        from medishield.db.models import Enrollment, Member, Policy, PolicyVersion
+            from medishield.db.models import Enrollment, Member, Policy, PolicyVersion
 
-        clean_id = member_id.strip()
-        session = self._get_session()
-        should_close = callable(self._session_or_factory)
+            clean_id = member_id.strip()
+            session = self._get_session()
+            should_close = callable(self._session_or_factory)
 
-        try:
-            m = session.query(Member).filter(func.upper(Member.member_id) == clean_id.upper()).first()
-            if not m:
-                m = (
-                    session.query(Member)
-                    .join(Enrollment, Member.id == Enrollment.member_id)
+            try:
+                m = session.query(Member).filter(func.upper(Member.member_id) == clean_id.upper()).first()
+                if not m:
+                    m = (
+                        session.query(Member)
+                        .join(Enrollment, Member.id == Enrollment.member_id)
+                        .join(PolicyVersion, Enrollment.policy_version_id == PolicyVersion.id)
+                        .join(Policy, PolicyVersion.policy_id == Policy.id)
+                        .filter(func.upper(Policy.policy_id) == clean_id.upper())
+                        .first()
+                    )
+                if not m:
+                    span.set_summary(
+                        status="SUCCESS",
+                        member_matched=False,
+                        is_complete=False,
+                    )
+                    return None
+
+                enr = (
+                    session.query(Enrollment)
                     .join(PolicyVersion, Enrollment.policy_version_id == PolicyVersion.id)
                     .join(Policy, PolicyVersion.policy_id == Policy.id)
-                    .filter(func.upper(Policy.policy_id) == clean_id.upper())
+                    .filter(Enrollment.member_id == m.id, Enrollment.status == "ACTIVE")
                     .first()
                 )
-            if not m:
-                return None
+                pol_id = None
+                start_dt = None
+                end_dt = None
+                if enr:
+                    pol_id = enr.policy_version.policy.policy_id
+                    start_dt = enr.coverage_start_date
+                    end_dt = enr.coverage_end_date
 
-            enr = (
-                session.query(Enrollment)
-                .join(PolicyVersion, Enrollment.policy_version_id == PolicyVersion.id)
-                .join(Policy, PolicyVersion.policy_id == Policy.id)
-                .filter(Enrollment.member_id == m.id, Enrollment.status == "ACTIVE")
-                .first()
-            )
-            pol_id = None
-            start_dt = None
-            end_dt = None
-            if enr:
-                pol_id = enr.policy_version.policy.policy_id
-                start_dt = enr.coverage_start_date
-                end_dt = enr.coverage_end_date
-
-            return MemberRecord(
-                member_id=m.member_id,
-                first_name=m.first_name,
-                last_name=m.last_name,
-                date_of_birth=m.date_of_birth,
-                ssn_last4=m.ssn_last4,
-                status=m.status,
-                policy_id=pol_id,
-                policy_active_start=start_dt,
-                policy_active_end=end_dt,
-            )
-        finally:
-            if should_close:
-                session.close()
+                rec = MemberRecord(
+                    member_id=m.member_id,
+                    first_name=m.first_name,
+                    last_name=m.last_name,
+                    date_of_birth=m.date_of_birth,
+                    ssn_last4=m.ssn_last4,
+                    status=m.status,
+                    policy_id=pol_id,
+                    policy_active_start=start_dt,
+                    policy_active_end=end_dt,
+                )
+                span.set_summary(
+                    status="SUCCESS",
+                    member_matched=True,
+                    is_complete=True,
+                )
+                return rec
+            finally:
+                if should_close:
+                    session.close()
 
 
 class KYCAgent:
@@ -228,6 +264,21 @@ class KYCAgent:
             for page in doc.pages:
                 for span in page.spans:
                     all_spans_with_doc.append((doc, page.page_number, span))
+
+        # Discover encounter service date from spans if not explicitly provided
+        if service_date is None:
+            svc_pattern = re.compile(
+                r"(?:date\s*of\s*service|dates\s*of\s*service|admission\s*date|admit\s*date|service\s*date)\s*[:]?\s*"
+                r"([0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{2,4}|[0-9]{4}-[0-9]{2}-[0-9]{2})",
+                re.IGNORECASE,
+            )
+            for _, _, span in all_spans_with_doc:
+                m_svc = svc_pattern.search(span.text)
+                if m_svc:
+                    cand = self._parse_date_string(m_svc.group(1).strip())
+                    if cand and cand.year >= 2020:
+                        service_date = cand
+                        break
 
         # 2. Extract identity fields and anchor to OCR spans
         member_id_pv = self._extract_member_id(document_payloads, all_spans_with_doc)
@@ -319,15 +370,27 @@ class KYCAgent:
         else:
             flags.append("MISSING_MEMBER_ID")
 
-        # 5. Check ID expiration
+        # 5. Check ID expiration against encounter service_date (or today if no service date is discoverable)
         id_expired = False
-        if extracted_exp is not None and extracted_exp < today:
-            id_expired = True
-            flags.append("EXPIRED_GOVERNMENT_ID")
+        target_reference_date = service_date or today
+        if extracted_exp is not None:
+            if extracted_exp < target_reference_date:
+                id_expired = True
+                flags.append("EXPIRED_GOVERNMENT_ID")
+            elif (extracted_exp - target_reference_date).days <= 60:
+                flags.append("EXPIRING_SOON_GOVERNMENT_ID")
         if not id_expired:
             for _, _, span in all_spans_with_doc:
                 s_lower = span.text.lower()
-                if "cardexpired" in s_lower or "card expired" in s_lower or "expired-notvalid" in s_lower:
+                if (
+                    "cardexpired" in s_lower
+                    or "card expired" in s_lower
+                    or "expired-notvalid" in s_lower
+                    or "**expired**" in s_lower
+                    or "*expired*" in s_lower
+                    or re.search(r"^\s*\**expired\**\s*$", s_lower)
+                    or re.search(r"\bstatus\s*[:]?\s*expired\b", s_lower)
+                ):
                     id_expired = True
                     flags.append("EXPIRED_GOVERNMENT_ID")
                     break
@@ -374,7 +437,7 @@ class KYCAgent:
         self,
         docs: list[OCRDocumentPayload],
         spans: list[tuple[OCRDocumentPayload, int, OCRTextSpan]],
-    ) -> ProvenanceValue | None:
+    ) -> ProvenanceValue[str] | None:
         """Extracts and grounds member ID (e.g. MED-GLD-3592974, MEM-12345, or PT_15075)."""
         pattern = re.compile(
             r"\b((?:MED|MEM)-(?:GLD|SLV|[A-Z0-9]+)-[0-9]{4,10}|MEM(?:-[A-Z0-9]+)+|M-[0-9]{5,10}|PT[-_][0-9]{4,10})\b",
@@ -433,7 +496,7 @@ class KYCAgent:
         self,
         docs: list[OCRDocumentPayload],
         spans: list[tuple[OCRDocumentPayload, int, OCRTextSpan]],
-    ) -> tuple[ProvenanceValue | None, ProvenanceValue | None]:
+    ) -> tuple[ProvenanceValue[str] | None, ProvenanceValue[str] | None]:
         """Extracts patient / member first and last names."""
         name_pattern = re.compile(
             r"(?:patient(?:'s)?\s*name|member\s*name|insured(?:'s)?\s*name|policyholder)\s*[:]?\s*([A-Za-z]+)\s+([A-Za-z]+)",
@@ -448,8 +511,8 @@ class KYCAgent:
                 _, prov_first = verify_extracted_span(first, span.span_id, page_num, doc)
                 _, prov_last = verify_extracted_span(last, span.span_id, page_num, doc)
 
-                first_pv = ProvenanceValue(value=first, confidence=0.95, provenance=prov_first)
-                last_pv = ProvenanceValue(value=last, confidence=0.95, provenance=prov_last)
+                first_pv: ProvenanceValue[str] = ProvenanceValue(value=first, confidence=0.95, provenance=prov_first)
+                last_pv: ProvenanceValue[str] = ProvenanceValue(value=last, confidence=0.95, provenance=prov_last)
                 return first_pv, last_pv
 
         # Multi-span search: label followed by name within 3 spans
@@ -482,10 +545,41 @@ class KYCAgent:
         self,
         docs: list[OCRDocumentPayload],
         spans: list[tuple[OCRDocumentPayload, int, OCRTextSpan]],
-    ) -> tuple[ProvenanceValue | None, date | None]:
+    ) -> tuple[ProvenanceValue[str] | None, date | None]:
         """Extracts date of birth and parses into standard date object."""
+        dob_label_pattern = re.compile(r"\b(?:dob|birth\s*date|date\s*of\s*birth)\b", re.IGNORECASE)
+        date_pattern = re.compile(r"\b([0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{2,4}|[0-9]{4}-[0-9]{2}-[0-9]{2})\b")
+
+        # Geometric KVP association is stronger than searching nearby flattened spans.
+        for doc in docs:
+            for page in doc.pages:
+                for pair in page.key_value_pairs:
+                    label = re.sub(r"^\s*\d{1,2}[a-z]?\s*", "", str(pair.get("key", "")), flags=re.IGNORECASE)
+                    if not dob_label_pattern.search(label):
+                        continue
+                    raw_date = str(pair.get("value", "")).strip()
+                    match = date_pattern.search(raw_date)
+                    if not match:
+                        continue
+                    raw_date = match.group(1)
+                    parsed_date = self._parse_date_string(raw_date)
+                    if parsed_date is None:
+                        continue
+                    is_grounded, provenance = verify_extracted_span(
+                        raw_date, pair.get("val_span_id"), page.page_number, doc
+                    )
+                    if is_grounded:
+                        return (
+                            ProvenanceValue(
+                                value=parsed_date.isoformat(),
+                                confidence=0.98,
+                                provenance=provenance,
+                            ),
+                            parsed_date,
+                        )
+
         dob_pattern = re.compile(
-            r"(?:dob|birth\s+date|date\s+of\s+birth)\s*[:]?\s*([0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{2,4}|[0-9]{4}-[0-9]{2}-[0-9]{2})",
+            r"(?:dob|birth\s*date|date\s*of\s*birth)\s*[:]?\s*([0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{2,4}|[0-9]{4}-[0-9]{2}-[0-9]{2})",
             re.IGNORECASE,
         )
         for doc, page_num, span in spans:
@@ -494,7 +588,7 @@ class KYCAgent:
                 raw_date = match.group(1).strip()
                 parsed_date = self._parse_date_string(raw_date)
                 is_grounded, prov = verify_extracted_span(raw_date, span.span_id, page_num, doc)
-                pv = ProvenanceValue(
+                pv: ProvenanceValue[str] = ProvenanceValue(
                     value=parsed_date.isoformat() if parsed_date else raw_date,
                     confidence=0.95 if is_grounded else 0.50,
                     provenance=prov,
@@ -509,33 +603,36 @@ class KYCAgent:
                 for j in range(i + 1, min(i + 4, len(spans))):
                     next_doc, next_page, next_span = spans[j]
                     if next_doc.document_id == doc.document_id:
+                        # Avoid confusing DOB with admission/service dates
+                        if any(k in next_span.text.lower() for k in ["admit", "admission", "discharge", "service", "thru"]):
+                            continue
                         d_match = date_pattern.search(next_span.text)
                         if d_match:
                             raw_date = d_match.group(1).strip()
                             parsed_date = self._parse_date_string(raw_date)
                             is_grounded, prov = verify_extracted_span(raw_date, next_span.span_id, next_page, next_doc)
-                            pv = ProvenanceValue(
+                            pv_prox: ProvenanceValue[str] = ProvenanceValue(
                                 value=parsed_date.isoformat() if parsed_date else raw_date,
                                 confidence=0.95 if is_grounded else 0.50,
                                 provenance=prov,
                             )
-                            return pv, parsed_date
+                            return pv_prox, parsed_date
         return None, None
 
     def _extract_gov_id_and_expiry(
         self,
         docs: list[OCRDocumentPayload],
         spans: list[tuple[OCRDocumentPayload, int, OCRTextSpan]],
-    ) -> tuple[ProvenanceValue | None, ProvenanceValue | None, date | None]:
+    ) -> tuple[ProvenanceValue[str] | None, ProvenanceValue[str] | None, date | None]:
         """Extracts government ID number (Driver's License / Passport) and expiration date."""
         id_pattern = re.compile(r"(?:dl\s+number|license\s+no|id\s+number|passport\s+no)\s*[:#]?\s*([A-Z0-9]+)", re.IGNORECASE)
         exp_pattern = re.compile(
-            r"(?:exp\s+date|expiration\s+date|expires)\s*[:]?\s*([0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{2,4}|[0-9]{4}-[0-9]{2}-[0-9]{2})",
+            r"(?:exp\s*[:.]?|exp\s+date|expiration\s*[:.]?|expiration\s+date|expires\s*[:.]?)\s*([0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{2,4}|[0-9]{4}-[0-9]{2}-[0-9]{2})",
             re.IGNORECASE,
         )
 
-        id_pv: ProvenanceValue | None = None
-        exp_pv: ProvenanceValue | None = None
+        id_pv: ProvenanceValue[str] | None = None
+        exp_pv: ProvenanceValue[str] | None = None
         parsed_exp: date | None = None
 
         for doc, page_num, span in spans:
@@ -559,7 +656,7 @@ class KYCAgent:
                     )
 
         if exp_pv is None:
-            exp_header_pattern = re.compile(r"(?:exp\s*date|expiration\s*date|expires)", re.IGNORECASE)
+            exp_header_pattern = re.compile(r"\b(?:exp\b|exp\s*[:.]|expires|expiration)\b", re.IGNORECASE)
             date_pattern = re.compile(r"\b([0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{2,4}|[0-9]{4}-[0-9]{2}-[0-9]{2})\b")
             for i, (doc, page_num, span) in enumerate(spans):
                 if exp_header_pattern.search(span.text):
@@ -629,10 +726,10 @@ class KYCAgent:
 
     def _adjudicate_verdict(
         self,
-        member_id_pv: ProvenanceValue | None,
-        first_name_pv: ProvenanceValue | None,
-        last_name_pv: ProvenanceValue | None,
-        dob_pv: ProvenanceValue | None,
+        member_id_pv: ProvenanceValue[str] | None,
+        first_name_pv: ProvenanceValue[str] | None,
+        last_name_pv: ProvenanceValue[str] | None,
+        dob_pv: ProvenanceValue[str] | None,
         member_db_matched: bool,
         dob_matched: bool,
         id_expired: bool,

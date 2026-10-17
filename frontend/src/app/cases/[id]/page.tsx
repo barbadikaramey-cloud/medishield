@@ -31,6 +31,7 @@ import {
 } from "lucide-react";
 import {
   acquireReviewLock,
+  explainCase,
   fetchDocumentOcr,
   fetchDocumentImage,
   getAuditVerification,
@@ -44,11 +45,13 @@ import {
   CaseDetailResponse,
   ReviewLockResponse,
 } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 
 export default function CaseDetailPage() {
   const params = useParams();
   const router = useRouter();
   const caseId = params?.id as string;
+  const { user, loading: authLoading } = useAuth();
 
   const [caseData, setCaseData] = useState<CaseDetailResponse | null>(null);
   const [auditData, setAuditData] = useState<AuditVerifyResponse | null>(null);
@@ -77,12 +80,35 @@ export default function CaseDetailPage() {
   // AI Decision Explanation State (ADR-011)
   const [isExplanationExpanded, setIsExplanationExpanded] = useState(true);
   const [copiedExplanation, setCopiedExplanation] = useState(false);
+  const [explaining, setExplaining] = useState(false);
+  const [explainError, setExplainError] = useState<string | null>(null);
+  const [modelSource, setModelSource] = useState<string | null>(null);
 
   const handleCopyExplanation = (text: string) => {
     if (!text) return;
     navigator.clipboard.writeText(text);
     setCopiedExplanation(true);
     setTimeout(() => setCopiedExplanation(false), 2000);
+  };
+
+  const handleGenerateExplanation = async () => {
+    if (!caseId) return;
+    setExplaining(true);
+    setExplainError(null);
+    try {
+      const res = await explainCase(caseId);
+      setCaseData((prev) => (prev ? {
+        ...prev,
+        detailed_explanation: res.detailed_explanation,
+        justification: res.detailed_explanation,
+      } : prev));
+      setModelSource(res.model_source);
+      setIsExplanationExpanded(true);
+    } catch (err: unknown) {
+      setExplainError(err instanceof Error ? err.message : "Failed to synthesize LLM explanation.");
+    } finally {
+      setExplaining(false);
+    }
   };
 
   const loadData = useCallback(async () => {
@@ -159,12 +185,18 @@ export default function CaseDetailPage() {
 
   const handleConfirmRecommendation = async () => {
     if (!caseData) return;
+    if (!caseData.current_decision) {
+      setActionError("There is no AI recommendation to confirm.");
+      return;
+    }
     setSubmittingAction(true);
     setActionError(null);
     try {
       await submitConfirmation({
         case_id: caseId,
         expected_case_version: caseData.version,
+        new_decision: caseData.current_decision,
+        reason_code: "HUMAN_CONFIRMED_RECOMMENDATION",
         remarks: "Human reviewer verified all agent findings and confirmed recommendation.",
       });
       setLockData(null);
@@ -216,6 +248,7 @@ export default function CaseDetailPage() {
     try {
       await requestInformation({
         case_id: caseId,
+        expected_case_version: caseData.version,
         missing_doc_types: caseData.missing_documents || ["ID_DOCUMENT"],
         remarks: rfiRemarks.trim(),
       });
@@ -243,6 +276,26 @@ export default function CaseDetailPage() {
       setRerunning(false);
     }
   };
+
+  if (!authLoading && user?.role === "CLAIMER") {
+    return (
+      <div className="max-w-2xl mx-auto py-16 text-center">
+        <div className="p-4 bg-cyan-950/40 border border-cyan-800/80 rounded-2xl mb-6 inline-block">
+          <ShieldAlert className="w-12 h-12 text-cyan-400 mx-auto" />
+        </div>
+        <h2 className="text-2xl font-bold text-white mb-2">Claimer Account Restricted</h2>
+        <p className="text-sm text-slate-400 mb-6 max-w-lg mx-auto leading-relaxed">
+          The Operational Case Workbench contains adjustor-only tools and fraud analytics. Under MediShield RBAC (ADR-012/ADR-013), please track your claim status using your dedicated Claimer Portal.
+        </p>
+        <Link
+          href={`/claimer?case_id=${caseId}`}
+          className="inline-flex items-center space-x-2 px-5 py-2.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg font-semibold text-sm transition-colors shadow-lg shadow-cyan-950"
+        >
+          <span>Track Claim in Claimer Portal</span>
+        </Link>
+      </div>
+    );
+  }
 
   if (loading && !caseData) {
     return (
@@ -735,17 +788,23 @@ export default function CaseDetailPage() {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-800/60 text-slate-300">
-                          {caseData.agent_findings.claims.service_lines.map((line: any, i: number) => (
-                            <tr key={i} className="hover:bg-slate-800/40">
-                              <td className="py-1.5 px-3">{line.line_number}</td>
-                              <td className="py-1.5 px-3 text-cyan-300">{line.cpt_code?.value}</td>
-                              <td className="py-1.5 px-3 truncate max-w-[160px]">{line.description?.value}</td>
-                              <td className="py-1.5 px-3 text-slate-400">{line.service_date?.value}</td>
-                              <td className="py-1.5 px-3 text-right">{line.quantity?.value}</td>
-                              <td className="py-1.5 px-3 text-right">{line.unit_charge?.value?.toFixed(2)}</td>
-                              <td className="py-1.5 px-3 text-right font-bold text-white">{line.total_charge?.value?.toFixed(2)}</td>
-                            </tr>
-                          ))}
+                          {caseData.agent_findings.claims.service_lines.map((line: any, i: number) => {
+                            const cptVal = line.cpt_code?.value || line.hcpcs?.value || "—";
+                            const amtVal = typeof line.total_charge?.value === "number" ? line.total_charge.value : (typeof line.amount?.value === "number" ? line.amount.value : null);
+                            const unitVal = typeof line.unit_charge?.value === "number" ? line.unit_charge.value : amtVal;
+                            const qtyVal = line.quantity?.value || line.units?.value || 1;
+                            return (
+                              <tr key={i} className="hover:bg-slate-800/40">
+                                <td className="py-1.5 px-3">{line.line_number}</td>
+                                <td className="py-1.5 px-3 text-cyan-300 font-bold">{cptVal}</td>
+                                <td className="py-1.5 px-3 truncate max-w-[160px]">{line.description?.value || "—"}</td>
+                                <td className="py-1.5 px-3 text-slate-400">{line.service_date?.value || "—"}</td>
+                                <td className="py-1.5 px-3 text-right">{qtyVal}</td>
+                                <td className="py-1.5 px-3 text-right">{unitVal != null ? `$${unitVal.toFixed(2)}` : "—"}</td>
+                                <td className="py-1.5 px-3 text-right font-bold text-white">{amtVal != null ? `$${amtVal.toFixed(2)}` : "—"}</td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
@@ -841,21 +900,35 @@ export default function CaseDetailPage() {
             )}
 
             {/* AI Decision Analysis & Clinical Rationale (ADR-011) */}
-            {(caseData.detailed_explanation || caseData.justification) && (
-              <div className="bg-slate-950/90 border border-indigo-900/70 rounded-xl overflow-hidden shadow-xl space-y-0">
-                <div className="bg-gradient-to-r from-indigo-950/90 via-slate-900 to-slate-950 px-3.5 py-2.5 border-b border-indigo-900/40 flex items-center justify-between">
-                  <div className="flex items-center space-x-2">
-                    <Sparkles className="w-4 h-4 text-cyan-400 animate-pulse flex-shrink-0" />
-                    <span className="text-xs font-bold text-slate-100 uppercase tracking-wider flex items-center gap-1.5">
-                      <span>AI Decision Analysis & Clinical Rationale</span>
-                      {caseData.rule_id_matched && (
-                        <span className="hidden sm:inline-block px-1.5 py-0.5 rounded text-[9px] font-mono bg-cyan-950 text-cyan-300 border border-cyan-800">
-                          {caseData.rule_id_matched}
-                        </span>
-                      )}
+            <div className="bg-slate-950/90 border border-indigo-900/70 rounded-xl overflow-hidden shadow-xl space-y-0">
+              <div className="bg-gradient-to-r from-indigo-950/90 via-slate-900 to-slate-950 px-3.5 py-2.5 border-b border-indigo-900/40 flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center space-x-2">
+                  <Sparkles className="w-4 h-4 text-cyan-400 animate-pulse flex-shrink-0" />
+                  <span className="text-xs font-bold text-slate-100 uppercase tracking-wider flex items-center gap-1.5 flex-wrap">
+                    <span>AI Decision Analysis & Clinical Rationale</span>
+                    {caseData.rule_id_matched && (
+                      <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-cyan-950 text-cyan-300 border border-cyan-800">
+                        {caseData.rule_id_matched}
+                      </span>
+                    )}
+                    <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-indigo-950 text-indigo-300 border border-indigo-800 flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping inline-block" />
+                      <span>{modelSource || (caseData.agent_findings?.explanation_model as string) || "LLM Clinical Synthesizer"}</span>
                     </span>
-                  </div>
-                  <div className="flex items-center space-x-1.5">
+                  </span>
+                </div>
+                <div className="flex items-center space-x-1.5">
+                  <button
+                    type="button"
+                    onClick={handleGenerateExplanation}
+                    disabled={explaining}
+                    className="flex items-center space-x-1 px-2 py-1 rounded bg-indigo-900/60 hover:bg-indigo-800 text-indigo-200 hover:text-white text-[10px] font-medium transition border border-indigo-700 disabled:opacity-50"
+                    title="Synthesize fresh clinical narrative via Groq LLM / Decision Engine"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${explaining ? "animate-spin text-cyan-400" : "text-indigo-300"}`} />
+                    <span>{explaining ? "Synthesizing..." : "Refresh LLM"}</span>
+                  </button>
+                  {(caseData.detailed_explanation || caseData.justification) && (
                     <button
                       type="button"
                       onClick={() => handleCopyExplanation(caseData.detailed_explanation || caseData.justification || "")}
@@ -874,30 +947,56 @@ export default function CaseDetailPage() {
                         </>
                       )}
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => setIsExplanationExpanded(!isExplanationExpanded)}
-                      className="p-1 rounded bg-slate-800/80 hover:bg-slate-700 text-slate-400 hover:text-white transition"
-                      title={isExplanationExpanded ? "Collapse section" : "Expand section"}
-                    >
-                      {isExplanationExpanded ? (
-                        <ChevronUp className="w-3.5 h-3.5" />
-                      ) : (
-                        <ChevronDown className="w-3.5 h-3.5" />
-                      )}
-                    </button>
-                  </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setIsExplanationExpanded(!isExplanationExpanded)}
+                    className="p-1 rounded bg-slate-800/80 hover:bg-slate-700 text-slate-400 hover:text-white transition"
+                    title={isExplanationExpanded ? "Collapse section" : "Expand section"}
+                  >
+                    {isExplanationExpanded ? (
+                      <ChevronUp className="w-3.5 h-3.5" />
+                    ) : (
+                      <ChevronDown className="w-3.5 h-3.5" />
+                    )}
+                  </button>
                 </div>
+              </div>
 
-                {isExplanationExpanded && (
-                  <div className="p-3.5 bg-slate-950/70 max-h-[460px] overflow-y-auto space-y-2 border-t border-slate-900">
+              {explainError && (
+                <div className="px-3.5 py-2 bg-rose-950/60 border-b border-rose-900/50 text-rose-300 text-[11px] flex items-center space-x-2">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-400" />
+                  <span>{explainError}</span>
+                </div>
+              )}
+
+              {isExplanationExpanded && (
+                <div className="p-3.5 bg-slate-950/70 max-h-[500px] overflow-y-auto space-y-2 border-t border-slate-900">
+                  {caseData.detailed_explanation || caseData.justification ? (
                     <FormattedExplanation
                       content={caseData.detailed_explanation || caseData.justification || ""}
                     />
-                  </div>
-                )}
-              </div>
-            )}
+                  ) : (
+                    <div className="p-4 bg-slate-900/80 border border-indigo-900/40 rounded-lg text-center space-y-2">
+                      <Sparkles className="w-5 h-5 text-cyan-400 mx-auto animate-bounce" />
+                      <div className="text-xs font-semibold text-white">No Clinical Explanation Generated Yet</div>
+                      <p className="text-[11px] text-slate-400 max-w-md mx-auto">
+                        Synthesize an authoritative, multi-agent clinical audit narrative grounded in policy clauses and line-item arithmetic using Groq LLM.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={handleGenerateExplanation}
+                        disabled={explaining}
+                        className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition shadow-md disabled:opacity-50"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>{explaining ? "Synthesizing with LLM..." : "Synthesize AI Explanation"}</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
 
             {/* AI Specialist Findings & Diagnostics */}
             {caseData.agent_findings && (

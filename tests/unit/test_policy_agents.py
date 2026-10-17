@@ -429,3 +429,39 @@ def test_policy_coverage_agent_ungrounded_citations_no_unbound_error() -> None:
     assert result.confidence == 0.40
     assert result.coverage_percentage == 80.0
     assert "could not be verified in the authoritative corpus" in result.reasoning_summary
+
+
+def test_policy_coverage_agent_unrelated_chunk_fails_positive_scope() -> None:
+    """Proves that a retrieved non-exclusion clause (e.g. SEC-5.5 Room and Board) cannot cover an unrelated procedure (e.g. CPT 21120)."""
+    room_board_chunk = PolicyChunkRecord(
+        chunk_id="chk-rb-01",
+        policy_id="POL-CORP-2026",
+        version_tag="v2.0",
+        section_number="SEC-5.5",
+        section_title="Inpatient Room and Board Limits",
+        chunk_text="Inpatient room and board (revenue codes 0110, 0111, 0120) are covered at 80% after deductible.",
+        page_number=26,
+        is_exclusion=False,
+        requires_prior_auth=False,
+        covered_percentage=80.0,
+        matching_rev_codes=["0110", "0111", "0120"],
+        matching_cpt_codes=[],
+    )
+    corpus = PolicyCorpusRepository(chunks=[room_board_chunk])
+    agent = PolicyCoverageAgent(corpus_repo=corpus)
+
+    # Claim for procedure 21120 (unrelated to room and board)
+    result = agent.execute(
+        policy_id="POL-CORP-2026",
+        policy_version="v2.0",
+        cpt_codes=["21120"],
+        claim_amount=1500.00,
+        matched_chunks=[room_board_chunk],
+    )
+
+    # Must be INDETERMINATE, not PASS!
+    assert result.verdict == AgentVerdict.INDETERMINATE
+    assert result.covered is False
+    assert result.coverage_percentage == 0.0
+    assert "No applicable covered benefit clauses found" in result.reasoning_summary
+    assert result.applicable_service_codes == []

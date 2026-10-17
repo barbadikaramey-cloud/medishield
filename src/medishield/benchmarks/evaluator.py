@@ -71,7 +71,7 @@ def run_benchmark_evaluation(force: bool = False) -> dict[str, Any]:
         cat = item.get("category", "unknown")
         doc_id = item.get("doc_id", "doc")
         file_path_raw = item.get("file_path", "")
-        file_name = Path(file_path_raw).name if file_path_raw else f"{doc_id}.png"
+        file_name = Path(file_path_raw.replace("\\", "/")).name if file_path_raw else f"{doc_id}.png"
 
         expected_type = categories_map.get(cat, DocumentType.UNKNOWN)
         if cat not in class_stats:

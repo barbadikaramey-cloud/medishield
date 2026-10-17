@@ -4,8 +4,8 @@ Revision ID: 002_policy_chunk_provenance
 Revises: 001_initial_schema
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "002_policy_chunk_provenance"
 down_revision = "001_initial_schema"

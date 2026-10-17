@@ -19,8 +19,8 @@ def prepare_sqlite_schema(metadata) -> None:
     Removes Postgres-specific DDL syntax (e.g. server defaults with ::jsonb)
     to allow SQLite compatibility.
     """
-    from sqlalchemy.dialects.postgresql import JSONB
     from sqlalchemy import JSON
+    from sqlalchemy.dialects.postgresql import JSONB
 
     @event.listens_for(metadata, "before_create")
     def receive_before_create(target, connection, **kw):

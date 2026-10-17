@@ -86,11 +86,11 @@ class FieldProvenance(BaseModel):
     """Auditable physical provenance linking an extracted fact to document OCR spans."""
     document_id: str = Field(..., description="Referenced document identifier")
     page_number: int = Field(..., ge=1, description="1-indexed physical page number")
-    span_id: str | None = Field(None, description="Exact OCR span ID, e.g. 'span-p1-042'")
+    span_id: str | None = Field(default=None, description="Exact OCR span ID, e.g. 'span-p1-042'")
     text_content: str = Field(..., description="Exact raw text snippet extracted from document")
-    bbox: BBox | None = Field(None, description="Canonical normalized bounding box [x0, y0, x1, y1]")
+    bbox: BBox | None = Field(default=None, description="Canonical normalized bounding box [x0, y0, x1, y1]")
     bounding_box: list[float] | None = Field(
-        None,
+        default=None,
         description="Legacy normalized coordinates [x0, y0, x1, y1] for backward compatibility",
     )
     provenance_type: ProvenanceType = Field(
@@ -102,6 +102,12 @@ class FieldProvenance(BaseModel):
         ge=0.0,
         le=1.0,
         description="Calibrated evidence score: 1.0 for exact span, 0.5 for page fallback, 0.0 for inferred",
+    )
+    model_confidence: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Optional model extractor confidence score",
     )
 
     @model_validator(mode="before")
@@ -129,6 +135,6 @@ class ProvenanceValue(BaseModel, Generic[T]):
     value: Any
     confidence: float = Field(..., ge=0.0, le=1.0, description="Extraction certainty score")
     provenance: FieldProvenance | None = Field(
-        None,
+        default=None,
         description="Physical OCR grounding evidence",
     )

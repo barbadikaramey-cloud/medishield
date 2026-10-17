@@ -1,12 +1,12 @@
-import pytest
-from datetime import date
 from medishield.db.enums import AgentVerdict, BusinessDecision, EscalationSubReason
 from medishield.domain.contracts import (
-    KYCAgentOutput, ClaimsAgentOutput, PolicyCoverageOutput, FraudAgentOutput, OrchestratorOutput
+    ClaimsAgentOutput,
+    KYCAgentOutput,
+    PolicyCoverageOutput,
+    ProvenanceValue,
 )
-from medishield.domain.decision import adjudicate_case, DecisionInputContext
+from medishield.domain.decision import DecisionInputContext, adjudicate_case
 
-from medishield.domain.contracts import ProvenanceValue
 
 def _make_claims_output(verdict: AgentVerdict, confidence: float) -> ClaimsAgentOutput:
     return ClaimsAgentOutput(
@@ -19,10 +19,16 @@ def _make_claims_output(verdict: AgentVerdict, confidence: float) -> ClaimsAgent
         claim_amount=ProvenanceValue(value="100.0", is_grounded=True, confidence=1.0),
         service_date=ProvenanceValue(value="2026-01-01", is_grounded=True, confidence=1.0),
         provider_npi=ProvenanceValue(value="1234567890", is_grounded=True, confidence=1.0),
-        latency_ms=10
+        latency_ms=10,
     )
 
-def _make_policy_output(verdict: AgentVerdict, confidence: float, exclusion_clause_verified: bool = False, applicable_service_codes: list[str] = None) -> PolicyCoverageOutput:
+
+def _make_policy_output(
+    verdict: AgentVerdict,
+    confidence: float,
+    exclusion_clause_verified: bool = False,
+    applicable_service_codes: list[str] | None = None,
+) -> PolicyCoverageOutput:
     return PolicyCoverageOutput(
         agent_name="policy",
         verdict=verdict,
@@ -71,7 +77,7 @@ def test_p5_recommends_denial_if_verified_exclusion():
     
     out = adjudicate_case(ctx)
     
-    assert out.decision == BusinessDecision.ESCALATE
+    assert out.decision == BusinessDecision.REJECT
     assert out.rule_id_matched == "RULE-P5-HARD-REJECT"
-    assert out.escalation_sub_reason == EscalationSubReason.RECOMMEND_DENIAL
+    assert out.recommendation_tag == EscalationSubReason.RECOMMEND_DENIAL.value
     assert out.decision_confidence < 1.0  # Must use min_confidence, not hardcoded 1.0

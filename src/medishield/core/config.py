@@ -69,6 +69,35 @@ class Settings(BaseSettings):
         description="Service identifier associated with trace spans",
     )
 
+    # Observability & Tracing (LangSmith)
+    LANGSMITH_TRACING: bool = Field(
+        default=False,
+        description="Enable LangSmith distributed agent and tool tracing",
+    )
+    LANGSMITH_API_KEY: str | None = Field(
+        default=None,
+        description="API key for LangSmith tracing authentication",
+    )
+    LANGSMITH_PROJECT: str = Field(
+        default="medishield-local-dev",
+        description="Target LangSmith project name for trace aggregation",
+    )
+    LANGSMITH_ENDPOINT: str | None = Field(
+        default=None,
+        description="Optional regional LangSmith endpoint (e.g. https://eu.api.smith.langchain.com)",
+    )
+    LANGSMITH_WORKSPACE_ID: str | None = Field(
+        default=None,
+        description="Optional workspace ID for workspace-scoped LangSmith API keys",
+    )
+    LANGSMITH_INCLUDE_CASE_PSEUDONYM: bool = Field(
+        default=False,
+        description=(
+            "Whether to include keyed HMAC pseudonymous case identifiers in telemetry metadata. "
+            "Disabled by default so traces rely solely on ephemeral root run UUIDs."
+        ),
+    )
+
     # LLM Gateway (Groq)
     GROQ_API_KEY: str | None = Field(
         default=None,
@@ -77,6 +106,10 @@ class Settings(BaseSettings):
     GROQ_MODEL: str = Field(
         default="openai/gpt-oss-120b",
         description="Groq model identifier (e.g. openai/gpt-oss-120b, openai/gpt-oss-20b)",
+    )
+    GROQ_FALLBACK_MODEL: str | None = Field(
+        default="openai/gpt-oss-20b",
+        description="Fallback Groq model identifier when primary model (e.g. gpt-oss-120b) fails, rate limits, or is unavailable",
     )
     GROQ_BASE_URL: str = Field(
         default="https://api.groq.com/openai/v1",
@@ -99,6 +132,18 @@ class Settings(BaseSettings):
     GEMINI_MODEL: str = Field(
         default="gemini-3.8-flash",
         description="Gemini model identifier for VLM extraction",
+    )
+    HF_API_KEY: str | None = Field(
+        default=None,
+        description="Hugging Face API key for multi-provider VLM fallback",
+    )
+    HF_VLM_MODEL: str = Field(
+        default="mistralai/Pixtral-12B-2409",
+        description="Hugging Face VLM model identifier for OCR assistance",
+    )
+    ENABLE_MODEL_FALLBACK: bool = Field(
+        default=False,
+        description="Explicit authorization gate for external model/VLM fallback (Spec 05)",
     )
 
 

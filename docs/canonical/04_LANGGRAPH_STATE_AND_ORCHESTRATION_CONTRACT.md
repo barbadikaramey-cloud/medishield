@@ -67,9 +67,15 @@ class CaseState(TypedDict, total=False):
     # Missing documents tracking (B-3)
     missing_documents: Optional[List[str]]  # Doc types still required, e.g. ["ID_DOCUMENT"]
 
+    # Stage B Specialists
     policy_coverage_execution_id: Optional[str]
     policy_coverage_verdict: Optional[str]
     policy_coverage_summary: Optional[Dict[str, Any]]
+    
+    clinical_alignment_execution_id: Optional[str]
+    clinical_alignment_verdict: Optional[str]
+    clinical_alignment_confidence: Optional[float]
+    clinical_alignment_summary: Optional[Dict[str, Any]]
 
     fraud_execution_id: Optional[str]
     fraud_verdict: Optional[str]
@@ -120,11 +126,15 @@ flowchart TD
 
     JoinClaimReady -- Valid Claims + Resolved Policy Version --> NodePolCoverage[Node 6A: Policy Coverage RAG<br/>Docling Chunks + Vector Search]
     
+    NodeClaims --> ForkClin[Trigger Clinical Alignment]
+    ForkClin --> NodeClinical[Node 6C: Clinical Alignment Specialist<br/>Deterministic Catalog & Line Evidence]
+
     NodeClaims --> ForkFraud[Trigger Fraud]
     NodeKYC --> ForkFraud
     ForkFraud --> NodeFraud[Node 6B: Fraud Detection Agent<br/>Deterministic Scoring & History]
 
     NodePolCoverage --> JoinAll[Sync Barrier: All Specialists Complete]
+    NodeClinical --> JoinAll
     NodeFraud --> JoinAll
     NodeKYC --> JoinAll
 
@@ -195,6 +205,12 @@ flowchart TD
 - **Concurrency Advantage:** Executes immediately once claims amounts and provider NPI are available, without waiting for the Policy RAG node.
 - **Action:** Evaluates 7 deterministic fraud features against historical claims DB.
 - **Output:** Emits `fraud_score` (0.0 to 1.0), `fraud_risk_level`, and `fraud_verdict`.
+
+### Node 6C: Clinical Alignment Specialist (`clinical_alignment_node`)
+- **Precondition:** Triggered in Stage B parallel phase once Claims extraction (Node 5B) completes and clinical documents are available.
+- **Action:** Deterministically cross-verifies billed claim service lines (CPT/HCPCS, revenue codes, bed-day units) against physical clinical documentation (discharge summaries, operative notes, diagnostic reports) using versioned LCD/NCD coverage policies (ADR-015).
+- **State Mutation:** Updates `clinical_alignment_execution_id`, `clinical_alignment_verdict`, `clinical_alignment_confidence`, and `clinical_alignment_summary` on `CaseState`.
+- **Output:** Emits typed `ClinicalAlignmentOutput` to `JoinAll` synchronization barrier.
 
 ### Node 7: Faithfulness Gate (`faithfulness_gate_node`)
 - **Action:** Cross-verifies all extracted fields against physical OCR text spans and verifies all cited policy clauses against retrieved vector texts.

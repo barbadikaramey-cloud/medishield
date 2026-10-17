@@ -6,11 +6,12 @@ from pathlib import Path
 from typing import Protocol
 
 from medishield.core.config import settings
+from medishield.core.tracing import trace_span
 
 
 def sanitize_filename(filename: str) -> str:
     """Removes path separators and unsafe characters from filenames."""
-    clean = os.path.basename(filename)
+    clean = os.path.basename(filename.replace("\\", "/"))
     return re.sub(r"[^\w\.-]", "_", clean)
 
 
@@ -82,13 +83,32 @@ class InMemoryStorageBackend:
         data: bytes,
         content_type: str = "application/octet-stream",
     ) -> str:
-        self._store[object_key] = (data, content_type)
-        return build_s3_uri(self.bucket_name, object_key)
+        with trace_span(
+            name="storage_put_bytes",
+            run_type="tool",
+            component="storage_backend",
+            operation="put_bytes",
+            inputs={},
+        ) as span:
+            self._store[object_key] = (data, content_type)
+            uri = build_s3_uri(self.bucket_name, object_key)
+            span.set_summary(status="SUCCESS", is_complete=True)
+            return uri
 
     def get_bytes(self, object_key: str) -> bytes:
-        if object_key not in self._store:
-            raise KeyError(f"Object key '{object_key}' not found in storage bucket '{self.bucket_name}'")
-        return self._store[object_key][0]
+        with trace_span(
+            name="storage_get_bytes",
+            run_type="tool",
+            component="storage_backend",
+            operation="get_bytes",
+            inputs={},
+        ) as span:
+            if object_key not in self._store:
+                span.set_summary(status="FAILED", is_complete=False)
+                raise KeyError(f"Object key '{object_key}' not found in storage bucket '{self.bucket_name}'")
+            val = self._store[object_key][0]
+            span.set_summary(status="SUCCESS", is_complete=True)
+            return val
 
     def exists(self, object_key: str) -> bool:
         return object_key in self._store
@@ -164,18 +184,39 @@ class LocalFilesystemStorageBackend:
         data: bytes,
         content_type: str = "application/octet-stream",
     ) -> str:
-        path = self._resolve_path(object_key)
-        path.write_bytes(data)
-        return build_s3_uri(self.bucket_name, self._clean_key(object_key))
+        with trace_span(
+            name="storage_put_bytes",
+            run_type="tool",
+            component="storage_backend",
+            operation="put_bytes",
+            inputs={},
+        ) as span:
+            path = self._resolve_path(object_key)
+            path.write_bytes(data)
+            uri = build_s3_uri(self.bucket_name, self._clean_key(object_key))
+            span.set_summary(status="SUCCESS", is_complete=True)
+            return uri
 
     def get_bytes(self, object_key: str) -> bytes:
-        path = self._resolve_path(object_key)
-        if not path.exists():
-            fallback = self._find_fallback_path(object_key)
-            if fallback and fallback.exists():
-                return fallback.read_bytes()
-            raise KeyError(f"Object '{object_key}' does not exist in storage: {path}")
-        return path.read_bytes()
+        with trace_span(
+            name="storage_get_bytes",
+            run_type="tool",
+            component="storage_backend",
+            operation="get_bytes",
+            inputs={},
+        ) as span:
+            path = self._resolve_path(object_key)
+            if not path.exists():
+                fallback = self._find_fallback_path(object_key)
+                if fallback and fallback.exists():
+                    val = fallback.read_bytes()
+                    span.set_summary(status="SUCCESS", is_complete=True)
+                    return val
+                span.set_summary(status="FAILED", is_complete=False)
+                raise KeyError(f"Object '{object_key}' does not exist in storage: {path}")
+            val = path.read_bytes()
+            span.set_summary(status="SUCCESS", is_complete=True)
+            return val
 
     def exists(self, object_key: str) -> bool:
         path = self._resolve_path(object_key)

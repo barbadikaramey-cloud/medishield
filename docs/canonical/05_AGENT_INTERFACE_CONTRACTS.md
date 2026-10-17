@@ -300,6 +300,131 @@ class FraudAgentOutput(BaseModel):
 
 ---
 
+## 7B. Clinical Alignment Specialist Contracts
+
+The Clinical Alignment Specialist validates billed claim lines against clinical notes, operative reports, diagnostic findings, and authoritative LCD/NCD coverage policies (ADR-015).
+
+```python
+class ServiceModality(str, Enum):
+    SURGICAL_PROCEDURE = "SURGICAL_PROCEDURE"
+    MEDICAL_VISIT_OR_EVAL = "MEDICAL_VISIT_OR_EVAL"
+    DIAGNOSTIC_IMAGING = "DIAGNOSTIC_IMAGING"
+    LABORATORY_TEST = "LABORATORY_TEST"
+    PHARMACEUTICAL = "PHARMACEUTICAL"
+    ROOM_AND_BOARD = "ROOM_AND_BOARD"
+    OTHER_SERVICE = "OTHER_SERVICE"
+
+class PerformanceEvidenceStatus(str, Enum):
+    ORDERED_ONLY = "ORDERED_ONLY"
+    DIRECTLY_DOCUMENTED_PERFORMANCE = "DIRECTLY_DOCUMENTED_PERFORMANCE"
+    RESULTED = "RESULTED"
+    NOT_DOCUMENTED = "NOT_DOCUMENTED"
+    EXPLICITLY_CONTRADICTED = "EXPLICITLY_CONTRADICTED"
+    CONFIRMED_NON_PERFORMANCE = "CONFIRMED_NON_PERFORMANCE"
+
+class ClinicalIndicationStatus(str, Enum):
+    EXPLICITLY_INDICATED = "EXPLICITLY_INDICATED"
+    POTENTIALLY_RELATED = "POTENTIALLY_RELATED"
+    NO_DOCUMENTED_INDICATION = "NO_DOCUMENTED_INDICATION"
+    CLINICALLY_CONTRAINDICATED = "CLINICALLY_CONTRAINDICATED"
+
+class MedicalNecessityStatus(str, Enum):
+    MET = "MET"
+    NOT_MET = "NOT_MET"
+    CRITERIA_INCOMPLETE = "CRITERIA_INCOMPLETE"
+    GUIDELINE_UNAVAILABLE = "GUIDELINE_UNAVAILABLE"
+
+class PriorAuthRequirementStatus(str, Enum):
+    NOT_REQUIRED = "NOT_REQUIRED"
+    REQUIRED = "REQUIRED"
+    REQUIREMENT_UNKNOWN = "REQUIREMENT_UNKNOWN"
+
+class PriorAuthVerificationStatus(str, Enum):
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    VERIFIED_APPROVED = "VERIFIED_APPROVED"
+    VERIFIED_DENIED = "VERIFIED_DENIED"
+    MISSING_OR_UNVERIFIED = "MISSING_OR_UNVERIFIED"
+    AUTH_SERVICE_UNAVAILABLE = "AUTH_SERVICE_UNAVAILABLE"
+
+class RepeatServiceStatus(str, Enum):
+    NOT_A_REPEATED_SERVICE = "NOT_A_REPEATED_SERVICE"
+    REPEATED_AND_JUSTIFIED = "REPEATED_AND_JUSTIFIED"
+    REPEATED_AND_UNJUSTIFIED = "REPEATED_AND_UNJUSTIFIED"
+    UNASSESSED = "UNASSESSED"
+
+class LineClinicalEvidence(BaseModel):
+    line_number: int
+    service_code: str
+    modality: ServiceModality
+    performance_status: PerformanceEvidenceStatus
+    indication_status: ClinicalIndicationStatus
+    necessity_status: MedicalNecessityStatus
+    guideline_citation: Optional[GuidelineCitation] = None
+    prior_auth_requirement: PriorAuthRequirementStatus = PriorAuthRequirementStatus.REQUIREMENT_UNKNOWN
+    prior_auth_verification: PriorAuthVerificationStatus = PriorAuthVerificationStatus.MISSING_OR_UNVERIFIED
+    repeat_service_status: RepeatServiceStatus = RepeatServiceStatus.UNASSESSED
+    supporting_spans: List[FieldProvenance] = Field(default_factory=list)
+    line_verdict: AgentVerdict
+    confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
+    clinical_finding_summary: str = ""
+    discrepancy_description: Optional[str] = None
+
+class FacilityBillingConvention(str, Enum):
+    MIDNIGHT_CENSUS = "MIDNIGHT_CENSUS"
+    CALENDAR_DAY_SPAN = "CALENDAR_DAY_SPAN"
+    SAME_DAY_OBSERVATION = "SAME_DAY_OBSERVATION"
+    FRACTIONAL_HOURLY = "FRACTIONAL_HOURLY"
+
+class BedDayBillingRuleContract(BaseModel):
+    rule_id: str
+    convention: FacilityBillingConvention
+    allowed_tolerance_days: int = 0
+    requires_exact_timestamps: bool = True
+
+class BedDayReconciliation(BaseModel):
+    billing_rule: BedDayBillingRuleContract
+    claim_facility_type: str
+    claim_type: str
+    admission_datetime: Optional[datetime] = None
+    discharge_datetime: Optional[datetime] = None
+    admission_date: date
+    discharge_date: date
+    timestamps_complete: bool
+    calendar_days_stayed: Optional[int] = None
+    expected_billable_units_min: float
+    expected_billable_units_max: float
+    billed_bed_days: float
+    is_reconciled: bool
+    discrepancy_units: float = 0.0
+    uncertainty_flag: bool = False
+    reconciliation_verdict: AgentVerdict
+    remarks: str = ""
+
+class ClinicalAlignmentOutput(BaseModel):
+    execution_id: str
+    case_id: str
+    verdict: AgentVerdict
+    confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
+    expected_claim_line_numbers: List[int]
+    total_lines_assessed: int
+    line_assessments: List[LineClinicalEvidence]
+    bed_day_reconciliation: Optional[BedDayReconciliation] = None
+    lines_fully_supported_count: int
+    lines_indeterminate_count: int
+    lines_contradicted_count: int
+    lines_failed_necessity_count: int
+    lines_unavailable_count: int
+    unsupported_billed_amount: float
+    clinical_documents_present: List[str]
+    low_ocr_quality_pages: List[int]
+    assessment_sufficient: bool
+    clinical_summary: str
+    blocking_discrepancies: List[str]
+    latency_ms: int
+```
+
+---
+
 ## 8. Orchestrator & Decision Engine Contract
 
 The Decision Engine produces the authoritative, legally binding business determination.
@@ -319,7 +444,7 @@ class OrchestratorOutput(BaseModel):
     
     agent_summaries: Dict[str, Any] = Field(
         ..., 
-        description="Consolidated snapshot of KYC, Claims, Policy, and Fraud results"
+        description="Consolidated snapshot of KYC, Claims, Policy, Clinical Alignment, and Fraud results"
     )
     is_auto_decided: bool = True
     created_at: datetime

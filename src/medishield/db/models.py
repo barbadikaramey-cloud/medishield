@@ -27,6 +27,7 @@ from medishield.db.enums import (
     ActorType,
     AgentVerdict,
     BusinessDecision,
+    CodingSystem,
     DocumentType,
     EscalationSubReason,
     WorkflowState,
@@ -35,6 +36,7 @@ from medishield.db.session import Base
 
 
 class Case(Base):
+
     """Case Management Aggregate: Primary operational entity for claims processing."""
     __tablename__ = "cases"
 
@@ -629,3 +631,47 @@ class IdempotencyKey(Base):
         server_default=text("CURRENT_TIMESTAMP"),
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class MedicalCode(Base):
+    """Authoritative clinical code and terminology catalog entry (CPT, HCPCS, ICD-10, Revenue)."""
+    __tablename__ = "medical_codes"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("uuid_generate_v4()"),
+    )
+    code: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    coding_system: Mapped[CodingSystem] = mapped_column(
+        SQLEnum(CodingSystem, name="coding_system_enum", native_enum=True),
+        nullable=False,
+        index=True,
+    )
+    short_description: Mapped[str] = mapped_column(String(255), nullable=False)
+    long_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    standard_charge: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    requires_prior_auth: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    effective_from: Mapped[date | None] = mapped_column(Date, nullable=True)
+    effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("coding_system", "code", name="uq_medical_codes_system_code"),
+        Index("idx_medical_codes_active_system", "is_active", "coding_system"),
+    )
+

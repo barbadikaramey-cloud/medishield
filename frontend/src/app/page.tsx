@@ -4,18 +4,22 @@ import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
+  ArrowRight,
   CheckCircle2,
   Clock,
   FileText,
   Filter,
+  Lock,
   Plus,
   RefreshCw,
   Search,
+  ShieldCheck,
   Trash2,
   Upload,
   X,
   XCircle,
 } from "lucide-react";
+import { useAuth } from "@/lib/auth";
 import { getCases, submitIntake, CaseListItem } from "@/lib/api";
 
 function formatFileSize(bytes: number): string {
@@ -33,6 +37,7 @@ const STATUS_FILTERS = [
 ];
 
 export default function QueueDashboardPage() {
+  const { user, loading: authLoading } = useAuth();
   const [cases, setCases] = useState<CaseListItem[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [activeFilter, setActiveFilter] = useState("");
@@ -136,6 +141,27 @@ export default function QueueDashboardPage() {
   const filteredCases = cases.filter((c) =>
     searchQuery ? c.case_id.toLowerCase().includes(searchQuery.toLowerCase()) : true
   );
+
+  if (!authLoading && user?.role === "CLAIMER") {
+    return (
+      <div className="max-w-2xl mx-auto py-16 text-center">
+        <div className="p-4 bg-cyan-950/40 border border-cyan-800/80 rounded-2xl mb-6 inline-block">
+          <ShieldCheck className="w-12 h-12 text-cyan-400 mx-auto" />
+        </div>
+        <h2 className="text-2xl font-bold text-white mb-2">Claimer Account Detected</h2>
+        <p className="text-sm text-slate-400 mb-6 max-w-lg mx-auto leading-relaxed">
+          You are authenticated as a <strong>Claimer</strong> (Patient / Provider). Under MediShield RBAC (ADR-012/ADR-013), the internal operational review queue is reserved for licensed claims adjusters.
+        </p>
+        <Link
+          href="/claimer"
+          className="inline-flex items-center space-x-2 px-5 py-2.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg font-semibold text-sm transition-colors shadow-lg shadow-cyan-950"
+        >
+          <span>Open Claimer Portal</span>
+          <ArrowRight className="w-4 h-4" />
+        </Link>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

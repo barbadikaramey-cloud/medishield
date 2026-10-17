@@ -221,7 +221,89 @@ def generate_deterministic_explanation(
 
     lines.extend([
         "",
-        "#### 5. Operator Guidance & Recommended Action",
+        "#### 5. Cross-Document Consistency & Regulatory Attestation",
+    ])
+
+    cr = getattr(context, "consistency_report", None)
+    if cr:
+        is_consistent = _safe_get(cr, "is_consistent", True)
+        lines.append(f"- **Overall Consistency:** {'✅ Cross-document integrity verified' if is_consistent else '⚠️ Inconsistency or missing attestation detected'}")
+        
+        doc_sig = _safe_get(cr, "doctor_signature_verified", True)
+        lines.append(f"- **Doctor Signature / Attestation:** {'✅ Verified on clinical record' if doc_sig else '❌ Missing or unverified on clinical record'}")
+
+        pat_sig = _safe_get(cr, "patient_signature_verified", True)
+        lines.append(f"- **Patient Signature / Assignment:** {'✅ Verified on claim documentation' if pat_sig else '❌ Missing patient signature or assignment of benefits'}")
+
+        npi_ver = _safe_get(cr, "npi_verified", True)
+        lines.append(f"- **Rendering Provider NPI:** {'✅ Verified valid 10-digit NPI' if npi_ver else '❌ Missing or invalid rendering provider NPI'}")
+
+        pa_ver = _safe_get(cr, "prior_authorization_verified", True)
+        lines.append(f"- **Prior Authorization:** {'✅ Verified or not required' if pa_ver else '❌ Missing mandatory prior authorization for major procedure'}")
+
+        proc_ver = _safe_get(cr, "procedure_codes_verified", True)
+        if not proc_ver:
+            uncoded_amt = float(_safe_get(cr, "unvalidated_charges_total", 0.0) or 0.0)
+            lines.append(f"- **Procedure Code Validation:** ❌ Unvalidated line charges (${uncoded_amt:,.2f}) lack authoritative CPT/HCPCS procedure code")
+        else:
+            lines.append("- **Procedure Code Validation:** ✅ All billed line charges mapped to recognized procedure codes")
+
+        date_summary = _safe_get(cr, "date_reconciliation_summary")
+        if date_summary:
+            lines.append(f"- **Date Reconciliation:** {date_summary}")
+        else:
+            dates_ok = _safe_get(cr, "dates_consistent", True)
+            lines.append(f"- **Date Consistency:** {'✅ Chronologically aligned across records' if dates_ok else '❌ Incompatible service and discharge dates'}")
+
+        conflicts = _safe_get(cr, "conflicts_detected", [])
+        if conflicts:
+            lines.append(f"- **Detected Conflicts:** {'; '.join(conflicts)}")
+
+        reasons = _safe_get(cr, "specific_escalation_reasons", [])
+        if reasons:
+            lines.append(f"- **Specific Escalation Triggers:** {'; '.join(reasons)}")
+    else:
+        lines.append("- *Cross-document consistency evaluation record not available.*")
+
+    lines.extend([
+        "",
+        "#### 6. Clinical Alignment & Medical Necessity (ADR-015)",
+    ])
+
+    clin = getattr(context, "clinical_output", None)
+    if clin:
+        c_verdict = _safe_get(clin, "verdict")
+        c_v_str = c_verdict.value if hasattr(c_verdict, "value") else str(c_verdict or "PASS")
+        c_conf = _safe_get(clin, "confidence")
+        conf_str = f"{float(c_conf) * 100:.1f}%" if c_conf is not None else "Uncalibrated"
+        lines.append(f"- **Clinical Alignment Verdict:** `{c_v_str}` (Confidence: {conf_str})")
+        lines.append(f"- **Line Items Evaluated:** {getattr(clin, 'total_lines_assessed', 0)} total | {getattr(clin, 'lines_fully_supported_count', 0)} fully supported")
+        if getattr(clin, "lines_indeterminate_count", 0) > 0:
+            lines.append(f"- **Indeterminate Lines:** {getattr(clin, 'lines_indeterminate_count', 0)} line item(s) require guideline review")
+        if getattr(clin, "lines_failed_necessity_count", 0) > 0:
+            lines.append(f"- **Necessity Gaps:** {getattr(clin, 'lines_failed_necessity_count', 0)} line item(s) unfulfilled under standard medical guidelines")
+        discrepancies = _safe_get(clin, "blocking_discrepancies", [])
+        line_assessments = getattr(clin, "line_assessments", []) or []
+        all_discs = list(discrepancies)
+        for la in line_assessments:
+            desc = getattr(la, "discrepancy_description", None)
+            if desc and desc not in all_discs:
+                all_discs.append(desc)
+
+        if all_discs:
+            lines.append("- **Clinical Discrepancies & Guideline Findings:**")
+            for d in all_discs:
+                lines.append(f"  - ⚠️ {d}")
+
+        c_summary = _safe_get(clin, "clinical_summary")
+        if c_summary:
+            lines.append(f"- **Clinical Assessment Summary:** {c_summary}")
+    else:
+        lines.append("- *Clinical alignment specialist assessment not available.*")
+
+    lines.extend([
+        "",
+        "#### 7. Operator Guidance & Recommended Action",
     ])
 
     if decision_output.decision == BusinessDecision.APPROVE:
@@ -237,8 +319,8 @@ def generate_deterministic_explanation(
     else:  # ESCALATE
         lines.append(
             "- **Human Review Required:** Automated straight-through processing was halted per governance rules. "
-            "Operator should inspect the flagged items above (such as OCR discrepancies, policy coverage ambiguities, "
-            "or fraud risk indicators) and apply human review discretion."
+            "Operator should inspect the flagged items above (such as missing signatures, prior authorization, "
+            "policy coverage ambiguities, or fraud risk indicators) and apply human review discretion."
         )
 
     return "\n".join(lines)
@@ -260,9 +342,10 @@ def generate_decision_explanation(
         return generate_deterministic_explanation(context, decision_output)
 
     # Compile structured summary of deterministic facts for LLM synthesis
+    claims_out = getattr(context, "claims_output", None)
     claim_val = 0.0
-    if context.claims_output:
-        ca = _safe_get(context.claims_output, "claim_amount")
+    if claims_out:
+        ca = _safe_get(claims_out, "claim_amount")
         if ca is not None:
             raw_ca = ca.value if hasattr(ca, "value") else ca
             try:
@@ -270,8 +353,14 @@ def generate_decision_explanation(
             except (ValueError, TypeError):
                 claim_val = 0.0
 
+    kyc_out = getattr(context, "kyc_output", None)
+    pol_out = getattr(context, "policy_output", None)
+    fraud_out = getattr(context, "fraud_output", None)
+    cr_out = getattr(context, "consistency_report", None)
+    clin_out = getattr(context, "clinical_output", None)
+
     prompt_payload = {
-        "case_id": context.case_id,
+        "case_id": getattr(context, "case_id", "UNKNOWN"),
         "binding_decision": decision_output.decision.value,
         "rule_id_matched": decision_output.rule_id_matched,
         "escalation_sub_reason": (
@@ -282,36 +371,59 @@ def generate_decision_explanation(
         "confidence": round(decision_output.decision_confidence, 4),
         "deterministic_justification": decision_output.justification,
         "kyc": {
-            "verdict": str(_safe_get(context.kyc_output, "verdict", "N/A")),
-            "member_matched": bool(_safe_get(context.kyc_output, "member_db_matched", False)),
-            "member_id": str(_safe_get(context.kyc_output, "member_id", "")),
-            "tamper_score": context.security_tamper_score,
-            "flags": list(_safe_get(context.kyc_output, "flags", [])),
-            "reasoning": str(_safe_get(context.kyc_output, "reasoning_summary", "")),
+            "verdict": str(_safe_get(kyc_out, "verdict", "N/A")),
+            "member_matched": bool(_safe_get(kyc_out, "member_db_matched", False)),
+            "member_id": str(_safe_get(kyc_out, "member_id", "")),
+            "tamper_score": getattr(context, "security_tamper_score", 0.0),
+            "flags": list(_safe_get(kyc_out, "flags", [])),
+            "reasoning": str(_safe_get(kyc_out, "reasoning_summary", "")),
         },
         "claims": {
-            "verdict": str(_safe_get(context.claims_output, "verdict", "N/A")),
+            "verdict": str(_safe_get(claims_out, "verdict", "N/A")),
             "claim_amount": claim_val,
-            "line_items_valid": bool(_safe_get(context.claims_output, "line_items_sum_valid", False)),
-            "cpt_codes": [str(c.value if hasattr(c, "value") else c) for c in _safe_get(context.claims_output, "cpt_codes", [])],
-            "icd10_codes": [str(c.value if hasattr(c, "value") else c) for c in _safe_get(context.claims_output, "icd10_codes", [])],
-            "validation_errors": list(_safe_get(context.claims_output, "validation_errors", [])),
+            "line_items_valid": bool(_safe_get(claims_out, "line_items_sum_valid", False)),
+            "cpt_codes": [str(c.value if hasattr(c, "value") else c) for c in _safe_get(claims_out, "cpt_codes", [])],
+            "icd10_codes": [str(c.value if hasattr(c, "value") else c) for c in _safe_get(claims_out, "icd10_codes", [])],
+            "validation_errors": list(_safe_get(claims_out, "validation_errors", [])),
         },
         "policy": {
-            "verdict": str(_safe_get(context.policy_output, "verdict", "N/A")),
-            "coverage_percentage": float(_safe_get(context.policy_output, "coverage_percentage", 0.0) or 0.0),
-            "policy_id": str(_safe_get(context.policy_output, "policy_id", "")),
-            "service_date_valid": bool(_safe_get(context.policy_output, "service_date_within_effective_period", _safe_get(context.policy_output, "effective_on_service_date", True))),
-            "exclusion_verified": bool(_safe_get(context.policy_output, "exclusion_clause_verified", False)),
-            "exclusion_clause": str(_safe_get(context.policy_output, "exclusion_clause_id", "")),
-            "cited_clauses": [str(getattr(c, "clause_title", str(c))) for c in _safe_get(context.policy_output, "cited_clauses", [])],
-            "reasoning": str(_safe_get(context.policy_output, "reasoning_summary", "")),
+            "verdict": str(_safe_get(pol_out, "verdict", "N/A")),
+            "coverage_percentage": float(_safe_get(pol_out, "coverage_percentage", 0.0) or 0.0),
+            "policy_id": str(_safe_get(pol_out, "policy_id", "")),
+            "service_date_valid": bool(_safe_get(pol_out, "service_date_within_effective_period", _safe_get(pol_out, "effective_on_service_date", True))),
+            "exclusion_verified": bool(_safe_get(pol_out, "exclusion_clause_verified", False)),
+            "exclusion_clause": str(_safe_get(pol_out, "exclusion_clause_id", "")),
+            "cited_clauses": [str(getattr(c, "clause_title", str(c))) for c in _safe_get(pol_out, "cited_clauses", [])],
+            "reasoning": str(_safe_get(pol_out, "reasoning_summary", "")),
         },
         "fraud": {
-            "verdict": str(_safe_get(context.fraud_output, "verdict", "PASS")),
-            "fraud_score": float(_safe_get(context.fraud_output, "fraud_score", 0.0) or 0.0),
-            "risk_level": str(_safe_get(context.fraud_output, "risk_level", "LOW")),
-            "anomalies": list(_safe_get(context.fraud_output, "anomalies", [])),
+            "verdict": str(_safe_get(fraud_out, "verdict", "PASS")),
+            "fraud_score": float(_safe_get(fraud_out, "fraud_score", 0.0) or 0.0),
+            "risk_level": str(_safe_get(fraud_out, "risk_level", "LOW")),
+            "anomalies": list(_safe_get(fraud_out, "anomalies", [])),
+        },
+        "consistency": {
+            "is_consistent": bool(_safe_get(cr_out, "is_consistent", True)),
+            "doctor_signature_verified": bool(_safe_get(cr_out, "doctor_signature_verified", True)),
+            "patient_signature_verified": bool(_safe_get(cr_out, "patient_signature_verified", True)),
+            "npi_verified": bool(_safe_get(cr_out, "npi_verified", True)),
+            "prior_authorization_verified": bool(_safe_get(cr_out, "prior_authorization_verified", True)),
+            "specific_escalation_reasons": list(_safe_get(cr_out, "specific_escalation_reasons", []) or []),
+            "date_reconciliation_summary": str(_safe_get(cr_out, "date_reconciliation_summary", "") or ""),
+            "conflicts": list(_safe_get(cr_out, "conflicts_detected", []) or []),
+        },
+        "clinical_alignment": {
+            "verdict": str(_safe_get(clin_out, "verdict", "N/A")),
+            "confidence": float(_safe_get(clin_out, "confidence", 1.0) or 1.0),
+            "lines_assessed": int(_safe_get(clin_out, "total_lines_assessed", 0)),
+            "lines_supported": int(_safe_get(clin_out, "lines_fully_supported_count", 0)),
+            "clinical_summary": str(_safe_get(clin_out, "clinical_summary", "")),
+            "blocking_discrepancies": list(_safe_get(clin_out, "blocking_discrepancies", []) or []),
+            "clinical_discrepancies": [
+                getattr(l, "discrepancy_description", "")
+                for l in getattr(clin_out, "line_assessments", [])
+                if getattr(l, "discrepancy_description", None)
+            ],
         },
     }
 
@@ -327,9 +439,12 @@ def generate_decision_explanation(
         "   - #### 2. Claims Financial & Line-Item Validation\n"
         "   - #### 3. Policy Coverage & Benefit Grounding\n"
         "   - #### 4. Fraud Risk & Anomaly Assessment\n"
-        "   - #### 5. Actionable Guidance for Human Reviewer / Adjuster\n"
-        "3. Explicitly cite any billed amounts, dollar totals, CPT codes, policy clauses, or anomalies from the data.\n"
-        "4. Respond with a JSON object containing a single key: 'detailed_explanation'."
+        "   - #### 5. Cross-Document Consistency & Regulatory Attestation (Doctor/Patient signatures, NPI, PA, dates)\n"
+        "   - #### 6. Clinical Alignment & Medical Necessity (ADR-015)\n"
+        "   - #### 7. Actionable Guidance for Human Reviewer / Adjuster\n"
+        "3. Explicitly cite any billed amounts, dollar totals, CPT codes, policy clauses, signatures, or anomalies from the data.\n"
+        "4. Keep each section clear and concise (2-3 concise bullet points per section) so the full JSON object closes well within token limits.\n"
+        "5. Respond with a JSON object containing a single key: 'detailed_explanation'."
     )
 
     try:
@@ -338,7 +453,7 @@ def generate_decision_explanation(
             prompt=prompt_text,
             system_prompt=system_prompt,
             temperature=0.2,
-            max_tokens=1500,
+            max_tokens=2500,
         )
         if isinstance(response, dict) and "detailed_explanation" in response:
             explanation = response["detailed_explanation"]

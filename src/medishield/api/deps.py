@@ -23,6 +23,7 @@ from medishield.db.models import (
     Decision,
     Document,
     HumanReview,
+    MedicalCode,
     Policy,
     PolicyVersion,
     ReviewLock,
@@ -35,12 +36,14 @@ from medishield.intake.storage import (
 
 logger = logging.getLogger(__name__)
 
-# Authoritative RBAC Roles (Spec 08 § 1.1, Spec 11 § 1)
+# Authoritative RBAC Roles (Spec 08 § 1.1, Spec 11 § 1, ADR-012)
+ROLE_CLAIMER = "CLAIMER"
 ROLE_REVIEWER = "OPERATIONS_REVIEWER"
 ROLE_MANAGER = "OPERATIONS_MANAGER"
 ROLE_ADMIN = "ADMINISTRATOR"
 
-ALL_ROLES = {ROLE_REVIEWER, ROLE_MANAGER, ROLE_ADMIN}
+ALL_ROLES = {ROLE_CLAIMER, ROLE_REVIEWER, ROLE_MANAGER, ROLE_ADMIN}
+
 
 
 class AuthUser(BaseModel):
@@ -109,7 +112,9 @@ class InMemoryDBSession:
         self.policies: list[Policy] = []
         self.policy_versions: list[PolicyVersion] = []
         self.audit_events: list[AuditEvent] = []
+        self.medical_codes: list[MedicalCode] = []
         self._seed_demo_records()
+
 
     def _seed_demo_records(self) -> None:
         now = datetime.now(UTC)
@@ -253,7 +258,10 @@ class InMemoryDBSession:
             return InMemoryQuery(self.policy_versions)
         if model_class is AuditEvent:
             return InMemoryQuery(self.audit_events)
+        if model_class is MedicalCode:
+            return InMemoryQuery(self.medical_codes)
         return InMemoryQuery([])
+
 
     def add(self, obj: Any) -> None:
         if isinstance(obj, Case):
@@ -301,6 +309,11 @@ class InMemoryDBSession:
             if not getattr(obj, "id", None):
                 obj.id = uuid.uuid4()
             self.audit_events.append(obj)
+        elif isinstance(obj, MedicalCode):
+            if not getattr(obj, "id", None):
+                obj.id = uuid.uuid4()
+            self.medical_codes.append(obj)
+
 
     def flush(self) -> None:
         pass
@@ -424,6 +437,9 @@ def get_current_user(
                 return AuthUser(user_id="mgr-01", username="manager", role=ROLE_MANAGER)
             if "reviewer" in token.lower():
                 return AuthUser(user_id="rev-01", username="reviewer", role=ROLE_REVIEWER)
+            if "claimer" in token.lower():
+                return AuthUser(user_id="claimer-01", username="claimer", role=ROLE_CLAIMER)
+
 
             # Standard token decode with fallback
             try:
@@ -431,7 +447,8 @@ def get_current_user(
                 payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
                 role = payload.get("role", ROLE_REVIEWER)
                 user_id = payload.get("sub", "user-01")
-                return AuthUser(user_id=user_id, username=user_id, role=role)
+                username = payload.get("username", user_id)
+                return AuthUser(user_id=user_id, username=username, role=role)
             except (JWTError, ValueError) as exc:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,

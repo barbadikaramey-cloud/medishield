@@ -65,7 +65,8 @@ Action   │       Auto-Eligible     │   Conditional Escalate  │    Mandator
      - If accompanied by any secondary borderline confidence ($< 0.75$) or material uncertainty, it escalates to `AWAITING_HUMAN` (`ESCALATE(HUMAN_REVIEW)`).
 
 3. **HIGH RISK (`fraud_score >= 0.70`):**
-   - Severe anomaly detected (e.g., duplicate claim key match, future service date, or confirmed digital image tampering).
+   - Severe anomaly detected (e.g., cumulative fraud score $\ge 0.70$ resulting from multiple compounding features: duplicate collision F-01 weight $0.30$ combined with image tamper F-02, velocity F-03, or provider outlier F-04).
+   - *Duplicate Collision Note:* Standalone duplicate tuple collision F-01 ($0.30$) without secondary anomalies falls into Medium Risk and definitively triggers Rule P7 (`RULE-P7-BORDERLINE-REVIEW`). Overriding standalone F-01 to High Risk (Rule P4) is subject to formal SIU Director governance approval (Decision 5).
    - Fraud verdict: `FAIL`.
    - Action: **Mandatory Escalation** under Decision Rule P4 to `AWAITING_HUMAN` (`ESCALATE(FRAUD_REVIEW)`).
 

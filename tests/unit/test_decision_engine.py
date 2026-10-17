@@ -16,6 +16,8 @@ from medishield.domain.contracts import (
     PolicyCoverageOutput,
     ProvenanceValue,
     RiskLevel,
+    ServiceLine,
+    build_clinical_alignment_output,
 )
 from medishield.domain.decision import (
     RULE_P1_SECURITY,
@@ -35,6 +37,7 @@ from medishield.domain.state_machine import (
     resolve_decision_workflow_state,
     validate_transition,
 )
+from tests.unit.test_clinical_alignment import make_clean_line_evidence
 
 
 def make_claims_output(
@@ -48,6 +51,16 @@ def make_claims_output(
         claim_amount=prov,
         service_date=ProvenanceValue(value="2026-08-01", confidence=0.99),
         provider_npi=ProvenanceValue(value="1234567890", confidence=0.95),
+        cpt_codes=[ProvenanceValue(value="99213", confidence=0.96)],
+        service_lines=[
+            ServiceLine(
+                line_number=1,
+                hcpcs=ProvenanceValue(value="99213", confidence=0.96),
+                service_date=ProvenanceValue(value="2026-08-01", confidence=0.99),
+                units=ProvenanceValue(value=1.0, confidence=1.0),
+                amount=ProvenanceValue(value=150.00, confidence=0.98),
+            )
+        ],
         schema_valid=True,
         line_items_sum_valid=True,
         calculated_lines_sum=150.00,
@@ -64,6 +77,7 @@ def make_policy_output(
         confidence=confidence,
         covered=True,
         coverage_percentage=80.0,
+        applicable_service_codes=["99213"],
         reasoning_summary="Eligible covered service.",
         latency_ms=100,
     )
@@ -200,6 +214,33 @@ class TestDeterministicDecisionEngine:
         assert output.escalation_sub_reason == EscalationSubReason.FRAUD_REVIEW
         assert output.rule_id_matched == RULE_P4_HIGH_FRAUD
 
+    def test_rule_p4_duplicate_claim_triggers_fraud_review(
+        self, engine: DeterministicDecisionEngine
+    ) -> None:
+        context = DecisionInputContext(
+            case_id="CASE-P4-DUP",
+            execution_id="EXEC-P4-DUP",
+            present_document_types=[DocumentType.CLAIM_FORM, DocumentType.ID_DOCUMENT],
+            kyc_output=KYCAgentOutput(verdict=AgentVerdict.PASS, confidence=0.9, latency_ms=100),
+            claims_output=make_claims_output(AgentVerdict.PASS, confidence=0.9),
+            policy_output=make_policy_output(AgentVerdict.PASS, confidence=0.9),
+            fraud_output=FraudAgentOutput(
+                agent_name="fraud",
+                verdict=AgentVerdict.INDETERMINATE,
+                confidence=0.9,
+                fraud_score=0.30,
+                risk_level=RiskLevel.MEDIUM,
+                duplicate_claim_detected=True,
+                duplicate_claim_id="CLM-2024-000005",
+                anomalies=["Collision detected with historical claim 'CLM-2024-000005'"],
+                latency_ms=100,
+            ),
+        )
+        output = engine.evaluate(context)
+        assert output.decision == BusinessDecision.ESCALATE
+        assert output.escalation_sub_reason == EscalationSubReason.FRAUD_REVIEW
+        assert output.rule_id_matched == RULE_P4_HIGH_FRAUD
+
     def test_rule_p5_hard_reject(self, engine: DeterministicDecisionEngine) -> None:
         context = DecisionInputContext(
             case_id="CASE-P5",
@@ -223,8 +264,8 @@ class TestDeterministicDecisionEngine:
             ),
         )
         output = engine.evaluate(context)
-        assert output.decision == BusinessDecision.ESCALATE
-        assert output.escalation_sub_reason == EscalationSubReason.RECOMMEND_DENIAL
+        assert output.decision == BusinessDecision.REJECT
+        assert output.recommendation_tag == EscalationSubReason.RECOMMEND_DENIAL.value
         assert output.is_auto_decided is True
         assert output.rule_id_matched == RULE_P5_HARD_REJECT
 
@@ -261,10 +302,25 @@ class TestDeterministicDecisionEngine:
         assert output.recommendation_tag is None
 
     def test_rule_p6_clean_auto_approve(self, engine: DeterministicDecisionEngine) -> None:
+        clin_evidence = make_clean_line_evidence(
+            line_number=1,
+            service_code="99213",
+            billed_units=1.0,
+            billed_amount=150.00,
+        )
+        clin_output = build_clinical_alignment_output(
+            expected_line_numbers=[1],
+            line_assessments=[clin_evidence],
+            clinical_documents_present=True,
+        )
         context = DecisionInputContext(
             case_id="CASE-P6",
             execution_id="EXEC-P6",
-            present_document_types=[DocumentType.CLAIM_FORM, DocumentType.ID_DOCUMENT],
+            present_document_types=[
+                DocumentType.CLAIM_FORM,
+                DocumentType.ID_DOCUMENT,
+                DocumentType.DISCHARGE_SUMMARY,
+            ],
             kyc_output=KYCAgentOutput(
                 agent_name="kyc",
                 verdict=AgentVerdict.PASS,
@@ -281,6 +337,7 @@ class TestDeterministicDecisionEngine:
                 risk_level=RiskLevel.LOW,
                 latency_ms=100,
             ),
+            clinical_output=clin_output,
         )
         output = engine.evaluate(context)
         assert output.decision == BusinessDecision.APPROVE
@@ -313,3 +370,83 @@ class TestDeterministicDecisionEngine:
         assert output.decision == BusinessDecision.ESCALATE
         assert output.escalation_sub_reason == EscalationSubReason.HUMAN_REVIEW
         assert output.rule_id_matched == RULE_P7_BORDERLINE_REVIEW
+
+    def test_rule_p6_inadmissible_missing_cpt_codes(self, engine: DeterministicDecisionEngine) -> None:
+        """Proves that a claim with no CPT codes cannot auto-approve and escalates to human review."""
+        claims = make_claims_output(AgentVerdict.PASS, confidence=0.95)
+        claims.cpt_codes = []
+        claims.service_lines = []
+
+        context = DecisionInputContext(
+            case_id="CASE-P6-NO-CPT",
+            execution_id="EXEC-P6-NO-CPT",
+            present_document_types=[DocumentType.CLAIM_FORM, DocumentType.ID_DOCUMENT],
+            kyc_output=KYCAgentOutput(verdict=AgentVerdict.PASS, confidence=0.95, latency_ms=10),
+            claims_output=claims,
+            policy_output=make_policy_output(AgentVerdict.PASS, confidence=0.95),
+            fraud_output=FraudAgentOutput(verdict=AgentVerdict.PASS, confidence=0.95, fraud_score=0.1, risk_level=RiskLevel.LOW, latency_ms=10),
+        )
+        output = engine.evaluate(context)
+        assert output.decision == BusinessDecision.ESCALATE
+        assert output.rule_id_matched == RULE_P7_BORDERLINE_REVIEW
+        assert "incomplete claims coding" in output.justification
+
+    def test_rule_p6_inadmissible_missing_policy_scope(self, engine: DeterministicDecisionEngine) -> None:
+        """Proves that policy PASS without verified applicable service codes cannot auto-approve."""
+        pol = make_policy_output(AgentVerdict.PASS, confidence=0.95)
+        pol.applicable_service_codes = []
+
+        context = DecisionInputContext(
+            case_id="CASE-P6-NO-SCOPE",
+            execution_id="EXEC-P6-NO-SCOPE",
+            present_document_types=[DocumentType.CLAIM_FORM, DocumentType.ID_DOCUMENT],
+            kyc_output=KYCAgentOutput(verdict=AgentVerdict.PASS, confidence=0.95, latency_ms=10),
+            claims_output=make_claims_output(AgentVerdict.PASS, confidence=0.95),
+            policy_output=pol,
+            fraud_output=FraudAgentOutput(verdict=AgentVerdict.PASS, confidence=0.95, fraud_score=0.1, risk_level=RiskLevel.LOW, latency_ms=10),
+        )
+        output = engine.evaluate(context)
+        assert output.decision == BusinessDecision.ESCALATE
+        assert output.rule_id_matched == RULE_P7_BORDERLINE_REVIEW
+        assert "policy coverage lacks verified applicable service code mapping" in output.justification
+
+    def test_rule_p6_requires_policy_scope_for_every_billed_code(
+        self, engine: DeterministicDecisionEngine
+    ) -> None:
+        """A match for one CPT must not cover another unmatched billed CPT."""
+        claims = make_claims_output(AgentVerdict.PASS, confidence=0.95)
+        claims.cpt_codes.append(ProvenanceValue(value="93000", confidence=0.96))
+        policy = make_policy_output(AgentVerdict.PASS, confidence=0.95)
+        policy.applicable_service_codes = ["99213"]
+
+        context = DecisionInputContext(
+            case_id="CASE-P6-PARTIAL-SCOPE",
+            execution_id="EXEC-P6-PARTIAL-SCOPE",
+            present_document_types=[DocumentType.CLAIM_FORM, DocumentType.ID_DOCUMENT],
+            kyc_output=KYCAgentOutput(verdict=AgentVerdict.PASS, confidence=0.95, latency_ms=10),
+            claims_output=claims,
+            policy_output=policy,
+            fraud_output=FraudAgentOutput(verdict=AgentVerdict.PASS, confidence=0.95, fraud_score=0.1, risk_level=RiskLevel.LOW, latency_ms=10),
+        )
+
+        output = engine.evaluate(context)
+
+        assert output.decision == BusinessDecision.ESCALATE
+        assert output.rule_id_matched == RULE_P7_BORDERLINE_REVIEW
+        assert "policy coverage lacks verified applicable service code mapping" in output.justification
+
+    def test_rule_p6_inadmissible_missing_fraud_evaluation(self, engine: DeterministicDecisionEngine) -> None:
+        """Proves that a claim with missing fraud evaluation cannot auto-approve."""
+        context = DecisionInputContext(
+            case_id="CASE-P6-NO-FRAUD",
+            execution_id="EXEC-P6-NO-FRAUD",
+            present_document_types=[DocumentType.CLAIM_FORM, DocumentType.ID_DOCUMENT],
+            kyc_output=KYCAgentOutput(verdict=AgentVerdict.PASS, confidence=0.95, latency_ms=10),
+            claims_output=make_claims_output(AgentVerdict.PASS, confidence=0.95),
+            policy_output=make_policy_output(AgentVerdict.PASS, confidence=0.95),
+            fraud_output=None,
+        )
+        output = engine.evaluate(context)
+        assert output.decision == BusinessDecision.ESCALATE
+        assert output.rule_id_matched == RULE_P7_BORDERLINE_REVIEW
+        assert "fraud evaluation incomplete" in output.justification

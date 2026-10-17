@@ -20,6 +20,7 @@ from medishield.api.schemas.audit import (
     OperationalMetricsResponse,
 )
 from medishield.benchmarks.evaluator import run_benchmark_evaluation
+from medishield.core.tracing import trace_span
 from medishield.db.audit import GENESIS_HASH, verify_audit_chain
 from medishield.db.enums import BusinessDecision, WorkflowState
 from medishield.db.models import AuditEvent, Case
@@ -45,14 +46,26 @@ def export_and_verify_audit_trail(
     if not case:
         raise HTTPException(status_code=404, detail=f"Case {case_id} not found")
 
-    events = (
-        db.query(AuditEvent)
-        .filter(AuditEvent.case_id == case.id)
-        .order_by(AuditEvent.created_at.asc())
-        .all()
-    )
-
-    chain_intact = verify_audit_chain(events)
+    with trace_span(
+        name="db_audit_trail_retrieval",
+        run_type="retriever",
+        inputs={},
+        component="audit_repository",
+        operation="get_audit_trail",
+    ) as span:
+        events = (
+            db.query(AuditEvent)
+            .filter(AuditEvent.case_id == case.id)
+            .order_by(AuditEvent.created_at.asc())
+            .all()
+        )
+        chain_intact = verify_audit_chain(events)
+        if span:
+            span.set_summary(
+                status="SUCCESS",
+                retrieved_chunk_count=len(events),
+                is_complete=chain_intact,
+            )
     terminal_hash = events[-1].current_hash if events else GENESIS_HASH
 
     items = [

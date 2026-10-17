@@ -206,6 +206,15 @@ CREATE TABLE claim_lines (
     UNIQUE(claim_id, line_number)
 );
 
+-- 2.5A LINE-LEVEL ADJUDICATION DDL SCOPE & DEFERRAL (PHASE 3)
+-- In Phase 1 and Phase 2, `claim_lines` stores extracted billing data exclusively.
+-- Granular clinical assessments for each line item are persisted within `agent_runs.output_json`
+-- and `decisions.agent_summary_snapshot`.
+-- Relational DDL schema modifications to `claim_lines` (e.g. adding columns `clinical_verdict`,
+-- `medical_necessity_status`, `guideline_id`, `denial_reason`) or introducing a dedicated
+-- `claim_line_adjudications` table are formally DEFERRED to Phase 3, pending stakeholder resolution
+-- of Governance Decision 4 (Claim-Level vs. Partial Line-Item Adjudication).
+
 -- 6. AGENT EXECUTION TRACKING
 CREATE TABLE agent_runs (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -222,6 +231,16 @@ CREATE TABLE agent_runs (
 );
 
 CREATE INDEX idx_agent_runs_case ON agent_runs(case_id);
+
+-- 2.6A CLINICAL ALIGNMENT SPECIALIST PERSISTENCE CONTRACT (ADR-015)
+-- 1. Agent Registration: The specialist executes under `agent_name = 'clinical_alignment'`.
+--    The `verdict` column stores the composite verdict mapped to `agent_verdict_enum`
+--    ('PASS', 'FAIL', 'INDETERMINATE', 'CONFLICT', 'UNAVAILABLE').
+--    The `confidence` column stores calibrated composite confidence as NUMERIC(4, 3) (or NULL if uncalibrated).
+--    The `output_json` column stores complete serialized `ClinicalAlignmentOutput` JSONB.
+-- 2. Retrieval Semantics: Traces are queried by (case_id, agent_name = 'clinical_alignment')
+--    ordered by started_at DESC. Endpoint GET /api/v1/cases/{case_id}/agents reconstructs
+--    clinical summary from latest successful agent_runs record or decisions snapshot.
 
 -- 7. ADJUDICATION DECISION HISTORY (1:N FOR AI & HUMAN DECISIONS)
 CREATE TABLE decisions (
@@ -241,6 +260,11 @@ CREATE TABLE decisions (
 );
 
 CREATE INDEX idx_decisions_case_active ON decisions(case_id, is_active);
+
+-- 2.7A DECISION SNAPSHOT CONTRACT FOR CLINICAL ALIGNMENT
+-- In `decisions.agent_summary_snapshot JSONB`, the immutable snapshot of specialist inputs
+-- at the moment of adjudication must include the "clinical" key alongside "kyc", "claims", "policy", "fraud".
+-- This ensures complete evidentiary provenance (Engineering Rule 12) across re-runs.
 
 -- 8. HUMAN REVIEW & CONCURRENCY LOCKS
 CREATE TABLE review_locks (

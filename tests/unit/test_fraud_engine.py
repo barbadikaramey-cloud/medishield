@@ -347,3 +347,24 @@ def test_velocity_flag_activation():
     res_clean = evaluate_claim_fraud(claims_out, context=ctx_clean)
     assert res_clean.velocity_anomaly_detected is False
 
+
+def test_service_date_inconsistency_slash_format_parsing():
+    """F-05: Verifies MM/DD/YYYY and MM-DD-YYYY dates are parsed accurately."""
+    from medishield.domain.fraud import _extract_date_value
+
+    parsed_slash = _extract_date_value("10/11/2025")
+    assert parsed_slash == date(2025, 10, 11)
+
+    parsed_dash = _extract_date_value("03-28-2025")
+    assert parsed_dash == date(2025, 3, 28)
+
+    # Future date with slash format
+    claims_out = build_mock_claims_output()
+    claims_out.service_date = ProvenanceValue(value="12/31/2030", confidence=0.99)
+    ctx = FraudEvaluationContext(submission_date=date(2025, 1, 1))
+
+    res = evaluate_claim_fraud(claims_out, context=ctx)
+    f5 = next(f for f in res.features if f.feature_name == "service_date_inconsistency")
+    assert f5.normalized_score == 1.0
+    assert "Future service date detected" in f5.description
+

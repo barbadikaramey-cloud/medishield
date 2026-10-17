@@ -12,7 +12,9 @@ from medishield.core.llm import (
     default_groq_client,
     wrap_untrusted_content,
 )
-from medishield.db.enums import AgentVerdict
+from medishield.core.tracing import trace_span
+from medishield.db.catalog import CodeCatalogRepository
+from medishield.db.enums import AgentVerdict, CodingSystem
 from medishield.domain.contracts import (
     CandidatePolicy,
     PolicyClauseCitation,
@@ -33,6 +35,31 @@ CPT_EXPANSION_DICTIONARY: dict[str, dict[str, str]] = {
         "description": "Office or outpatient evaluation and management established patient 30-39 minutes moderate complexity",
         "category": "OUTPATIENT_EVALUATION",
     },
+    "99215": {
+        "title": "Office/Outpatient Visit High Complexity",
+        "description": "Office or outpatient evaluation and management established patient 40-54 minutes high complexity",
+        "category": "OUTPATIENT_EVALUATION",
+    },
+    "99203": {
+        "title": "Office/Outpatient Visit New Patient Low",
+        "description": "Office or other outpatient visit new patient 30-44 minutes low complexity",
+        "category": "OUTPATIENT_EVALUATION",
+    },
+    "99204": {
+        "title": "Office/Outpatient Visit New Patient Moderate",
+        "description": "Office or other outpatient visit new patient 45-59 minutes moderate complexity",
+        "category": "OUTPATIENT_EVALUATION",
+    },
+    "99205": {
+        "title": "Office/Outpatient Visit New Patient High",
+        "description": "Office or other outpatient visit new patient 60-74 minutes high complexity",
+        "category": "OUTPATIENT_EVALUATION",
+    },
+    "99283": {
+        "title": "Emergency Department Visit Moderate",
+        "description": "Emergency department visit for evaluation and management of patient moderate severity",
+        "category": "EMERGENCY",
+    },
     "93000": {
         "title": "Electrocardiogram Routine ECG",
         "description": "Electrocardiogram routine ECG with at least 12 leads with interpretation and report diagnostic radiology and cardiology",
@@ -43,15 +70,100 @@ CPT_EXPANSION_DICTIONARY: dict[str, dict[str, str]] = {
         "description": "Radiologic examination chest single view diagnostic radiology imaging",
         "category": "RADIOLOGY",
     },
+    "71250": {
+        "title": "Computed Tomography Thorax",
+        "description": "Computed tomography thorax diagnostic imaging radiology scan",
+        "category": "RADIOLOGY",
+    },
+    "80053": {
+        "title": "Comprehensive Metabolic Panel",
+        "description": "Comprehensive metabolic panel diagnostic laboratory clinical pathology test",
+        "category": "LABORATORY",
+    },
+    "85025": {
+        "title": "Complete Blood Count Differential",
+        "description": "Complete blood count automated with automated differential WBC diagnostic lab hematology",
+        "category": "LABORATORY",
+    },
+    "36415": {
+        "title": "Routine Venipuncture Collection",
+        "description": "Routine venipuncture capillary or venous blood specimen collection",
+        "category": "LABORATORY",
+    },
+    "90837": {
+        "title": "Psychotherapy 60 Minutes",
+        "description": "Psychotherapy 60 minutes with patient outpatient behavioral health mental health",
+        "category": "BEHAVIORAL_HEALTH",
+    },
     "47562": {
         "title": "Laparoscopic Cholecystectomy",
         "description": "Laparoscopy surgical cholecystectomy surgical excision removal of gallbladder inpatient surgical coverage",
         "category": "SURGICAL_INPATIENT",
     },
+    "44970": {
+        "title": "Laparoscopic Appendectomy",
+        "description": "Laparoscopy surgical appendectomy removal of appendix inpatient surgical coverage",
+        "category": "SURGICAL_INPATIENT",
+    },
+    "00790": {
+        "title": "Anesthesia Intraperitoneal Procedures",
+        "description": "Anesthesia for intraperitoneal procedures upper abdomen surgical anesthesia",
+        "category": "ANESTHESIA",
+    },
+    "27447": {
+        "title": "Total Knee Arthroplasty",
+        "description": "Arthroplasty knee condyle and plateau total knee replacement major surgical procedure",
+        "category": "SURGICAL_INPATIENT",
+    },
+    "43239": {
+        "title": "Esophagogastroduodenoscopy Biopsy",
+        "description": "Esophagogastroduodenoscopy flexible transoral with directed biopsy endoscopic evaluation",
+        "category": "ENDOSCOPY",
+    },
     "15780": {
         "title": "Dermabrasion Total Face Cosmetic",
         "description": "Dermabrasion total face elective cosmetic skin resurfacing aesthetic procedure non-reconstructive",
         "category": "COSMETIC_EXCLUSION",
+    },
+    "17000": {
+        "title": "Destruction Premalignant Lesion",
+        "description": "Destruction premalignant lesion first lesion elective cosmetic dermatologic exclusion",
+        "category": "COSMETIC_EXCLUSION",
+    },
+    "71046": {
+        "title": "Chest X-Ray 2 Views",
+        "description": "Radiologic examination chest 2 views diagnostic radiology imaging",
+        "category": "RADIOLOGY",
+    },
+    "70553": {
+        "title": "MRI Brain With Contrast",
+        "description": "Magnetic resonance imaging brain with contrast material diagnostic radiology imaging",
+        "category": "RADIOLOGY",
+    },
+    "72148": {
+        "title": "MRI Lumbar Spine Without Contrast",
+        "description": "Magnetic resonance imaging lumbar spine without contrast material diagnostic radiology imaging",
+        "category": "RADIOLOGY",
+    },
+    "99284": {
+        "title": "Emergency Department Visit High Severity",
+        "description": "Emergency department visit for evaluation and management high severity problem",
+        "category": "EMERGENCY",
+    },
+    "93306": {
+        "title": "Echocardiography Transthoracic Complete",
+        "description": "Echocardiography transthoracic complete with spectral and color Doppler cardiology diagnostic",
+        "category": "CARDIOLOGY_DIAGNOSTIC",
+    },
+    "33533": {
+        "title": "CABG Arterial Single Vessel",
+        "description": "Coronary artery bypass using arterial graft single vessel cardiovascular surgical inpatient",
+        "category": "SURGICAL_INPATIENT",
+    },
+    "29827": {
+        "title": "Shoulder Arthroscopy Rotator Cuff",
+        "description": "Arthroscopy shoulder surgical with rotator cuff repair musculoskeletal surgical inpatient",
+        "category": "SURGICAL_INPATIENT",
     },
     "99291": {
         "title": "Critical Care Evaluation First 30-74 Minutes",
@@ -112,7 +224,12 @@ def _get_default_policy_chunks() -> list[PolicyChunkRecord]:
                 covered_percentage=80.0,
                 deductible_limit=500.0,
                 copay_percentage=20.0,
-                matching_cpt_codes=["99213", "99214", "93000", "43239"],
+                matching_cpt_codes=[
+                    "90837", "93000", "99213", "99214", "99215",
+                    "99203", "99204", "99205", "99283", "99284", "99291",
+                    "71045", "71046", "71250", "70553", "72148",
+                    "80053", "85025", "36415", "43239", "93306",
+                ],
             ),
             PolicyChunkRecord(
                 chunk_id=f"chk-002-{pol_id}",
@@ -130,7 +247,9 @@ def _get_default_policy_chunks() -> list[PolicyChunkRecord]:
                 covered_percentage=90.0,
                 deductible_limit=500.0,
                 copay_percentage=10.0,
-                matching_cpt_codes=["47562", "27447", "43239"],
+                matching_cpt_codes=[
+                    "47562", "44970", "00790", "27447", "43239", "33533", "29827",
+                ],
             ),
             PolicyChunkRecord(
                 chunk_id=f"chk-003-{pol_id}",
@@ -196,53 +315,71 @@ class PolicyCorpusRepository:
         Executes hybrid retrieval hard-filtered by policy_id and version_tag (Spec 09 § 3.2).
         Scores candidate chunks by CPT code containment and clinical keyword overlap.
         """
-        candidates = [
-            c for c in self._chunks
-            if (
-                c.policy_id == policy_id
-                or (policy_id.startswith("MED-GLD") and c.policy_id.startswith("MED-GLD"))
-            )
-            and c.version_tag == version_tag
-        ]
+        with trace_span(
+            name="policy_corpus_query",
+            run_type="retriever",
+            component="policy_corpus_repository",
+            operation="query_chunks",
+            inputs={},
+        ) as span:
+            candidates = [
+                c for c in self._chunks
+                if (
+                    c.policy_id == policy_id
+                    or (policy_id.startswith("MED-GLD") and c.policy_id.startswith("MED-GLD"))
+                )
+                and c.version_tag == version_tag
+            ]
 
-        if not candidates:
-            return []
+            if not candidates:
+                span.set_summary(
+                    status="SUCCESS",
+                    retrieved_chunk_count=0,
+                    is_complete=False,
+                )
+                return []
 
-        cpt_set = set(cpt_codes or [])
-        rev_set = set(rev_codes or [])
-        query_tokens = {
-            t for t in re.sub(r"[^\w\s]", "", query_text.lower()).split()
-            if len(t) > 2 and t not in POLICY_STOP_WORDS
-        }
-
-        scored_candidates: list[tuple[float, PolicyChunkRecord]] = []
-        for chunk in candidates:
-            score = 0.0
-            # 1. Exact CPT code containment match (high weight)
-            matched_cpts = set(chunk.matching_cpt_codes).intersection(cpt_set)
-            if matched_cpts:
-                score += 10.0 * len(matched_cpts)
-                
-            # 1.5 Exact Rev code match
-            matched_revs = set(chunk.matching_rev_codes).intersection(rev_set)
-            if matched_revs:
-                score += 10.0 * len(matched_revs)
-
-            # 2. Textual clinical token overlap
-            chunk_tokens = {
-                t for t in re.sub(r"[^\w\s]", "", chunk.chunk_text.lower()).split()
+            cpt_set = set(cpt_codes or [])
+            rev_set = set(rev_codes or [])
+            query_tokens = {
+                t for t in re.sub(r"[^\w\s]", "", query_text.lower()).split()
                 if len(t) > 2 and t not in POLICY_STOP_WORDS
             }
-            overlap = len(query_tokens.intersection(chunk_tokens))
-            if overlap > 0:
-                score += 1.0 * overlap
 
-            # Retain only chunks with demonstrable clinical or CPT relevance
-            if score >= 1.0:
-                scored_candidates.append((score, chunk))
+            scored_candidates: list[tuple[float, PolicyChunkRecord]] = []
+            for chunk in candidates:
+                score = 0.0
+                # 1. Exact CPT code containment match (high weight)
+                matched_cpts = set(chunk.matching_cpt_codes).intersection(cpt_set)
+                if matched_cpts:
+                    score += 10.0 * len(matched_cpts)
+                    
+                # 1.5 Exact Rev code match
+                matched_revs = set(chunk.matching_rev_codes).intersection(rev_set)
+                if matched_revs:
+                    score += 10.0 * len(matched_revs)
 
-        scored_candidates.sort(key=lambda x: x[0], reverse=True)
-        return [c for _, c in scored_candidates[:top_k]]
+                # 2. Textual clinical token overlap
+                chunk_tokens = {
+                    t for t in re.sub(r"[^\w\s]", "", chunk.chunk_text.lower()).split()
+                    if len(t) > 2 and t not in POLICY_STOP_WORDS
+                }
+                overlap = len(query_tokens.intersection(chunk_tokens))
+                if overlap > 0:
+                    score += 1.0 * overlap
+
+                # Retain only chunks with demonstrable clinical or CPT relevance
+                if score >= 1.0:
+                    scored_candidates.append((score, chunk))
+
+            scored_candidates.sort(key=lambda x: x[0], reverse=True)
+            results = [c for _, c in scored_candidates[:top_k]]
+            span.set_summary(
+                status="SUCCESS",
+                retrieved_chunk_count=len(results),
+                is_complete=bool(results),
+            )
+            return results
 
     def verify_clause(
         self,
@@ -347,32 +484,46 @@ class InMemoryPolicyEnrollmentRepository:
         self._enrollments[enr.member_id].append(enr)
 
     def find_enrollments(self, member_id: str) -> list[PolicyEnrollmentRecord]:
-        clean_id = member_id.strip().upper()
-        if clean_id in self._enrollments:
-            return self._enrollments[clean_id]
-        if clean_id.startswith("MED-GLD"):
-            return [
-                PolicyEnrollmentRecord(
-                    member_id=clean_id,
-                    policy_id="MED-GLD-SERIES-2025",
-                    version_tag="v1.0",
-                    plan_name="MediShield Gold Plan",
-                    effective_start_date=date(2025, 1, 1),
-                    effective_end_date=date(2026, 12, 31),
-                )
-            ]
-        if clean_id.startswith("MED-SLV"):
-            return [
-                PolicyEnrollmentRecord(
-                    member_id=clean_id,
-                    policy_id="MED-SLV-SERIES-2025",
-                    version_tag="v1.0",
-                    plan_name="MediShield Silver Plan",
-                    effective_start_date=date(2025, 1, 1),
-                    effective_end_date=date(2026, 12, 31),
-                )
-            ]
-        return []
+        with trace_span(
+            name="db_policy_enrollment_lookup",
+            run_type="retriever",
+            component="policy_enrollment_repository",
+            operation="find_enrollments",
+            inputs={},
+        ) as span:
+            clean_id = member_id.strip().upper()
+            records: list[PolicyEnrollmentRecord] = []
+            if clean_id in self._enrollments:
+                records = self._enrollments[clean_id]
+            elif clean_id.startswith("MED-GLD"):
+                records = [
+                    PolicyEnrollmentRecord(
+                        member_id=clean_id,
+                        policy_id="MED-GLD-SERIES-2025",
+                        version_tag="v1.0",
+                        plan_name="MediShield Gold Plan",
+                        effective_start_date=date(2025, 1, 1),
+                        effective_end_date=date(2026, 12, 31),
+                    )
+                ]
+            elif clean_id.startswith("MED-SLV"):
+                records = [
+                    PolicyEnrollmentRecord(
+                        member_id=clean_id,
+                        policy_id="MED-SLV-SERIES-2025",
+                        version_tag="v1.0",
+                        plan_name="MediShield Silver Plan",
+                        effective_start_date=date(2025, 1, 1),
+                        effective_end_date=date(2026, 12, 31),
+                    )
+                ]
+
+            span.set_summary(
+                status="SUCCESS",
+                retrieved_chunk_count=len(records),
+                is_complete=bool(records),
+            )
+            return records
 
 
 class SqlPolicyEnrollmentRepository:
@@ -387,54 +538,71 @@ class SqlPolicyEnrollmentRepository:
         return self._session_or_factory
 
     def find_enrollments(self, member_id: str) -> list[PolicyEnrollmentRecord]:
-        from sqlalchemy import func
+        with trace_span(
+            name="db_policy_enrollment_lookup",
+            run_type="retriever",
+            component="policy_enrollment_repository",
+            operation="find_enrollments",
+            inputs={},
+        ) as span:
+            from sqlalchemy import func
 
-        from medishield.db.models import Enrollment, Member, Policy, PolicyVersion
+            from medishield.db.models import Enrollment, Member, Policy, PolicyVersion
 
-        clean_id = member_id.strip()
-        session = self._get_session()
-        should_close = callable(self._session_or_factory)
+            clean_id = member_id.strip()
+            session = self._get_session()
+            should_close = callable(self._session_or_factory)
 
-        try:
-            m = session.query(Member).filter(func.upper(Member.member_id) == clean_id.upper()).first()
-            if not m:
-                m = (
-                    session.query(Member)
-                    .join(Enrollment, Member.id == Enrollment.member_id)
+            try:
+                m = session.query(Member).filter(func.upper(Member.member_id) == clean_id.upper()).first()
+                if not m:
+                    m = (
+                        session.query(Member)
+                        .join(Enrollment, Member.id == Enrollment.member_id)
+                        .join(PolicyVersion, Enrollment.policy_version_id == PolicyVersion.id)
+                        .join(Policy, PolicyVersion.policy_id == Policy.id)
+                        .filter(func.upper(Policy.policy_id) == clean_id.upper())
+                        .first()
+                    )
+                if not m:
+                    span.set_summary(
+                        status="SUCCESS",
+                        retrieved_chunk_count=0,
+                        is_complete=False,
+                    )
+                    return []
+
+                enrs = (
+                    session.query(Enrollment)
                     .join(PolicyVersion, Enrollment.policy_version_id == PolicyVersion.id)
                     .join(Policy, PolicyVersion.policy_id == Policy.id)
-                    .filter(func.upper(Policy.policy_id) == clean_id.upper())
-                    .first()
+                    .filter(Enrollment.member_id == m.id, Enrollment.status == "ACTIVE")
+                    .all()
                 )
-            if not m:
-                return []
-
-            enrs = (
-                session.query(Enrollment)
-                .join(PolicyVersion, Enrollment.policy_version_id == PolicyVersion.id)
-                .join(Policy, PolicyVersion.policy_id == Policy.id)
-                .filter(Enrollment.member_id == m.id, Enrollment.status == "ACTIVE")
-                .all()
-            )
-            records: list[PolicyEnrollmentRecord] = []
-            for enr in enrs:
-                pv = enr.policy_version
-                pol = pv.policy
-                records.append(
-                    PolicyEnrollmentRecord(
-                        member_id=m.member_id,
-                        policy_id=pol.policy_id,
-                        version_tag=pv.version_tag,
-                        plan_name=pol.plan_name,
-                        effective_start_date=enr.coverage_start_date,
-                        effective_end_date=enr.coverage_end_date,
-                        status=enr.status,
+                records: list[PolicyEnrollmentRecord] = []
+                for enr in enrs:
+                    pv = enr.policy_version
+                    pol = pv.policy
+                    records.append(
+                        PolicyEnrollmentRecord(
+                            member_id=m.member_id,
+                            policy_id=pol.policy_id,
+                            version_tag=pv.version_tag,
+                            plan_name=pol.plan_name,
+                            effective_start_date=enr.coverage_start_date,
+                            effective_end_date=enr.coverage_end_date,
+                            status=enr.status,
+                        )
                     )
+                span.set_summary(
+                    status="SUCCESS",
+                    retrieved_chunk_count=len(records),
+                    is_complete=bool(records),
                 )
-            return records
-        finally:
-            if should_close:
-                session.close()
+                return records
+            finally:
+                if should_close:
+                    session.close()
 
 
 class PolicyContextAgent:
@@ -528,9 +696,11 @@ class PolicyCoverageAgent:
         self,
         corpus_repo: PolicyCorpusRepository | None = None,
         llm_client: GroqLLMClient | None = None,
+        code_catalog: CodeCatalogRepository | None = None,
     ) -> None:
         self.corpus_repo = corpus_repo or PolicyCorpusRepository()
         self.llm_client = llm_client if llm_client is not None else default_groq_client
+        self.code_catalog = code_catalog
 
     def execute(
         self,
@@ -562,19 +732,29 @@ class PolicyCoverageAgent:
                 latency_ms=elapsed_ms,
             )
 
-        # 1. Expand CPT codes into rich clinical query terms (Spec 09 § 3.2)
+        # 1. Expand CPT codes into rich clinical query terms (Spec 09 § 3.2, ADR-012)
         expanded_query_terms: list[str] = []
         for code in cpt_codes:
             expanded_query_terms.append(f"CPT {code}")
-            meta = CPT_EXPANSION_DICTIONARY.get(code)
-            if meta:
-                expanded_query_terms.append(f"{meta['title']} {meta['description']}")
-                
+            if self.code_catalog is not None:
+                details = self.code_catalog.get_code_details(code, CodingSystem.CPT)
+                if details:
+                    expanded_query_terms.append(f"{details.short_description} {details.long_description or ''}")
+                else:
+                    meta = CPT_EXPANSION_DICTIONARY.get(code)
+                    if meta:
+                        expanded_query_terms.append(f"{meta['title']} {meta['description']}")
+            else:
+                meta = CPT_EXPANSION_DICTIONARY.get(code)
+                if meta:
+                    expanded_query_terms.append(f"{meta['title']} {meta['description']}")
+
         if rev_codes:
             expanded_query_terms.append("revenue code")
             expanded_query_terms.extend(rev_codes)
 
         combined_query = " ".join(expanded_query_terms)
+
 
         # 2. Hybrid retrieve relevant policy chunks if not injected
         if matched_chunks is None:
@@ -610,6 +790,7 @@ class PolicyCoverageAgent:
         cpt_set = set(cpt_codes)
         coverage_percentage: float = 0.0
 
+        matching_covered_chunks: list[PolicyChunkRecord] = []
         for chunk in matched_chunks:
             # Check verbatim clause in corpus (Gate 2 verification)
             is_verified, _ = self.corpus_repo.verify_clause(
@@ -646,15 +827,19 @@ class PolicyCoverageAgent:
                 else:
                     # Treat unverified exclusion as ungrounded citation later
                     pass
+            elif not chunk.is_exclusion and matches_scope:
+                matching_covered_chunks.append(chunk)
+                applicable_service_codes.extend(matching_codes + matching_revs)
 
             if chunk.requires_prior_auth and matches_scope:
                 prior_authorization_required = True
 
-        covered_chunks = [c for c in matched_chunks if not c.is_exclusion]
-        if covered_chunks:
-            lowest_coverage_pct = min(c.covered_percentage for c in covered_chunks)
-            deductible_limit = max(c.deductible_limit for c in covered_chunks)
-            copay_pct = max(c.copay_percentage for c in covered_chunks)
+        applicable_service_codes = sorted(set(applicable_service_codes))
+
+        if matching_covered_chunks:
+            lowest_coverage_pct = min(c.covered_percentage for c in matching_covered_chunks)
+            deductible_limit = max(c.deductible_limit for c in matching_covered_chunks)
+            copay_pct = max(c.copay_percentage for c in matching_covered_chunks)
         else:
             lowest_coverage_pct = 0.0
             deductible_limit = 500.0
@@ -681,9 +866,20 @@ class PolicyCoverageAgent:
             confidence = 0.40
             coverage_percentage = lowest_coverage_pct
             reasoning = "One or more cited policy clauses could not be verified in the authoritative corpus."
+        elif not matching_covered_chunks:
+            # Positive scope not satisfied: retrieved clauses do not match billed codes
+            verdict = AgentVerdict.INDETERMINATE
+            confidence = 0.50
+            covered = False
+            coverage_percentage = 0.0
+            reasoning = (
+                f"No applicable covered benefit clauses found in policy {policy_id} {policy_version} "
+                f"for billed codes ({', '.join(sorted(cpt_codes + (rev_codes or [])))})."
+            )
         else:
             verdict = AgentVerdict.PASS
             confidence = 0.95
+            covered = True
             coverage_percentage = lowest_coverage_pct
             reasoning = (
                 f"Eligible covered benefit at {coverage_percentage:.0f}% after ${deductible_limit:.2f} deductible "

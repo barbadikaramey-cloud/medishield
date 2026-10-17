@@ -246,6 +246,44 @@ class TestOCRPreprocessorEngine:
             assert 0.0 <= span.bbox.x_min <= span.bbox.x_max <= 1.0
             assert 0.0 <= span.bbox.y_min <= span.bbox.y_max <= 1.0
 
+    def test_process_raster_png_with_defaulted_pdf_mime_extracts_spans(
+        self,
+        preprocessor: OCRPreprocessorEngine,
+        storage: InMemoryStorageBackend,
+    ) -> None:
+        """Proves that a raster PNG image (such as an ID card or scan) is not misparsed as a PDF
+        even if the caller or workflow defaults mime_type to 'application/pdf'."""
+        case_id = "CASE-RASTER-DEFAULT-MIME"
+        document_id = "DOC-ID-CARD-01"
+
+        img = Image.new("RGB", (600, 200), color=(255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        draw.text((20, 20), "STATE DRIVER LICENSE", fill=(0, 0, 0))
+        draw.text((20, 70), "NAME: JANE DOE", fill=(0, 0, 0))
+        draw.text((20, 120), "DOB: 1990-05-15", fill=(0, 0, 0))
+
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        content = buf.getvalue()
+
+        # Passed with misleading/defaulted mime_type='application/pdf'
+        output = preprocessor.process_document(
+            content=content,
+            document_id=document_id,
+            case_id=case_id,
+            mime_type="application/pdf",
+            storage_backend=storage,
+        )
+
+        assert output.document_id == document_id
+        assert output.verdict == AgentVerdict.PASS
+        assert output.image_quality_score >= 0.50
+
+        payload = retrieve_ocr_payload(case_id, document_id, storage)
+        assert len(payload.pages[0].spans) > 0
+        raw_text = payload.pages[0].raw_text
+        assert "DRIVER LICENSE" in raw_text or "JANE DOE" in raw_text
+
     def test_process_blank_raster_png_returns_indeterminate(
         self,
         preprocessor: OCRPreprocessorEngine,
@@ -378,7 +416,7 @@ class TestDocumentClassifierAgent:
         self,
         classifier: DocumentClassifierAgent,
     ) -> None:
-        """Tests that filenames with underscore separators correctly classify documents."""
+        """Known dataset names hint a type, but content is required for PASS."""
         test_cases = [
             ("claim_PT_15075.png", DocumentType.CLAIM_FORM),
             ("id_PT_15075.png", DocumentType.ID_DOCUMENT),
@@ -392,7 +430,113 @@ class TestDocumentClassifierAgent:
                 file_name=filename,
             )
             assert output.doc_type == expected_type
-            assert output.confidence >= 0.70
+            assert output.confidence < 0.70
+            assert output.verdict == AgentVerdict.INDETERMINATE
+
+    def test_dataset_filename_resolves_category_over_incidental_terms(
+        self,
+        classifier: DocumentClassifierAgent,
+    ) -> None:
+        output = classifier.classify(
+            document_id="DOC-DATASET-DISCHARGE",
+            file_name="discharge_PT_19116.png",
+            text="DISCHARGE SUMMARY. Discharge medications include a prescription and dosage.",
+        )
+
+        assert output.doc_type == DocumentType.DISCHARGE_SUMMARY
+        assert output.confidence >= 0.70
+        assert output.verdict == AgentVerdict.PASS
+
+    def test_unrecognized_filename_uses_content_classifier(
+        self,
+        classifier: DocumentClassifierAgent,
+    ) -> None:
+        output = classifier.classify(
+            document_id="DOC-USER-UPLOAD",
+            file_name="scan_2026_10_12.png",
+            text=SAMPLE_DRIVER_LICENSE_TEXT,
+        )
+
+        assert output.doc_type == DocumentType.ID_DOCUMENT
+        assert output.verdict == AgentVerdict.PASS
+
+    def test_prefixed_dataset_filename_classification(
+        self,
+        classifier: DocumentClassifierAgent,
+    ) -> None:
+        """Prefixed dataset filenames (e.g. DOC-0A2917-03_id_PT_15075.png) must classify correctly."""
+        test_cases = [
+            ("DOC-0A2917-01_claim_PT_15075.png", DocumentType.CLAIM_FORM),
+            ("DOC-0A2917-03_id_PT_15075.png", DocumentType.ID_DOCUMENT),
+            ("DOC-0A2917-02_discharge_PT_15075.png", DocumentType.DISCHARGE_SUMMARY),
+            ("DOC-0A2917-05_rx_PT_15075.png", DocumentType.PRESCRIPTION),
+            ("DOC-0A2917-04_amend_PT_15075.png", DocumentType.POLICY_AMENDMENT),
+        ]
+        for filename, expected_type in test_cases:
+            output = classifier.classify(
+                document_id="DOC-PREF",
+                file_name=filename,
+                text="Document text content with generic words.",
+            )
+            assert output.doc_type == expected_type
             assert output.verdict == AgentVerdict.PASS
+
+    def test_non_driver_id_card_text_classification(
+        self,
+        classifier: DocumentClassifierAgent,
+    ) -> None:
+        """Non-driver identification card text without filename must classify as ID_DOCUMENT, not CLAIM_FORM."""
+        id_text = (
+            "STATE OF ILLINOIS\n"
+            "NON-DRIVER\n"
+            "IDENTIFICATION CARD\n"
+            "ID CARD\n"
+            "ID NUMBER: I1423-2496\n"
+            "NAME: PATRICIA MILLER H.\n"
+            "DOB: 01/26/1997\n"
+            "EXP: 11/14/2029\n"
+            "PHOTO ID"
+        )
+        output = classifier.classify(
+            document_id="DOC-ID-CARD",
+            file_name="upload_file.pdf",
+            text=id_text,
+        )
+        assert output.doc_type == DocumentType.ID_DOCUMENT
+        assert output.confidence >= 0.70
+        assert output.verdict == AgentVerdict.PASS
+
+    def test_classifier_node_reclassifies_unverified_claim_form(self) -> None:
+        """classifier_node must reclassify documents that were defaulted to CLAIM_FORM without confidence."""
+        from medishield.intake.storage import InMemoryStorageBackend
+        from medishield.workflows.nodes import classifier_node
+
+        storage = InMemoryStorageBackend()
+
+        state = {
+            "case_id": "CASE-TEST-RECLASSIFY",
+            "documents": [
+                {
+                    "document_id": "DOC-ID-01",
+                    "file_name": "id_PT_62350.png",
+                    "doc_type": "CLAIM_FORM",  # Erroneous default
+                    "classification_confidence": None,  # Unverified
+                },
+                {
+                    "document_id": "DOC-RX-01",
+                    "file_name": "rx_PT_62350.png",
+                    "doc_type": "CLAIM_FORM",  # Erroneous default
+                    "classification_confidence": 0.0,  # Zero confidence
+                },
+            ],
+            "workflow_state": "SPLIT",
+        }
+        res_state = classifier_node(state, storage)
+        docs = res_state["documents"]
+        assert docs[0]["doc_type"] == DocumentType.ID_DOCUMENT.value
+        assert docs[0]["classification_confidence"] > 0.0
+        assert docs[1]["doc_type"] == DocumentType.PRESCRIPTION.value
+        assert docs[1]["classification_confidence"] > 0.0
+
 
 

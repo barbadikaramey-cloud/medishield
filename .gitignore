@@ -67,3 +67,8 @@ patch.py
 patch_stamp.py
 list_models.py
 
+# macOS
+.DS_Store
+**/.DS_Store
+
+

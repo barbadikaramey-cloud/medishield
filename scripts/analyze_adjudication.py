@@ -3,14 +3,12 @@ Executes preflight checks, full 30-cluster evaluation, case audits, and metrics 
 """
 
 import json
-import os
 import re
-import sqlite3
-import time
 from collections import Counter, defaultdict
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+
+from sqlalchemy.orm import Session
 
 from medishield.agents.claims import ClaimsAgent
 from medishield.agents.classifier import DocumentClassifierAgent
@@ -24,27 +22,21 @@ from medishield.agents.policy import (
     resolve_claim_ready_policy,
 )
 from medishield.core.config import settings
-from medishield.db.enums import AgentVerdict, BusinessDecision, DocumentType, EscalationSubReason
+from medishield.db.enums import AgentVerdict, BusinessDecision, DocumentType
+from medishield.db.seeder import FALLBACK_CLUSTERS
 from medishield.db.session import _use_sqlite, sync_engine
-from medishield.domain.contracts import (
-    CandidatePolicy,
-    ClaimsAgentOutput,
-    FraudAgentOutput,
-    KYCAgentOutput,
-    PolicyCoverageOutput,
-)
+from medishield.domain.contracts import PolicyCoverageOutput
 from medishield.domain.decision import (
     CONFIDENCE_PASS_THRESHOLD,
     FRAUD_HIGH_THRESHOLD,
     FRAUD_LOW_THRESHOLD,
-    SECURITY_TAMPER_THRESHOLD,
     DecisionInputContext,
     DeterministicDecisionEngine,
 )
 from medishield.domain.fraud import DeterministicFraudEngine
 from medishield.intake.completeness import ClassifiedDocumentItem, evaluate_case_completeness
-from medishield.ocr.preprocessor import DefaultOCREngine, OCRPreprocessorEngine
 from medishield.intake.storage import LocalFilesystemStorageBackend
+from medishield.ocr.preprocessor import DefaultOCREngine
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATASET_ROOT = REPO_ROOT / "dataset"
@@ -77,7 +69,7 @@ try:
             data = json.loads(resp.read().decode())
             qdrant_status = "ONLINE"
             qdrant_collections = [c["name"] for c in data.get("result", {}).get("collections", [])]
-except Exception as e:
+except Exception as e:  # noqa: BLE001
     qdrant_status = f"UNREACHABLE ({e})"
 
 print(f"Qdrant Status          : {qdrant_status}")
@@ -142,7 +134,6 @@ for item in metadata:
 
 sorted_cluster_ids = sorted(clusters_dict.keys())
 
-from sqlalchemy.orm import Session
 sql_sess = Session(sync_engine)
 sql_kyc_repo = SqlMemberRepository(sql_sess)
 in_mem_kyc_repo = InMemoryMemberRepository()
@@ -292,7 +283,7 @@ for cid in sorted_cluster_ids:
             ocr_payloads.append(doc_payload)
 
             # Classify
-            class_res = classifier.classify(document_id=doc_id, file_name=fpath.name)
+            class_res = classifier.classify(document_id=doc_id, file_name=fpath.name, ocr_payload=doc_payload)
             classified_items.append(ClassifiedDocumentItem(
                 document_id=doc_id,
                 doc_type=class_res.doc_type,
@@ -322,7 +313,7 @@ for cid in sorted_cluster_ids:
                 service_dt = claims_out.service_date.value
             else:
                 service_dt = datetime.fromisoformat(str(claims_out.service_date.value)).date()
-        except Exception:
+        except Exception:  # noqa: BLE001
             service_dt = date(2025, 10, 1)
     else:
         service_dt = date(2025, 10, 1)
@@ -502,7 +493,6 @@ if b086_ocr_path.exists() and c962_ocr_path.exists():
 # KYC Name matching analysis (Suffix / Initial differences)
 name_mismatches = 0
 suffix_only_diffs = 0
-from medishield.db.seeder import FALLBACK_CLUSTERS
 for r in eval_results:
     cid = r["cluster_id"]
     pt_id = r["patient_id"]
@@ -521,10 +511,11 @@ for r in eval_results:
             if clean_meta.lower() == clean_db.lower():
                 suffix_only_diffs += 1
 
-print(f"\nKYC Name Analysis:")
+print("\nKYC Name Analysis:")
 print(f"  - Name mismatches across 30 clusters: {name_mismatches}")
 print(f"  - Of which differences are ONLY middle initial/suffix: {suffix_only_diffs} ({suffix_only_diffs/max(name_mismatches,1)*100:.1f}%)")
-print(f"  - Does name mismatch feed fraud score? KYC tamper/identity mismatch adds 0.20 to fraud score, elevating baseline to 0.25-0.35.")
+print("  - Does name mismatch feed fraud score? KYC tamper/identity mismatch adds 0.20 to fraud score, elevating baseline to 0.25-0.35.")
+
 
 # Output JSON summary for artifact reporting
 summary_path = REPO_ROOT / "scripts" / "diagnostic_summary.json"

@@ -214,6 +214,14 @@
         "coverage_percentage": 80.0,
         "policy_id": "POL-CA-GOLD-2026"
       },
+      "clinical": {
+        "verdict": "PASS",
+        "confidence": 0.915,
+        "total_lines_assessed": 2,
+        "lines_fully_supported_count": 2,
+        "bed_days_reconciled": true,
+        "discrepancies": []
+      },
       "fraud": {
         "verdict": "PASS",
         "fraud_score": 0.08,

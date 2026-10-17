@@ -247,3 +247,197 @@ def test_hybrid_policy_coverage_clinical_synthesis() -> None:
     # Clinical context synthesized by LLM is appended to the explainable reasoning
     assert "Clinical Context:" in output.reasoning_summary
     assert "Office evaluation 99213 is medically necessary" in output.reasoning_summary
+
+
+# ── 5. Frontier 120B Model Fallback Tests ────────────────────────────────────
+
+def test_groq_client_fallback_on_429_rate_limit() -> None:
+    client = GroqLLMClient(
+        api_key="gsk_test_mock_key",
+        model="openai/gpt-oss-120b",
+        fallback_model="openai/gpt-oss-20b",
+    )
+
+    mock_resp_429 = MagicMock(spec=httpx.Response)
+    mock_resp_429.status_code = 429
+    mock_resp_429.text = "Rate limit reached for model openai/gpt-oss-120b"
+    http_error_429 = httpx.HTTPStatusError("Rate limited", request=MagicMock(), response=mock_resp_429)
+
+    fake_fallback_data = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps({"status": "ok", "source": "fallback-20b"}),
+                }
+            }
+        ],
+        "usage": {"total_tokens": 42},
+    }
+    mock_resp_200 = MagicMock(spec=httpx.Response)
+    mock_resp_200.status_code = 200
+    mock_resp_200.json.return_value = fake_fallback_data
+
+    with patch("httpx.Client.post", side_effect=[http_error_429, mock_resp_200]) as mock_post:
+        result = client.generate_json("Test prompt")
+
+        assert result == {"status": "ok", "source": "fallback-20b"}
+        assert client.last_used_model == "openai/gpt-oss-20b"
+        assert client.fallback_used is True
+        assert mock_post.call_count == 2
+
+        # 1st call used primary 120B model
+        call_1_payload = mock_post.call_args_list[0][1]["json"]
+        assert call_1_payload["model"] == "openai/gpt-oss-120b"
+
+        # 2nd call used fallback 20B model
+        call_2_payload = mock_post.call_args_list[1][1]["json"]
+        assert call_2_payload["model"] == "openai/gpt-oss-20b"
+
+
+def test_groq_client_fallback_on_empty_content_reasoning_exhaustion() -> None:
+    client = GroqLLMClient(
+        api_key="gsk_test_mock_key",
+        model="openai/gpt-oss-120b",
+        fallback_model="openai/gpt-oss-20b",
+    )
+
+    empty_content_data = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                }
+            }
+        ]
+    }
+    mock_resp_empty = MagicMock(spec=httpx.Response)
+    mock_resp_empty.status_code = 200
+    mock_resp_empty.json.return_value = empty_content_data
+
+    valid_fallback_data = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps({"recovered": True}),
+                }
+            }
+        ]
+    }
+    mock_resp_valid = MagicMock(spec=httpx.Response)
+    mock_resp_valid.status_code = 200
+    mock_resp_valid.json.return_value = valid_fallback_data
+
+    with patch("httpx.Client.post", side_effect=[mock_resp_empty, mock_resp_valid]) as mock_post:
+        result = client.generate_json("Test prompt")
+        assert result == {"recovered": True}
+        assert client.fallback_used is True
+        assert client.last_used_model == "openai/gpt-oss-20b"
+        assert mock_post.call_count == 2
+
+
+def test_groq_client_fallback_on_503_service_unavailable() -> None:
+    client = GroqLLMClient(
+        api_key="gsk_test_mock_key",
+        model="openai/gpt-oss-120b",
+        fallback_model="openai/gpt-oss-20b",
+    )
+
+    mock_resp_503 = MagicMock(spec=httpx.Response)
+    mock_resp_503.status_code = 503
+    mock_resp_503.text = "Service Unavailable - Server Overloaded"
+    http_error_503 = httpx.HTTPStatusError("Service Unavailable", request=MagicMock(), response=mock_resp_503)
+
+    valid_fallback_data = {
+        "choices": [
+            {"message": {"role": "assistant", "content": json.dumps({"recovered": True})}}
+        ]
+    }
+    mock_resp_200 = MagicMock(spec=httpx.Response)
+    mock_resp_200.status_code = 200
+    mock_resp_200.json.return_value = valid_fallback_data
+
+    with patch("httpx.Client.post", side_effect=[http_error_503, mock_resp_200]) as mock_post:
+        result = client.generate_json("Test prompt")
+        assert result == {"recovered": True}
+        assert client.fallback_used is True
+        assert client.last_used_model == "openai/gpt-oss-20b"
+        assert mock_post.call_count == 2
+
+
+def test_groq_client_both_models_fail_raises_error() -> None:
+    client = GroqLLMClient(
+        api_key="gsk_test_mock_key",
+        model="openai/gpt-oss-120b",
+        fallback_model="openai/gpt-oss-20b",
+    )
+
+    mock_resp_429 = MagicMock(spec=httpx.Response)
+    mock_resp_429.status_code = 429
+    mock_resp_429.text = "Rate limit reached"
+    http_error = httpx.HTTPStatusError("Rate limited", request=MagicMock(), response=mock_resp_429)
+
+    mock_resp_500 = MagicMock(spec=httpx.Response)
+    mock_resp_500.status_code = 500
+    mock_resp_500.text = "Internal Server Error"
+    http_error_500 = httpx.HTTPStatusError("Internal Server Error", request=MagicMock(), response=mock_resp_500)
+
+    with (
+        patch("httpx.Client.post", side_effect=[http_error, http_error_500]) as mock_post,
+        pytest.raises(GroqLLMError, match="HTTP 500"),
+    ):
+        client.generate_json("Test prompt")
+    assert mock_post.call_count == 2
+
+
+def test_groq_client_no_fallback_when_unconfigured() -> None:
+    client = GroqLLMClient(
+        api_key="gsk_test_mock_key",
+        model="openai/gpt-oss-120b",
+        fallback_model=None,
+    )
+
+    mock_resp_429 = MagicMock(spec=httpx.Response)
+    mock_resp_429.status_code = 429
+    mock_resp_429.text = "Rate limit reached"
+    http_error = httpx.HTTPStatusError("Rate limited", request=MagicMock(), response=mock_resp_429)
+
+    with (
+        patch("httpx.Client.post", side_effect=http_error) as mock_post,
+        pytest.raises(GroqLLMError, match="HTTP 429"),
+    ):
+        client.generate_json("Test prompt")
+    # Must NOT attempt a second call when fallback_model is None
+    assert mock_post.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_groq_client_async_fallback_success() -> None:
+    client = GroqLLMClient(
+        api_key="gsk_test_mock_key",
+        model="openai/gpt-oss-120b",
+        fallback_model="openai/gpt-oss-20b",
+    )
+
+    mock_resp_429 = MagicMock(spec=httpx.Response)
+    mock_resp_429.status_code = 429
+    mock_resp_429.text = "Rate limited"
+    http_error = httpx.HTTPStatusError("Rate limited", request=MagicMock(), response=mock_resp_429)
+
+    valid_data = {
+        "choices": [
+            {"message": {"role": "assistant", "content": json.dumps({"async_recovered": True})}}
+        ]
+    }
+    mock_resp_200 = MagicMock(spec=httpx.Response)
+    mock_resp_200.status_code = 200
+    mock_resp_200.json.return_value = valid_data
+
+    with patch("httpx.AsyncClient.post", side_effect=[http_error, mock_resp_200]) as mock_post:
+        result = await client.generate_json_async("Test async")
+        assert result == {"async_recovered": True}
+        assert client.fallback_used is True
+        assert client.last_used_model == "openai/gpt-oss-20b"
+        assert mock_post.call_count == 2

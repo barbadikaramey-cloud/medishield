@@ -7,7 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from medishield.api.routers import (
+    admin_router,
     audit_router,
+    auth_router,
     cases_router,
     policies_router,
     review_router,
@@ -98,10 +100,13 @@ def create_app() -> FastAPI:
 
     # 3. Mount Routers under /api/v1
     api_prefix = settings.API_V1_STR
+    app.include_router(auth_router, prefix=api_prefix)
     app.include_router(cases_router, prefix=api_prefix)
     app.include_router(review_router, prefix=api_prefix)
     app.include_router(policies_router, prefix=api_prefix)
     app.include_router(audit_router, prefix=api_prefix)
+    app.include_router(admin_router, prefix=api_prefix)
+
 
     # 4. Liveness & Readiness Probes
     @app.get("/health", tags=["system"])

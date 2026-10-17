@@ -49,6 +49,7 @@ flowchart TB
         ClaimsAgent[Claims Extraction Agent]
         PolicyContextAgent[Policy Context Discovery Node]
         PolicyCoverageAgent[Policy Coverage RAG Node]
+        ClinicalAlignmentAgent[Clinical Alignment Specialist & Catalog Node]
         FraudAgent[Deterministic Fraud Detection Agent]
         FaithfulnessGate[Faithfulness & Provenance Gate]
     end
@@ -177,6 +178,7 @@ sequenceDiagram
     participant CLS as Classifier Agent
     participant SPEC as KYC / Claims / Policy Context (Parallel)
     participant POL as Policy Coverage RAG
+    participant CLN as Clinical Alignment Specialist
     participant FRD as Fraud Engine
     participant GATE as Faithfulness Gate
     participant DEC as Decision Engine
@@ -213,6 +215,7 @@ sequenceDiagram
         end
 
         W->>POL: Policy Coverage RAG (CPT codes + Validated Policy Version)
+        W->>CLN: Clinical Alignment Specialist (Deterministic Catalog & Line Evidence)
         W->>FRD: Fraud Scoring (7 Features, History DB, Provider Billing)
         
         W->>GATE: Run Faithfulness Gate (Verify Span Provenance & Citations)

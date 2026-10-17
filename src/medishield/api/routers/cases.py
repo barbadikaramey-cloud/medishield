@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from medishield.api.deps import (
     ROLE_ADMIN,
+    ROLE_CLAIMER,
     ROLE_MANAGER,
     ROLE_REVIEWER,
     AuthUser,
@@ -33,14 +34,18 @@ from medishield.api.deps import (
 from medishield.api.schemas.cases import (
     CaseCreateResponse,
     CaseDetailResponse,
+    CaseExplanationResponse,
     CaseListItem,
     CaseListResponse,
     CaseRerunResponse,
+    ClaimerAdjudicationSummary,
+    ClaimerDocumentItem,
+    ClaimerStatusResponse,
     DocumentUploadedInfo,
     ProcessResumeRequest,
     ProcessResumeResponse,
 )
-from medishield.db.enums import DocumentType, WorkflowState
+from medishield.db.enums import BusinessDecision, DocumentType, WorkflowState
 from medishield.db.models import Case, Decision, Document
 from medishield.db.session import SyncSessionLocal
 from medishield.intake.storage import (
@@ -103,7 +108,8 @@ async def create_case(
     files: list[UploadFile] = File(...),
     claim_type: str = Form("STANDARD_REIMBURSEMENT_CLAIM"),
     metadata: str | None = Form(None),
-    current_user: AuthUser = Depends(require_role(ROLE_REVIEWER, ROLE_MANAGER, ROLE_ADMIN)),
+    current_user: AuthUser = Depends(require_role(ROLE_CLAIMER, ROLE_REVIEWER, ROLE_MANAGER, ROLE_ADMIN)),
+
     db: Session = Depends(get_db),
     storage: StorageBackend = Depends(get_storage),
 ) -> CaseCreateResponse:
@@ -357,6 +363,122 @@ def get_case_detail(
     )
 
 
+@router.get(
+    "/{case_id}/status",
+    response_model=ClaimerStatusResponse,
+    summary="Get Sanitized Patient Claim Status (Claimer View)",
+)
+def get_claimer_claim_status(
+    case_id: str,
+    current_user: AuthUser = Depends(require_role(ROLE_CLAIMER, ROLE_REVIEWER, ROLE_MANAGER, ROLE_ADMIN)),
+    db: Session = Depends(get_db),
+) -> ClaimerStatusResponse:
+    """
+    Sanitized, patient-facing claim tracking endpoint (Spec 11 § 2, ADR-012).
+    Shields proprietary internal reasoning traces, fraud scores, and rule IDs,
+    returning clear workflow state, financial summary, and customer explanation.
+    """
+    case = db.query(Case).filter(Case.case_id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail=f"Claim {case_id} not found")
+
+    # Document list (sanitized)
+    doc_items = [
+        ClaimerDocumentItem(
+            document_id=d.document_id,
+            file_name=d.file_name,
+            doc_type=d.doc_type.value if hasattr(d.doc_type, "value") else str(d.doc_type),
+            size_bytes=d.size_bytes,
+            created_at=d.created_at,
+        )
+        for d in (case.documents or [])
+    ]
+
+    active_decision = None
+    if hasattr(case, "decisions") and case.decisions:
+        active_decision = next((d for d in reversed(case.decisions) if getattr(d, "is_active", True)), None)
+    if not active_decision:
+        try:
+            active_decision = (
+                db.query(Decision)
+                .filter(Decision.case_id == case.id, Decision.is_active.is_(True))
+                .order_by(Decision.created_at.desc())
+                .first()
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Active decision lookup fallback for case %s: %s", case.case_id, exc)
+
+    # Derive user-friendly status label and lifecycle completeness (ADR-001, ADR-012, ADR-014)
+    state_str = case.workflow_state.value if hasattr(case.workflow_state, "value") else str(case.workflow_state)
+    is_complete = bool(case.is_complete) or state_str == "COMPLETED"
+
+    decision_val = None
+    if active_decision:
+        decision_val = active_decision.decision.value if hasattr(active_decision.decision, "value") else str(active_decision.decision)
+    elif case.current_decision:
+        decision_val = case.current_decision.value if hasattr(case.current_decision, "value") else str(case.current_decision)
+
+    # Human Review Barrier: Preliminary automated decisions & calculations are strictly withheld until finalization
+    if is_complete:
+        if decision_val == "APPROVE":
+            status_label = "Claim Approved"
+        elif decision_val == "REJECT":
+            status_label = "Claim Denied"
+        else:
+            status_label = "Claim Completed"
+    elif state_str == "AWAITING_INFO":
+        status_label = "Action Required: Missing Information"
+    elif state_str in ("AWAITING_HUMAN", "ANALYZING", "SCANNING", "CLASSIFYING"):
+        status_label = "Under Specialist Review"
+    elif state_str == "FAILED":
+        status_label = "Processing Issue Encountered"
+    else:
+        status_label = "Claim Received"
+
+    adjudication_summary = None
+    # Adjudication summary and patient financial figures are exposed ONLY upon final completion
+    if is_complete and active_decision:
+        snapshot = active_decision.agent_summary_snapshot or {}
+        policy_meta = snapshot.get("policy", {}) if isinstance(snapshot, dict) else {}
+        claims_meta = snapshot.get("claims", {}) if isinstance(snapshot, dict) else {}
+
+        # Synthesize patient-friendly explanation letter
+        patient_letter = active_decision.justification
+        if snapshot.get("detailed_explanation"):
+            detailed = str(snapshot.get("detailed_explanation"))
+            if "### Executive Summary" in detailed:
+                parts = detailed.split("### Executive Summary")
+                if len(parts) > 1:
+                    patient_letter = parts[1].split("###")[0].strip()
+
+        cov_amt = None
+        if policy_meta.get("coverage_percentage"):
+            cov_amt = round(float(claims_meta.get("total_billed", 0) or 0) * (float(policy_meta.get("coverage_percentage")) / 100.0), 2)
+
+        adjudication_summary = ClaimerAdjudicationSummary(
+            decision=decision_val or "COMPLETED",
+            covered_amount=cov_amt,
+            total_billed=float(claims_meta.get("total_billed")) if claims_meta.get("total_billed") is not None else None,
+            deductible_applied=float(policy_meta.get("deductible_limit")) if policy_meta.get("deductible_limit") is not None else None,
+            copay_percentage=float(policy_meta.get("copay_percentage")) if policy_meta.get("copay_percentage") is not None else None,
+            member_responsibility=float(policy_meta.get("member_responsibility")) if policy_meta.get("member_responsibility") is not None else None,
+            explanation_letter=patient_letter,
+        )
+
+    return ClaimerStatusResponse(
+        case_id=case.case_id,
+        workflow_state=state_str,
+        is_complete=is_complete,
+        status_label=status_label,
+        missing_documents=case.missing_documents or [],
+        adjudication=adjudication_summary,
+        submitted_documents=doc_items,
+        created_at=case.created_at,
+        updated_at=case.updated_at,
+    )
+
+
+
 @router.post(
     "/{case_id}/process",
     response_model=ProcessResumeResponse,
@@ -532,3 +654,119 @@ def get_document_content(
         return Response(content=raw_bytes, media_type=doc.mime_type)
     except Exception as exc:
         raise HTTPException(status_code=404, detail="Document content not found in storage") from exc
+
+
+@router.post(
+    "/{case_id}/explain",
+    response_model=CaseExplanationResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Generate or Refresh LLM Clinical Decision Explanation (ADR-011)",
+)
+def explain_case_decision(
+    case_id: str,
+    db: Session = Depends(get_db),
+    current_user: AuthUser = Depends(require_role(ROLE_CLAIMER, ROLE_REVIEWER, ROLE_MANAGER, ROLE_ADMIN)),
+) -> CaseExplanationResponse:
+    """
+    Synthesizes an in-depth clinical & policy narrative for an adjudicated case using
+    the Groq LLM (with deterministic offline fallback per ADR-011 and Rules 10, 11, 14).
+    Updates and persists the explanation to the case decision snapshot.
+    """
+    case = db.query(Case).filter(Case.case_id == case_id).first()
+    if not case:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Case {case_id} not found",
+        )
+
+    # Find active decision
+    active_decision = None
+    try:
+        active_decision = (
+            db.query(Decision)
+            .filter(Decision.case_id == case.id, Decision.is_active.is_(True))
+            .order_by(Decision.created_at.desc())
+            .first()
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Active decision lookup error for %s: %s", case_id, exc)
+
+    if not active_decision:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Case {case_id} has not completed adjudication yet.",
+        )
+
+    # Reconstruct context & orchestrator outcome
+    snapshot = active_decision.agent_summary_snapshot or {}
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+
+    from types import SimpleNamespace
+
+    from medishield.core.llm import default_groq_client
+    from medishield.domain.explanation import generate_decision_explanation
+
+    context = SimpleNamespace(
+        case_id=case.case_id,
+        execution_id=getattr(active_decision, "execution_id", None) or f"exec-{case.case_id}",
+        security_tamper_score=float(snapshot.get("security_tamper_score", 0.0) or 0.0),
+        kyc_output=snapshot.get("kyc"),
+        claims_output=snapshot.get("claims"),
+        policy_output=snapshot.get("policy"),
+        fraud_output=snapshot.get("fraud"),
+    )
+
+    decision_enum = active_decision.decision
+    if isinstance(decision_enum, str):
+        try:
+            decision_enum = BusinessDecision(decision_enum)
+        except ValueError:
+            decision_enum = BusinessDecision.ESCALATE
+
+    conf = getattr(active_decision, "decision_confidence", None)
+    if conf is None:
+        conf = getattr(active_decision, "confidence", 0.85)
+
+    outcome = SimpleNamespace(
+        decision=decision_enum or BusinessDecision.ESCALATE,
+        rule_id_matched=active_decision.rule_id_matched or "RULE-P8-CATCH-ALL",
+        decision_confidence=float(conf or 0.85),
+        justification=active_decision.justification or "Adjudication decision reached.",
+        escalation_sub_reason=active_decision.escalation_sub_reason,
+    )
+
+    detailed_explanation = generate_decision_explanation(context, outcome)
+
+    # Check model source
+    groq_avail = default_groq_client.is_available() if default_groq_client else False
+    if groq_avail:
+        used = getattr(default_groq_client, "last_used_model", None) or default_groq_client.model
+        fb = getattr(default_groq_client, "fallback_used", False)
+        clean_model = used.split("/")[-1] if "/" in used else used
+        suffix = " [Fallback]" if fb else ""
+        model_source = f"Groq LLM ({clean_model}){suffix}"
+    else:
+        model_source = "Clinical Decision Synthesizer (ADR-011 Engine)"
+
+    # Persist explanation back to Decision record
+    try:
+        updated_snapshot = dict(snapshot)
+        updated_snapshot["detailed_explanation"] = detailed_explanation
+        updated_snapshot["explanation_model"] = model_source
+        active_decision.agent_summary_snapshot = updated_snapshot
+        active_decision.justification = detailed_explanation
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not persist explanation update to DB: %s", exc)
+
+    return CaseExplanationResponse(
+        case_id=case.case_id,
+        decision=active_decision.decision.value if hasattr(active_decision.decision, "value") else str(active_decision.decision),
+        rule_id_matched=active_decision.rule_id_matched or "RULE-P8-CATCH-ALL",
+        decision_confidence=float(conf) if conf is not None else None,
+        detailed_explanation=detailed_explanation,
+        model_source=model_source,
+        generated_at=datetime.now(UTC),
+    )
+

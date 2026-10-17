@@ -2,7 +2,7 @@ import medishield.db.models  # noqa: F401
 from medishield.db.session import Base
 
 
-def test_all_16_tables_registered():
+def test_all_17_tables_registered():
     expected_tables = {
         "cases",
         "documents",
@@ -20,9 +20,11 @@ def test_all_16_tables_registered():
         "human_reviews",
         "audit_events",
         "idempotency_keys",
+        "medical_codes",
     }
     registered_tables = set(Base.metadata.tables.keys())
     assert expected_tables.issubset(registered_tables), (
+
         f"Missing tables: {expected_tables - registered_tables}"
     )
 
@@ -59,9 +61,19 @@ def test_claims_and_lines_foreign_keys():
     assert "claims.id" in [fk.target_fullname for fk in lines_table.foreign_keys]
 
 
-def test_audit_events_table_structure():
     audit_table = Base.metadata.tables["audit_events"]
     assert "prev_hash" in audit_table.columns
     assert "current_hash" in audit_table.columns
     assert "event_payload" in audit_table.columns
     assert "actor_type" in audit_table.columns
+
+
+def test_medical_codes_table_structure():
+    codes_table = Base.metadata.tables["medical_codes"]
+    assert "code" in codes_table.columns
+    assert "coding_system" in codes_table.columns
+    assert "short_description" in codes_table.columns
+    assert "is_active" in codes_table.columns
+    assert "standard_charge" in codes_table.columns
+    assert "requires_prior_auth" in codes_table.columns
+

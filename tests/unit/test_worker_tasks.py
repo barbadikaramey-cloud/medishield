@@ -1,5 +1,7 @@
 """Unit tests for Celery Background Workers and Queue Routing (FEAT-011, Spec 01 § 2 Layer 3)."""
 
+import json
+import uuid
 from datetime import date
 from typing import Any
 from unittest.mock import MagicMock
@@ -28,6 +30,7 @@ from medishield.db.enums import (
     EscalationSubReason,
     WorkflowState,
 )
+from medishield.db.models import Decision
 from medishield.domain.contracts import FraudAgentOutput, RiskLevel
 from medishield.intake.storage import InMemoryStorageBackend
 from medishield.ocr.preprocessor import DefaultOCREngine, OCRPreprocessorEngine
@@ -184,6 +187,19 @@ PROCEDURE: 99213
 TOTAL CHARGE: $350.00
 """
 
+SAMPLE_DISCHARGE_SUMMARY_TEXT = """HOSPITAL CLINICAL VISIT NOTE / DISCHARGE SUMMARY
+PATIENT: Alice Smith
+MEMBER ID: MEM-12345
+DATE OF SERVICE: 2026-03-15
+ATTENDING PHYSICIAN: Dr. Sarah Jenkins, MD
+
+CLINICAL IMPRESSION & FINDINGS:
+Patient presented for outpatient evaluation and management office visit (99213).
+Low complexity medical decision making confirmed. Physical exam and vital signs recorded.
+Diagnostic 12-lead electrocardiogram (93000 Routine ECG) performed and interpreted. Normal sinus rhythm noted without acute ST elevation.
+Treatment plan discussed, prescription provided. Patient discharged home in stable condition.
+"""
+
 
 def test_workflow_task_clean_claim_auto_approve():
     """Verify end-to-end multi-agent adjudication to APPROVE via Celery workflow task."""
@@ -192,6 +208,7 @@ def test_workflow_task_clean_claim_auto_approve():
 
     storage.put_bytes(f"raw/{case_id}/DOC-CLAIM.txt", SAMPLE_CLAIM_TEXT.encode("utf-8"))
     storage.put_bytes(f"raw/{case_id}/DOC-ID.txt", SAMPLE_ID_TEXT.encode("utf-8"))
+    storage.put_bytes(f"raw/{case_id}/DOC-CLIN.txt", SAMPLE_DISCHARGE_SUMMARY_TEXT.encode("utf-8"))
 
     doc_refs = [
         DocumentReference(
@@ -208,6 +225,14 @@ def test_workflow_task_clean_claim_auto_approve():
             mime_type="text/plain",
             checksum="chk-id",
             doc_type=DocumentType.ID_DOCUMENT.value,
+            split_source_page_indices=[1],
+        ),
+        DocumentReference(
+            document_id="DOC-CLIN",
+            object_key=f"raw/{case_id}/DOC-CLIN.txt",
+            mime_type="text/plain",
+            checksum="chk-clin",
+            doc_type=DocumentType.DISCHARGE_SUMMARY.value,
             split_source_page_indices=[1],
         ),
     ]
@@ -422,3 +447,94 @@ def test_phi_scrubbing_in_task_outputs():
 
     assert "1985-05-20" not in str(result)
     assert "4321" not in str(result)
+
+
+def test_workflow_task_json_encodes_dates_in_agent_snapshot():
+    case_id = "CASE-JSON-SNAPSHOT"
+    case_record = MagicMock()
+    case_record.id = uuid.uuid4()
+    case_record.version = 1
+    case_record.workflow_state = WorkflowState.RECEIVED
+    case_record.documents = []
+
+    coordinator = MagicMock()
+    coordinator.execute.return_value = {
+        "workflow_state": WorkflowState.COMPLETED.value,
+        "decision": BusinessDecision.APPROVE.value,
+        "decision_confidence": 0.95,
+        "rule_id_matched": "RULE-P8-CLEAN-PASS",
+        "justification": "All checks passed.",
+        "claims_summary": {"service_date": {"value": date(2026, 10, 12)}},
+        "documents": [],
+        "is_complete": True,
+        "missing_required_documents": [],
+    }
+    db_session = MagicMock()
+    db_session.query.return_value.filter.return_value.first.return_value = case_record
+
+    process_case_workflow_task.apply(
+        args=[case_id],
+        kwargs={
+            "coordinator": coordinator,
+            "initial_state": create_initial_case_state(case_id=case_id, documents=[]),
+            "db_session": db_session,
+        },
+    ).get()
+
+    decision_record = next(
+        call.args[0]
+        for call in db_session.add.call_args_list
+        if isinstance(call.args[0], Decision)
+    )
+    snapshot_json = json.dumps(decision_record.agent_summary_snapshot)
+    assert '"value": "2026-10-12"' in snapshot_json
+
+
+def test_workflow_task_supersedes_previous_active_decision_on_rerun():
+    """Failure 8: Verifies rerun deactivates previous active decisions for the case."""
+    case_id = "CASE-RERUN-ACTIVE"
+    case_record = MagicMock()
+    case_record.id = uuid.uuid4()
+    case_record.version = 1
+    case_record.workflow_state = WorkflowState.RECEIVED
+    case_record.documents = []
+
+    prior_decision = MagicMock(spec=Decision)
+    prior_decision.is_active = True
+    case_record.decisions = [prior_decision]
+
+    coordinator = MagicMock()
+    coordinator.execute.return_value = {
+        "workflow_state": WorkflowState.COMPLETED.value,
+        "decision": BusinessDecision.APPROVE.value,
+        "decision_confidence": 0.95,
+        "rule_id_matched": "RULE-P8-CLEAN-PASS",
+        "justification": "All checks passed.",
+        "documents": [],
+        "is_complete": True,
+        "missing_required_documents": [],
+    }
+    db_session = MagicMock()
+    db_session.query.return_value.filter.return_value.first.return_value = case_record
+    db_session.execute.return_value.scalars.return_value.all.return_value = [prior_decision]
+
+    process_case_workflow_task.apply(
+        args=[case_id],
+        kwargs={
+            "coordinator": coordinator,
+            "initial_state": create_initial_case_state(case_id=case_id, documents=[]),
+            "db_session": db_session,
+        },
+    ).get()
+
+    # Prior decision must be marked inactive
+    assert prior_decision.is_active is False
+
+    # New decision must be active
+    new_decisions = [
+        call.args[0]
+        for call in db_session.add.call_args_list
+        if isinstance(call.args[0], Decision)
+    ]
+    assert len(new_decisions) == 1
+    assert new_decisions[0].is_active is True

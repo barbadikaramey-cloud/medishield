@@ -150,7 +150,8 @@ class ConsistencyCheckReport(BaseModel):
 def evaluate_case_consistency(
     kyc_output: KYCAgentOutput,
     claims_output: ClaimsAgentOutput,
-    policy_output: PolicyCoverageOutput
+    policy_output: PolicyCoverageOutput,
+    clinical_output: Optional[ClinicalAlignmentOutput] = None
 ) -> ConsistencyCheckReport:
     conflicts = []
     
@@ -166,6 +167,17 @@ def evaluate_case_consistency(
     # 3. Line Items Arithmetic Sum
     if not claims_output.line_items_sum_valid:
         conflicts.append(f"Claim line items total (${claims_output.calculated_lines_sum}) does not match header amount.")
+
+    # 4. Clinical Encounter Containment & Bed-Day Consistency (ADR-015)
+    if clinical_output and clinical_output.bed_day_reconciliation:
+        bdr = clinical_output.bed_day_reconciliation
+        for line in clinical_output.line_assessments:
+            if line.service_date:
+                if line.service_date < bdr.admission_date or line.service_date > bdr.discharge_date:
+                    conflicts.append(
+                        f"Line {line.line_number} service date ({line.service_date}) falls outside "
+                        f"hospital encounter stay [{bdr.admission_date} to {bdr.discharge_date}]."
+                    )
 
     is_consistent = len(conflicts) == 0
     return ConsistencyCheckReport(
@@ -192,3 +204,8 @@ Where:
 - $\text{Model Confidence} = \min(\text{Agent Confidences})$
 
 This formula guarantees that high model confidence cannot mask poor evidence grounding.
+
+> [!IMPORTANT]
+> **Calibration Input Integrity Principle:**
+> When span provenance, validation completeness indicators, or model extraction probabilities are unavailable, `Decision Confidence` must evaluate to `None` (unavailable).
+> Under no circumstances may the system default or fall back to an arbitrary numeric constant (e.g. `0.70`). An uncalibrated confidence (`confidence = None`) strictly fails the Rule P6 straight-through pass threshold ($\ge 0.75$) and routes to Rule P7 (`RULE-P7-BORDERLINE-REVIEW`, `ESCALATE(HUMAN_REVIEW)`).

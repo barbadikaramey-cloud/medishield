@@ -1,0 +1,47 @@
+{
+  "version": "1.0.0",
+  "description": "Evaluator Review Register for Disputed Dataset Metadata Labels (Canonical Failure 7 Remediation)",
+  "created_at": "2026-10-12T10:00:00Z",
+  "disputed_records": [
+    {
+      "patient_id": "PT_19116",
+      "case_cluster_id": "C_001",
+      "doc_id": "discharge_PT_19116",
+      "original_label": "readmission_30d",
+      "observed_source_evidence": "Discharge summary document and OCR indicate a single hospital stay from 12/02/2025 to 12/05/2025. No prior admission record is present in case documents.",
+      "disposition": "PENDING",
+      "rationale": "Supplied metadata asserts 30-day readmission fraud, but source discharge evidence does not document a prior admission. Label cannot be corroborated from provided source evidence.",
+      "reviewer": "evaluator-audit-team",
+      "reviewed_at": "2026-10-12T10:00:00Z",
+      "approved_case_level_expected_outcome": null,
+      "benchmark_action": "EXCLUDE_FROM_SCORING"
+    },
+    {
+      "patient_id": "PT_69470",
+      "case_cluster_id": "C_004",
+      "doc_id": "claim_PT_69470",
+      "original_label": "amount_under_10k",
+      "observed_source_evidence": "Source itemized bill and OCR show total charges of $23,290.00, exceeding the $10,000.00 threshold asserted by the label.",
+      "disposition": "PENDING",
+      "rationale": "Supplied metadata asserts amount_under_10k fraud label, directly conflicting with legible source document total of $23,290.00.",
+      "reviewer": "evaluator-audit-team",
+      "reviewed_at": "2026-10-12T10:00:00Z",
+      "approved_case_level_expected_outcome": null,
+      "benchmark_action": "EXCLUDE_FROM_SCORING"
+    },
+    {
+      "patient_id": "PT_39451",
+      "case_cluster_id": "C_006",
+      "doc_id": "id_PT_39451",
+      "original_label": "name_mismatch",
+      "observed_source_evidence": "Claim form, Illinois State ID card, and seeded member database all consistently identify member Sandra Hall C. with DOB 09/25/1993.",
+      "disposition": "PENDING",
+      "rationale": "Supplied metadata asserts name mismatch fraud, but reviewed identity evidence matches across all documents and member enrollment records.",
+      "reviewer": "evaluator-audit-team",
+      "reviewed_at": "2026-10-12T10:00:00Z",
+      "approved_case_level_expected_outcome": null,
+      "benchmark_action": "EXCLUDE_FROM_SCORING"
+    }
+  ]
+}
+

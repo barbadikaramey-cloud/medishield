@@ -3,8 +3,9 @@ import sys
 
 import pytest
 
-# Ensure src/ is on sys.path
+# Ensure src/ and repo root are on sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 
 @pytest.fixture

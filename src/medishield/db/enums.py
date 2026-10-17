@@ -55,3 +55,21 @@ class ActorType(str, Enum):
     """Actor identity category performing an action or emitting a decision."""
     SYSTEM = "SYSTEM"
     HUMAN = "HUMAN"
+
+
+class CodingSystem(str, Enum):
+    """Authoritative medical coding terminology systems (CPT, HCPCS, ICD-10, Revenue)."""
+    CPT = "CPT"
+    HCPCS = "HCPCS"
+    ICD10_CM = "ICD10_CM"
+    REV_CODE = "REV_CODE"
+    NDC = "NDC"
+
+
+class UserRole(str, Enum):
+    """Authoritative role identities for multi-tenant access control (ADR-012)."""
+    CLAIMER = "CLAIMER"
+    REVIEWER = "OPERATIONS_REVIEWER"
+    MANAGER = "OPERATIONS_MANAGER"
+    ADMIN = "ADMINISTRATOR"
+

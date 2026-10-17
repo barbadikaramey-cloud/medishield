@@ -203,6 +203,19 @@ PROCEDURE: 99213
 TOTAL CHARGE: $350.00
 """
 
+SAMPLE_DISCHARGE_SUMMARY_TEXT = """HOSPITAL CLINICAL VISIT NOTE / DISCHARGE SUMMARY
+PATIENT: Alice Smith
+MEMBER ID: MEM-12345
+DATE OF SERVICE: 2026-03-15
+ATTENDING PHYSICIAN: Dr. Sarah Jenkins, MD
+
+CLINICAL IMPRESSION & FINDINGS:
+Patient presented for outpatient evaluation and management office visit (99213).
+Low complexity medical decision making confirmed. Physical exam and vital signs recorded.
+Diagnostic 12-lead electrocardiogram (93000 Routine ECG) performed and interpreted. Normal sinus rhythm noted without acute ST elevation.
+Treatment plan discussed, prescription provided. Patient discharged home in stable condition.
+"""
+
 
 # ── Test Cases ────────────────────────────────────────────────────────────────
 
@@ -214,8 +227,11 @@ def test_clean_claim_auto_approve() -> None:
 
     doc_id = _upload_test_document(storage, case_id, "doc-id", SAMPLE_ID_TEXT, DocumentType.ID_DOCUMENT.value)
     doc_claim = _upload_test_document(storage, case_id, "doc-claim", SAMPLE_CLAIM_TEXT, DocumentType.CLAIM_FORM.value)
+    doc_clin = _upload_test_document(
+        storage, case_id, "doc-clin", SAMPLE_DISCHARGE_SUMMARY_TEXT, DocumentType.DISCHARGE_SUMMARY.value
+    )
 
-    state = create_initial_case_state(case_id=case_id, documents=[doc_id, doc_claim])
+    state = create_initial_case_state(case_id=case_id, documents=[doc_id, doc_claim, doc_clin])
     result = coordinator.execute(state)
 
     assert result["workflow_state"] == WorkflowState.COMPLETED.value
@@ -274,10 +290,9 @@ TOTAL CHARGE: $1200.00
     state = create_initial_case_state(case_id=case_id, documents=[doc_id, doc_claim])
     result = coordinator.execute(state)
 
-    assert result["workflow_state"] == WorkflowState.AWAITING_HUMAN.value
-    assert result["decision"] == BusinessDecision.ESCALATE.value
+    assert result["workflow_state"] == WorkflowState.COMPLETED.value
+    assert result["decision"] == BusinessDecision.REJECT.value
     assert result["rule_id_matched"] == "RULE-P5-HARD-REJECT"
-    assert "recommended denial" in result["justification"].lower() or "requires human confirmation" in result["justification"].lower()
 
 
 def test_prior_authorization_missing_escalate() -> None:
@@ -488,4 +503,39 @@ def test_workflow_reclassifies_unknown_documents_by_filename() -> None:
     assert DocumentType.ID_DOCUMENT.value in reclassified_types
     assert result["is_complete"] is True
     assert result["workflow_state"] != WorkflowState.AWAITING_INFO.value
+
+
+def test_within_case_duplicate_claims_trigger_fraud_review() -> None:
+    """Verifies that multiple claim documents with matching claim number trigger within-case duplicate fraud review (Failure 6)."""
+    coordinator, storage, _ = _setup_test_environment()
+    case_id = "case-dup-claim-12"
+
+    claim_with_num = """HEALTH INSURANCE CLAIM FORM
+CLAIM NO.: CLM-2024-000005
+PROVIDER: Dr. Sarah Jenkins Hospital
+NPI: 1234567890
+DATE OF SERVICE: 2026-03-15
+DIAGNOSIS: J02.9
+PROCEDURE: 99213
+1. 99213 Office Visit 2026-03-15 1.0 $200.00 $200.00
+2. 93000 Routine ECG 2026-03-15 1.0 $150.00 $150.00
+TOTAL CHARGE: $350.00
+"""
+    doc_id = _upload_test_document(storage, case_id, "doc-id", SAMPLE_ID_TEXT, DocumentType.ID_DOCUMENT.value)
+    doc_claim1 = _upload_test_document(storage, case_id, "doc-claim-01", claim_with_num, DocumentType.CLAIM_FORM.value)
+    doc_claim1["file_name"] = "claim_PT_20322.png"
+
+    doc_claim2 = _upload_test_document(storage, case_id, "doc-claim-02", claim_with_num, DocumentType.CLAIM_FORM.value)
+    doc_claim2["file_name"] = "claim_PT_20322_dup.png"
+
+    state = create_initial_case_state(case_id=case_id, documents=[doc_id, doc_claim1, doc_claim2])
+    result = coordinator.execute(state)
+
+    assert result["duplicate_claim_match_id"] == "CLM-2024-000005"
+    assert result["duplicate_claim_detected"] is True
+    assert result["fraud_score"] >= 0.30
+    assert result["decision"] == BusinessDecision.ESCALATE.value
+    assert result["escalation_sub_reason"] == EscalationSubReason.FRAUD_REVIEW.value
+    assert result["rule_id_matched"] == "RULE-P4-HIGH-FRAUD"
+
 

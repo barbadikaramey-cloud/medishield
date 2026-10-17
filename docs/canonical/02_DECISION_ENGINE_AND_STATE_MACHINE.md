@@ -134,9 +134,9 @@ flowchart TD
     CheckFraudHigh -- No --> CheckHardFail{Confirmed Hard Failure?<br/>KYC FAIL or<br/>Policy FAIL or<br/>Schema Invalid}
     
     CheckHardFail -- Yes --> AutoReject[REJECT<br/>Reason: Hard Business Rule Failure<br/>State: COMPLETED]
-    CheckHardFail -- No --> CheckApprove{KYC PASS and<br/>Claims PASS and<br/>Policy PASS and<br/>Fraud Score < 0.30 and<br/>Confidences >= 0.75?}
+    CheckHardFail -- No --> CheckApprove{KYC PASS and<br/>Claims PASS and<br/>Policy PASS and<br/>Fraud Score < 0.30 and<br/>Core Confidences >= 0.75 and<br/>Clinical PASS and<br/>Clinical Confidence >= 0.75?}
     
-    CheckApprove -- Yes --> AutoApprove[APPROVE<br/>Reason: Clean Automated Match<br/>State: COMPLETED]
+    CheckApprove -- Yes --> AutoApprove[APPROVE<br/>Reason: Clean Automated Match & Clinical Concordance<br/>State: COMPLETED]
     CheckApprove -- No --> EscReview[ESCALATE<br/>Sub-reason: HUMAN_REVIEW<br/>State: AWAITING_HUMAN]
 ```
 
@@ -149,8 +149,8 @@ flowchart TD
 | **P3** | **Material Ambiguity / Conflict** | Any agent verdict `== CONFLICT`<br>Any critical field verdict `== INDETERMINATE` | `ESCALATE` | `AMBIGUITY` | `AWAITING_HUMAN` |
 | **P4** | **High Fraud Risk** | `fraud_score >= 0.70` OR severe anomaly flag triggered | `ESCALATE` | `FRAUD_REVIEW` | `AWAITING_HUMAN` |
 | **P5** | **Confirmed Hard Failure Recommendation** | `kyc_verdict == FAIL` (e.g. member not found)<br>OR `claims_verdict == FAIL` (corrupted/invalid schema)<br>OR `policy_verdict == FAIL` **and** a verbatim authoritative exclusion citation is verified for the selected policy/version and explicitly applies to a billed service code | `ESCALATE` | `RECOMMEND_DENIAL` | `AWAITING_HUMAN` |
-| **P6** | **Clean Straight-Through Pass** | `kyc_verdict == PASS`<br>AND `claims_verdict == PASS`<br>AND `policy_verdict == PASS`<br>AND `fraud_score < 0.30`<br>AND min agent confidence `>= 0.75` | `APPROVE` | *None* | `COMPLETED` |
-| **P7** | **Borderline / Nuanced Case** | `0.30 <= fraud_score < 0.70`<br>OR min agent confidence `< 0.75` (with all verdicts PASS) | `ESCALATE` | `HUMAN_REVIEW` | `AWAITING_HUMAN` |
+| **P6** | **Clean Straight-Through Pass** | `kyc_verdict == PASS`<br>AND `claims_verdict == PASS` (lines coded & reconciled)<br>AND `policy_verdict == PASS` (full scope covered)<br>AND `fraud_score < 0.30` (no duplicate)<br>AND min core agent confidence `>= 0.75`<br>AND `clinical_output.verdict == PASS`<br>AND `clinical_output.confidence >= 0.75` | `APPROVE` | *None* | `COMPLETED` |
+| **P7** | **Borderline / Nuanced Case** | `0.30 <= fraud_score < 0.70`<br>OR min core agent confidence `< 0.75` (with all verdicts PASS)<br>OR `clinical_output is None`<br>OR `clinical_output.confidence is None`<br>OR `clinical_output.confidence < 0.75`<br>OR claims lines/policy scope incompletely reconciled | `ESCALATE` | `HUMAN_REVIEW` | `AWAITING_HUMAN` |
 | **P8** | **Default Catch-All Guard** | Any unclassified state | `ESCALATE` | `HUMAN_REVIEW` | `AWAITING_HUMAN` |
 
 ---
@@ -163,6 +163,7 @@ The architecture strictly enforces: **Uncertainty must never become a false nega
 2. **Missing Documents are NOT a Reject:** If an intake upload contains a claim form but lacks a government ID, the completeness checker emits `verdict = INDETERMINATE`. Under Rule P2, this pauses the workflow into `AWAITING_INFO` (`ESCALATE(MISSING_INFORMATION)`), allowing the member or hospital to upload the missing attachment.
 3. **Downstream Dependency Outages are NOT a Reject:** If the vector database or model provider is unreachable, the agent returns `verdict = UNAVAILABLE`. Under Rule P1, this triggers `ESCALATE(TECHNICAL_FAILURE)`.
 4. **Generic Policy FAIL is NOT a Denial Recommendation:** Empty retrieval, unknown codes, missing clauses, or unverified quotations are `INDETERMINATE`/`UNAVAILABLE` and route to review. See ADR-010.
+5. **Missing or Ambiguous Clinical Evidence is NOT an Autonomous Denial:** If a clinical document does not mention an unessential routine test or bed days have date-only timestamps, clinical alignment emits `INDETERMINATE`. Under Rule P3 or P7, this safely routes to human medical review (`ESCALATE(AMBIGUITY)` or `ESCALATE(HUMAN_REVIEW)`), upholding Engineering Rule 13 (*"Never silently convert uncertainty into failure"*).
 
 ---
 

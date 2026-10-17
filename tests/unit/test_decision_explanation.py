@@ -231,3 +231,39 @@ def test_case_detail_schema_has_detailed_explanation():
     )
     assert resp.detailed_explanation == "### Executive Summary\nClaim clean pass."
     assert resp.justification == "Clean pass"
+
+
+def test_clinical_alignment_explanation_includes_diagnosis_procedure_misalignment():
+    """Verifies that diagnosis-procedure clinical misalignment is explicitly surfaced in Section 6 of explanation."""
+    context, decision_output = _build_sample_context()
+
+    from medishield.domain.clinical_align import DeterministicClinicalAlignmentEngine
+    from medishield.domain.contracts import ClinicalIndicationStatus
+
+    line_ev = DeterministicClinicalAlignmentEngine.evaluate_line_item(
+        line_number=1,
+        service_code="27447",
+        billed_units=1.0,
+        billed_amount=15400.0,
+        diagnosis_codes=["S52", "M54.5"],
+    )
+    assert line_ev.indication_status == ClinicalIndicationStatus.NO_DOCUMENTED_INDICATION
+    assert line_ev.discrepancy_description is not None
+    assert "Diagnosis-procedure clinical misalignment" in line_ev.discrepancy_description
+    assert "CPT 27447 (Total Knee Arthroplasty (TKA))" in line_ev.discrepancy_description
+    assert "S52, M54.5" in line_ev.discrepancy_description
+    assert "Knee Joint" in line_ev.discrepancy_description
+
+    clin_output = DeterministicClinicalAlignmentEngine.align_claim(
+        expected_line_numbers=[1],
+        line_assessments=[line_ev],
+    )
+    context.clinical_output = clin_output
+
+    explanation = generate_deterministic_explanation(context, decision_output)
+
+    assert "#### 6. Clinical Alignment & Medical Necessity (ADR-015)" in explanation
+    assert "Diagnosis-procedure clinical misalignment" in explanation
+    assert "CPT 27447 (Total Knee Arthroplasty (TKA))" in explanation
+    assert "S52, M54.5" in explanation
+    assert "Knee Joint" in explanation

@@ -20,6 +20,7 @@ class DocumentReference(TypedDict, total=False):
     classification_confidence: float
     routing_tags: list[str]
     split_source_page_indices: list[int]
+    text_content: str
 
 
 class CaseState(TypedDict, total=False):
@@ -76,10 +77,17 @@ class CaseState(TypedDict, total=False):
     fraud_risk_level: str | None
     fraud_summary: dict[str, Any] | None
 
+    # Clinical Alignment Specialist
+    clinical_alignment_execution_id: str | None
+    clinical_alignment_verdict: str | None
+    clinical_alignment_confidence: float | None
+    clinical_alignment_summary: dict[str, Any] | None
+
     # Faithfulness & Integrity Gate
     faithfulness_gate_passed: bool
     provenance_integrity_score: float
     unsupported_claims_count: int
+    consistency_report: dict[str, Any] | None
 
     # Final Business Decision Output
     decision: str | None

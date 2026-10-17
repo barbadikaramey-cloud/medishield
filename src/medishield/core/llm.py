@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from medishield.core.config import settings
+from medishield.core.tracing import trace_span
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,9 @@ class GroqUnavailableError(GroqLLMError):
     """Raised when Groq API is not configured or offline."""
 
 
+_DEFAULT_FALLBACK = object()
+
+
 class GroqLLMClient:
     """
     High-speed LLM Gateway connecting to Groq OpenAI-compatible API endpoints.
@@ -55,17 +59,25 @@ class GroqLLMClient:
         self,
         api_key: str | None = None,
         model: str | None = None,
+        fallback_model: Any = _DEFAULT_FALLBACK,
         base_url: str | None = None,
         timeout_seconds: float | None = None,
         max_retries: int | None = None,
     ) -> None:
         self.api_key = api_key if api_key is not None else settings.GROQ_API_KEY
         self.model = model if model is not None else settings.GROQ_MODEL
+        self.fallback_model: str | None = (
+            getattr(settings, "GROQ_FALLBACK_MODEL", "openai/gpt-oss-20b")
+            if fallback_model is _DEFAULT_FALLBACK
+            else fallback_model
+        )
         self.base_url = (base_url if base_url is not None else settings.GROQ_BASE_URL).rstrip("/")
         self.timeout_seconds = (
             timeout_seconds if timeout_seconds is not None else settings.GROQ_TIMEOUT_SECONDS
         )
         self.max_retries = max_retries if max_retries is not None else settings.GROQ_MAX_RETRIES
+        self.last_used_model: str | None = None
+        self.fallback_used: bool = False
 
     def is_available(self) -> bool:
         """Returns True if a non-empty API key is present."""
@@ -86,10 +98,11 @@ class GroqLLMClient:
         system_prompt: str,
         temperature: float,
         max_tokens: int,
+        model: str | None = None,
     ) -> dict[str, Any]:
         full_system_prompt = f"{SYSTEM_INJECTION_DEFENSE_HEADER}\n\n{system_prompt}".strip()
         return {
-            "model": self.model,
+            "model": model or self.model,
             "messages": [
                 {"role": "system", "content": full_system_prompt},
                 {"role": "user", "content": prompt},
@@ -98,6 +111,33 @@ class GroqLLMClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+
+    def _record_telemetry_usage(
+        self,
+        span: Any,
+        data: dict[str, Any],
+    ) -> None:
+        usage = data.get("usage")
+        if isinstance(usage, dict):
+            tokens_to_set = {}
+            for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                val = usage.get(k)
+                if isinstance(val, int) and not isinstance(val, bool) and val >= 0:
+                    tokens_to_set[k] = val
+            if tokens_to_set:
+                span.set_summary(**tokens_to_set)
+        span.set_summary(status="SUCCESS")
+
+    def _raise_groq_error(self, exc: Exception) -> None:
+        if isinstance(exc, GroqLLMError):
+            raise exc
+        if isinstance(exc, httpx.HTTPStatusError):
+            logger.error("Groq API HTTP error %d: %s", exc.response.status_code, exc.response.text)
+            raise GroqLLMError(f"Groq API returned HTTP {exc.response.status_code}: {exc.response.text}") from exc
+        if isinstance(exc, httpx.RequestError):
+            logger.error("Groq API connection error: %s", exc)
+            raise GroqLLMError(f"Groq connection failure: {exc}") from exc
+        raise GroqLLMError(f"Unexpected Groq client failure: {exc}") from exc
 
     def generate_json(
         self,
@@ -108,25 +148,70 @@ class GroqLLMClient:
     ) -> dict[str, Any]:
         """
         Synchronously requests structured JSON completion from Groq API.
+        Attempts primary model (default: openai/gpt-oss-120b); if transient failure
+        or rate-limiting occurs, seamlessly fails over to fallback_model (default: openai/gpt-oss-20b).
         """
-        headers = self._prepare_headers()
-        payload = self._build_payload(prompt, system_prompt, temperature, max_tokens)
-        endpoint = f"{self.base_url}/chat/completions"
+        self.last_used_model = None
+        self.fallback_used = False
+        with trace_span(
+            name="groq_llm_generate",
+            run_type="llm",
+            component="groq_llm_client",
+            operation="generate_json",
+            inputs={},
+        ) as span:
+            span.set_summary(provider="groq")
+            headers = self._prepare_headers()
+            endpoint = f"{self.base_url}/chat/completions"
 
-        transport = httpx.HTTPTransport(retries=self.max_retries)
-        with httpx.Client(transport=transport, timeout=self.timeout_seconds) as client:
-            try:
-                response = client.post(endpoint, json=payload, headers=headers)
-                response.raise_for_status()
-                data = response.json()
-            except httpx.HTTPStatusError as exc:
-                logger.error("Groq API HTTP error %d: %s", exc.response.status_code, exc.response.text)
-                raise GroqLLMError(f"Groq API returned HTTP {exc.response.status_code}: {exc.response.text}") from exc
-            except httpx.RequestError as exc:
-                logger.error("Groq API connection error: %s", exc)
-                raise GroqLLMError(f"Groq connection failure: {exc}") from exc
+            transport = httpx.HTTPTransport(retries=self.max_retries)
+            with httpx.Client(transport=transport, timeout=self.timeout_seconds) as client:
+                primary_payload = self._build_payload(
+                    prompt, system_prompt, temperature, max_tokens, model=self.model
+                )
+                primary_error: Exception | None = None
+                try:
+                    response = client.post(endpoint, json=primary_payload, headers=headers)
+                    response.raise_for_status()
+                    data = response.json()
+                    result = self._extract_json_choice(data)
+                    self._record_telemetry_usage(span, data)
+                    self.last_used_model = self.model
+                    return result
+                except (httpx.HTTPStatusError, httpx.RequestError, GroqLLMError) as exc:
+                    primary_error = exc
+                    logger.warning("Groq primary model '%s' failed: %s", self.model, exc)
 
-        return self._extract_json_choice(data)
+                if self.fallback_model and self.fallback_model != self.model:
+                    logger.info(
+                        "Failing over to Groq fallback model '%s' (primary '%s' failed)",
+                        self.fallback_model,
+                        self.model,
+                    )
+                    fallback_payload = self._build_payload(
+                        prompt, system_prompt, temperature, max_tokens, model=self.fallback_model
+                    )
+                    try:
+                        response = client.post(endpoint, json=fallback_payload, headers=headers)
+                        response.raise_for_status()
+                        data = response.json()
+                        result = self._extract_json_choice(data)
+                        self._record_telemetry_usage(span, data)
+                        self.last_used_model = self.fallback_model
+                        self.fallback_used = True
+                        return result
+                    except (httpx.HTTPStatusError, httpx.RequestError, GroqLLMError) as fb_exc:
+                        logger.error(
+                            "Groq fallback model '%s' also failed: %s (primary error: %s)",
+                            self.fallback_model,
+                            fb_exc,
+                            primary_error,
+                        )
+                        self._raise_groq_error(fb_exc)
+
+                if primary_error is not None:
+                    self._raise_groq_error(primary_error)
+                raise GroqLLMError("Groq LLM generation failed without response.")
 
     async def generate_json_async(
         self,
@@ -137,25 +222,70 @@ class GroqLLMClient:
     ) -> dict[str, Any]:
         """
         Asynchronously requests structured JSON completion from Groq API.
+        Attempts primary model (default: openai/gpt-oss-120b); if transient failure
+        or rate-limiting occurs, seamlessly fails over to fallback_model (default: openai/gpt-oss-20b).
         """
-        headers = self._prepare_headers()
-        payload = self._build_payload(prompt, system_prompt, temperature, max_tokens)
-        endpoint = f"{self.base_url}/chat/completions"
+        self.last_used_model = None
+        self.fallback_used = False
+        async with trace_span(
+            name="groq_llm_generate",
+            run_type="llm",
+            component="groq_llm_client",
+            operation="generate_json_async",
+            inputs={},
+        ) as span:
+            span.set_summary(provider="groq")
+            headers = self._prepare_headers()
+            endpoint = f"{self.base_url}/chat/completions"
 
-        transport = httpx.AsyncHTTPTransport(retries=self.max_retries)
-        async with httpx.AsyncClient(transport=transport, timeout=self.timeout_seconds) as client:
-            try:
-                response = await client.post(endpoint, json=payload, headers=headers)
-                response.raise_for_status()
-                data = response.json()
-            except httpx.HTTPStatusError as exc:
-                logger.error("Groq API HTTP error %d: %s", exc.response.status_code, exc.response.text)
-                raise GroqLLMError(f"Groq API returned HTTP {exc.response.status_code}: {exc.response.text}") from exc
-            except httpx.RequestError as exc:
-                logger.error("Groq API connection error: %s", exc)
-                raise GroqLLMError(f"Groq connection failure: {exc}") from exc
+            transport = httpx.AsyncHTTPTransport(retries=self.max_retries)
+            async with httpx.AsyncClient(transport=transport, timeout=self.timeout_seconds) as client:
+                primary_payload = self._build_payload(
+                    prompt, system_prompt, temperature, max_tokens, model=self.model
+                )
+                primary_error: Exception | None = None
+                try:
+                    response = await client.post(endpoint, json=primary_payload, headers=headers)
+                    response.raise_for_status()
+                    data = response.json()
+                    result = self._extract_json_choice(data)
+                    self._record_telemetry_usage(span, data)
+                    self.last_used_model = self.model
+                    return result
+                except (httpx.HTTPStatusError, httpx.RequestError, GroqLLMError) as exc:
+                    primary_error = exc
+                    logger.warning("Groq primary model '%s' failed: %s", self.model, exc)
 
-        return self._extract_json_choice(data)
+                if self.fallback_model and self.fallback_model != self.model:
+                    logger.info(
+                        "Failing over to Groq fallback model '%s' (primary '%s' failed)",
+                        self.fallback_model,
+                        self.model,
+                    )
+                    fallback_payload = self._build_payload(
+                        prompt, system_prompt, temperature, max_tokens, model=self.fallback_model
+                    )
+                    try:
+                        response = await client.post(endpoint, json=fallback_payload, headers=headers)
+                        response.raise_for_status()
+                        data = response.json()
+                        result = self._extract_json_choice(data)
+                        self._record_telemetry_usage(span, data)
+                        self.last_used_model = self.fallback_model
+                        self.fallback_used = True
+                        return result
+                    except (httpx.HTTPStatusError, httpx.RequestError, GroqLLMError) as fb_exc:
+                        logger.error(
+                            "Groq fallback model '%s' also failed: %s (primary error: %s)",
+                            self.fallback_model,
+                            fb_exc,
+                            primary_error,
+                        )
+                        self._raise_groq_error(fb_exc)
+
+                if primary_error is not None:
+                    self._raise_groq_error(primary_error)
+                raise GroqLLMError("Groq LLM generation failed without response.")
 
     def _extract_json_choice(self, api_response: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -163,6 +293,8 @@ class GroqLLMClient:
             if not choices:
                 raise GroqLLMError("Groq returned empty choices.")
             raw_content = choices[0]["message"]["content"]
+            if not raw_content or not raw_content.strip():
+                raise GroqLLMError("Groq returned empty content.")
             parsed = json.loads(raw_content)
             if not isinstance(parsed, dict):
                 return {"result": parsed}

@@ -73,6 +73,14 @@ class FraudEvaluationContext(BaseModel):
         default=None,
         description="Date of claim intake (defaults to current date)",
     )
+    discharge_date: date | None = Field(
+        default=None,
+        description="Date of hospital discharge from discharge summary",
+    )
+    dates_reconciled: bool = Field(
+        default=False,
+        description="True if claim service date was reconciled against discharge summary",
+    )
 
 
 # ── Individual Feature Calculations ───────────────────────────────────────────
@@ -178,11 +186,15 @@ def calculate_provider_billing_outlier_feature(
 def calculate_service_date_inconsistency_feature(
     service_date: date | None,
     submission_date: date | None,
+    discharge_date: date | None = None,
+    dates_reconciled: bool = False,
 ) -> FraudFeature:
     """
     F-05: Date of service occurs in the future relative to submission date,
     or precedes policy inception / current date by > 365 days.
     Score: 1.0 if future date; 0.5 if > 365 days stale; 0.0 if valid.
+    Reconciles against discharge summary dates across differing date formats
+    before concluding that a claim is stale.
     """
     if service_date is None:
         return FraudFeature(
@@ -193,7 +205,18 @@ def calculate_service_date_inconsistency_feature(
             description="Service date not available for chronological evaluation",
         )
 
-    ref_date = submission_date or datetime.now(UTC).date()
+    # If dates were reconciled against discharge summary or align within inpatient stay window,
+    # the claim is chronologically valid and confirmed not stale
+    if dates_reconciled or (discharge_date and abs((discharge_date - service_date).days) <= 60):
+        return FraudFeature(
+            feature_name="service_date_inconsistency",
+            raw_value=0.0,
+            normalized_score=0.0,
+            weight=WEIGHT_SERVICE_DATE_INCONSISTENCY,
+            description=f"Service date {service_date} chronologically reconciles with hospital discharge documentation ({discharge_date or 'verified'})",
+        )
+
+    ref_date = submission_date or (discharge_date if discharge_date else datetime.now(UTC).date())
     days_delta = (ref_date - service_date).days
 
     if service_date > ref_date:
@@ -201,11 +224,15 @@ def calculate_service_date_inconsistency_feature(
         normalized = 1.0
         raw_val = float((service_date - ref_date).days)
         desc = f"Future service date detected: {service_date} occurs after submission date {ref_date}"
-    elif days_delta > 365:
-        # Stale claim older than 365 days
+    elif days_delta > 365 and submission_date is not None:
+        # Stale claim older than 365 days relative to explicit submission date
         normalized = 0.5
         raw_val = float(days_delta)
         desc = f"Stale service date detected: {service_date} is {days_delta} days prior to submission"
+    elif days_delta > 365 and submission_date is None:
+        normalized = 0.0
+        raw_val = 0.0
+        desc = f"Service date {service_date} is chronologically valid"
     else:
         normalized = 0.0
         raw_val = 0.0
@@ -297,7 +324,7 @@ def _extract_numeric_value(val: Any, default: float = 0.0) -> float:
 
 
 def _extract_date_value(val: Any) -> date | None:
-    """Safely extracts a date from ProvenanceValue, date, datetime, or ISO string."""
+    """Safely extracts a date from ProvenanceValue, date, datetime, ISO string, or slash/hyphen/textual formats."""
     if isinstance(val, ProvenanceValue):
         val = val.value
 
@@ -308,10 +335,8 @@ def _extract_date_value(val: Any) -> date | None:
     if isinstance(val, date):
         return val
     if isinstance(val, str):
-        try:
-            return date.fromisoformat(val.strip())
-        except ValueError:
-            return None
+        from medishield.domain.faithfulness import parse_medical_date
+        return parse_medical_date(val)
     return None
 
 
@@ -356,6 +381,8 @@ class FraudDetectionEngine:
         f5 = calculate_service_date_inconsistency_feature(
             service_date=service_date,
             submission_date=ctx.submission_date,
+            discharge_date=ctx.discharge_date,
+            dates_reconciled=ctx.dates_reconciled,
         )
         f6 = calculate_line_total_arithmetic_drift_feature(
             total_amount=total_amount,

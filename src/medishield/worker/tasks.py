@@ -5,8 +5,10 @@ from decimal import Decimal
 from typing import Any
 
 from celery.exceptions import Retry
+from fastapi.encoders import jsonable_encoder
 
 from medishield.core.telemetry import scrub_dict_phi
+from medishield.core.tracing import trace_span
 from medishield.db.enums import (
     ActorType,
     BusinessDecision,
@@ -243,74 +245,98 @@ def process_case_workflow_task(
     )
 
     if case_obj is not None and db_session is not None:
-        case_obj.workflow_state = WorkflowState(workflow_state)
-        case_obj.current_decision = BusinessDecision(decision) if decision else None
-        case_obj.current_sub_reason = EscalationSubReason(sub_reason) if sub_reason else None
-        case_obj.decision_confidence = Decimal(str(confidence))
-        case_obj.is_complete = final_state.get("is_complete", False)
-        case_obj.missing_documents = final_state.get("missing_required_documents", [])
+        with trace_span(
+            name="db_case_state_persistence",
+            run_type="tool",
+            component="case_repository",
+            operation="persist_case_state",
+            inputs={},
+        ) as span:
+            case_obj.workflow_state = WorkflowState(workflow_state)
+            case_obj.current_decision = BusinessDecision(decision) if decision else None
+            case_obj.current_sub_reason = EscalationSubReason(sub_reason) if sub_reason else None
+            case_obj.decision_confidence = Decimal(str(confidence))
+            case_obj.is_complete = final_state.get("is_complete", False)
+            case_obj.missing_documents = final_state.get("missing_required_documents", [])
 
-        # Sync classified document metadata back to database records
-        doc_state_map = {d["document_id"]: d for d in final_state.get("documents", [])}
-        for doc in case_obj.documents:
-            if doc.document_id in doc_state_map:
-                s_doc = doc_state_map[doc.document_id]
-                raw_type = s_doc.get("doc_type")
-                if raw_type and raw_type != DocumentType.UNKNOWN.value:
-                    try:
-                        doc.doc_type = DocumentType(raw_type)
-                    except ValueError:
-                        pass
-                if s_doc.get("ocr_payload_uri"):
-                    doc.ocr_payload_uri = s_doc["ocr_payload_uri"]
+            # Sync classified document metadata back to database records
+            doc_state_map = {d["document_id"]: d for d in final_state.get("documents", [])}
+            for doc in case_obj.documents:
+                if doc.document_id in doc_state_map:
+                    s_doc = doc_state_map[doc.document_id]
+                    raw_type = s_doc.get("doc_type")
+                    if raw_type and raw_type != DocumentType.UNKNOWN.value:
+                        try:
+                            doc.doc_type = DocumentType(raw_type)
+                        except ValueError:
+                            pass
+                    if s_doc.get("ocr_payload_uri"):
+                        doc.ocr_payload_uri = s_doc["ocr_payload_uri"]
 
-        # Persist authoritative Decision audit record (Spec 04 § 2, Spec 06 § 2, ADR-011)
-        detailed_explanation = final_state.get("detailed_explanation")
-        decision_record = Decision(
-            id=uuid.uuid4(),
-            case_id=case_obj.id,
-            decision=BusinessDecision(decision) if decision else BusinessDecision.ESCALATE,
-            escalation_sub_reason=EscalationSubReason(sub_reason) if sub_reason else None,
-            actor_type=ActorType.SYSTEM,
-            actor_id="system-decision-engine",
-            decision_confidence=Decimal(str(confidence)),
-            rule_id_matched=rule_id,
-            justification=justification,
-            agent_summary_snapshot={
-                "kyc": final_state.get("kyc_summary"),
-                "claims": final_state.get("claims_summary"),
-                "policy": final_state.get("policy_coverage_summary"),
-                "fraud": final_state.get("fraud_summary"),
-                "detailed_explanation": detailed_explanation,
-            },
-            case_version_at_decision=case_obj.version,
-            is_active=True,
-        )
-        db_session.add(decision_record)
+            # Deactivate previous active decisions for this case (Failure 8)
+            if hasattr(case_obj, "decisions") and case_obj.decisions:
+                for d in case_obj.decisions:
+                    d.is_active = False
 
-        # Persist chained audit records from workflow ledger (Spec 06, Spec 08 § 5)
-        for entry in getattr(active_coordinator, "audit_ledger", []):
-            try:
-                ev_id = uuid.UUID(str(entry.get("event_id"))) if entry.get("event_id") else uuid.uuid4()
-                raw_cat = entry.get("created_at")
-                c_at = datetime.fromisoformat(raw_cat) if raw_cat else datetime.now(UTC)
-                audit_rec = AuditEvent(
-                    id=ev_id,
-                    case_id=case_obj.id,
-                    event_type="WORKFLOW_ADJUDICATION",
-                    actor_type=ActorType.SYSTEM,
-                    actor_id="system-decision-engine",
-                    event_payload=entry.get("event_payload", {}),
-                    prev_hash=entry.get("prev_hash", ""),
-                    current_hash=entry.get("current_hash", ""),
-                    created_at=c_at,
-                )
-                db_session.add(audit_rec)
-            except Exception as audit_exc:  # noqa: BLE001
-                logger.warning("Failed to persist audit event: %s", audit_exc)
+            from sqlalchemy import select
+            existing_active = db_session.execute(
+                select(Decision).where(Decision.case_id == case_obj.id, Decision.is_active.is_(True))
+            ).scalars().all()
+            for d in existing_active:
+                d.is_active = False
 
-        case_obj.version += 1
-        db_session.commit()
+            # Persist authoritative Decision audit record (Spec 04 § 2, Spec 06 § 2, ADR-011)
+            detailed_explanation = final_state.get("detailed_explanation")
+            decision_record = Decision(
+                id=uuid.uuid4(),
+                case_id=case_obj.id,
+                decision=BusinessDecision(decision) if decision else BusinessDecision.ESCALATE,
+                escalation_sub_reason=EscalationSubReason(sub_reason) if sub_reason else None,
+                actor_type=ActorType.SYSTEM,
+                actor_id="system-decision-engine",
+                decision_confidence=Decimal(str(confidence)),
+                rule_id_matched=rule_id,
+                justification=justification,
+                agent_summary_snapshot=jsonable_encoder({
+                    "kyc": final_state.get("kyc_summary"),
+                    "claims": final_state.get("claims_summary"),
+                    "policy": final_state.get("policy_coverage_summary"),
+                    "fraud": final_state.get("fraud_summary"),
+                    "clinical": final_state.get("clinical_alignment_summary"),
+                    "detailed_explanation": detailed_explanation,
+                }),
+                case_version_at_decision=case_obj.version,
+                is_active=True,
+            )
+            db_session.add(decision_record)
+
+            # Persist chained audit records from workflow ledger (Spec 06, Spec 08 § 5)
+            for entry in getattr(active_coordinator, "audit_ledger", []):
+                try:
+                    ev_id = uuid.UUID(str(entry.get("event_id"))) if entry.get("event_id") else uuid.uuid4()
+                    raw_cat = entry.get("created_at")
+                    c_at = datetime.fromisoformat(raw_cat) if raw_cat else datetime.now(UTC)
+                    audit_rec = AuditEvent(
+                        id=ev_id,
+                        case_id=case_obj.id,
+                        event_type="WORKFLOW_ADJUDICATION",
+                        actor_type=ActorType.SYSTEM,
+                        actor_id="system-decision-engine",
+                        event_payload=entry.get("event_payload", {}),
+                        prev_hash=entry.get("prev_hash", ""),
+                        current_hash=entry.get("current_hash", ""),
+                        created_at=c_at,
+                    )
+                    db_session.add(audit_rec)
+                except Exception as audit_exc:  # noqa: BLE001
+                    logger.warning("Failed to persist audit event: %s", audit_exc)
+
+            case_obj.version += 1
+            db_session.commit()
+            span.set_summary(
+                status="SUCCESS",
+                is_complete=True,
+            )
 
     return scrub_dict_phi({
         "status": workflow_state,
@@ -407,39 +433,51 @@ def resume_case_workflow_task(
     sub_reason = final_state.get("escalation_sub_reason")
 
     if case_obj is not None and db_session is not None:
-        case_obj.workflow_state = WorkflowState(workflow_state)
-        case_obj.current_decision = BusinessDecision(decision) if decision else None
-        case_obj.current_sub_reason = EscalationSubReason(sub_reason) if sub_reason else None
-        confidence = final_state.get("decision_confidence", 1.0)
-        case_obj.decision_confidence = Decimal(str(confidence))
+        with trace_span(
+            name="db_case_state_persistence",
+            run_type="tool",
+            component="case_repository",
+            operation="persist_case_state",
+            inputs={},
+        ) as span:
+            case_obj.workflow_state = WorkflowState(workflow_state)
+            case_obj.current_decision = BusinessDecision(decision) if decision else None
+            case_obj.current_sub_reason = EscalationSubReason(sub_reason) if sub_reason else None
+            confidence = final_state.get("decision_confidence", 1.0)
+            case_obj.decision_confidence = Decimal(str(confidence))
 
-        if hasattr(case_obj, "decisions") and case_obj.decisions:
-            for d in case_obj.decisions:
-                d.is_active = False
+            if hasattr(case_obj, "decisions") and case_obj.decisions:
+                for d in case_obj.decisions:
+                    d.is_active = False
 
-        decision_record = Decision(
-            id=uuid.uuid4(),
-            case_id=case_obj.id,
-            decision=BusinessDecision(decision) if decision else BusinessDecision.APPROVE,
-            escalation_sub_reason=EscalationSubReason(sub_reason) if sub_reason else None,
-            actor_type=ActorType.HUMAN if human_decision else ActorType.SYSTEM,
-            actor_id=reviewer_id or "system-resume",
-            decision_confidence=Decimal(str(confidence)),
-            rule_id_matched=final_state.get("rule_id_matched", "HUMAN_OVERRIDE" if human_decision else "RESUME"),
-            justification=final_state.get("justification", f"Resumed via {resume_reason}"),
-            agent_summary_snapshot={
-                "kyc": final_state.get("kyc_summary"),
-                "claims": final_state.get("claims_summary"),
-                "policy": final_state.get("policy_coverage_summary"),
-                "fraud": final_state.get("fraud_summary"),
-            },
-            case_version_at_decision=case_obj.version,
-            is_active=True,
-        )
-        db_session.add(decision_record)
+            decision_record = Decision(
+                id=uuid.uuid4(),
+                case_id=case_obj.id,
+                decision=BusinessDecision(decision) if decision else BusinessDecision.APPROVE,
+                escalation_sub_reason=EscalationSubReason(sub_reason) if sub_reason else None,
+                actor_type=ActorType.HUMAN if human_decision else ActorType.SYSTEM,
+                actor_id=reviewer_id or "system-resume",
+                decision_confidence=Decimal(str(confidence)),
+                rule_id_matched=final_state.get("rule_id_matched", "HUMAN_OVERRIDE" if human_decision else "RESUME"),
+                justification=final_state.get("justification", f"Resumed via {resume_reason}"),
+                agent_summary_snapshot={
+                    "kyc": final_state.get("kyc_summary"),
+                    "claims": final_state.get("claims_summary"),
+                    "policy": final_state.get("policy_coverage_summary"),
+                    "fraud": final_state.get("fraud_summary"),
+                    "clinical": final_state.get("clinical_alignment_summary"),
+                },
+                case_version_at_decision=case_obj.version,
+                is_active=True,
+            )
+            db_session.add(decision_record)
 
-        case_obj.version += 1
-        db_session.commit()
+            case_obj.version += 1
+            db_session.commit()
+            span.set_summary(
+                status="SUCCESS",
+                is_complete=True,
+            )
 
     return scrub_dict_phi({
         "status": workflow_state,

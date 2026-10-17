@@ -134,6 +134,148 @@ EXP DATE: 2020-01-01
     assert "EXPIRED_GOVERNMENT_ID" in result.flags
 
 
+def test_kyc_agent_fail_exp_colon_format_and_status_badge() -> None:
+    """Proves that EXP: MM/DD/YYYY and **EXPIRED** badge (PT_39816 case) are properly parsed and fail KYC."""
+    repo = InMemoryMemberRepository([
+        MemberRecord(
+            member_id="MEM-12345",
+            first_name="Alice",
+            last_name="Smith",
+            date_of_birth=date(1985, 5, 20),
+        )
+    ])
+    agent = KYCAgent(member_repo=repo)
+
+    text = """ILLINOIS DRIVER LICENSE
+DL NUMBER: D9817264
+MEMBER ID: MEM-12345
+NAME: Alice Smith
+DOB: 1985-05-20
+EXP: 03/28/2025
+**EXPIRED**
+"""
+    doc = make_test_ocr_doc("doc-id-pt39816", text)
+    result = agent.execute(
+        case_id="case-pt39816",
+        document_payloads=[doc],
+        service_date=date(2025, 4, 24),
+    )
+
+    assert result.verdict == AgentVerdict.FAIL
+    assert result.id_expired is True
+    assert result.id_expiration_date == date(2025, 3, 28)
+    assert "EXPIRED_GOVERNMENT_ID" in result.flags
+
+
+def test_kyc_agent_dob_not_confused_with_admission_date() -> None:
+    """Proves that DOB proximity extraction does not bind to an adjacent admission date."""
+    repo = InMemoryMemberRepository([
+        MemberRecord(
+            member_id="MEM-12345",
+            first_name="Alice",
+            last_name="Smith",
+            date_of_birth=date(1985, 5, 20),
+        )
+    ])
+    agent = KYCAgent(member_repo=repo)
+
+    text = """HOSPITAL INTAKE & ID
+MEMBER ID: MEM-12345
+NAME: Alice Smith
+DOB:
+ADMISSION DATE: 2026-03-01
+05/20/1985
+EXP DATE: 2030-01-01
+"""
+    doc = make_test_ocr_doc("doc-id-dob-admit", text)
+    result = agent.execute(
+        case_id="case-dob-admit",
+        document_payloads=[doc],
+    )
+
+    assert result.dob_matched is True
+    assert result.date_of_birth is not None
+    assert result.date_of_birth.value == "1985-05-20"
+
+
+def test_kyc_agent_id_expiring_soon_not_expired_at_service_date() -> None:
+    """Proves that ID expiring after service date (e.g. C_024: service 10/22/2025, exp 11/12/2025) is NOT expired."""
+    repo = InMemoryMemberRepository([
+        MemberRecord(
+            member_id="MED-GLD-6218367",
+            first_name="Richard",
+            last_name="Martinez",
+            date_of_birth=date(1989, 5, 25),
+        )
+    ])
+    agent = KYCAgent(member_repo=repo)
+
+    id_text = """GOLD PLAN MEMBER ID CARD
+MEMBER ID: MED-GLD-6218367
+NAME: Richard Martinez
+DOB: 05/25/1989
+EFFECTIVE DATE: 10/22/2025
+EXPIRATION DATE: 11/12/2025
+"""
+    claim_text = """CMS-1500 CLAIM FORM
+MEMBER ID: MED-GLD-6218367
+PATIENT: Richard Martinez
+DATE OF SERVICE: 10/22/2025
+"""
+    doc_id = make_test_ocr_doc("doc-id-c024", id_text)
+    doc_claim = make_test_ocr_doc("doc-claim-c024", claim_text)
+
+    # When service date is discovered automatically from claim form spans or passed explicitly
+    result = agent.execute(
+        case_id="case-c024",
+        document_payloads=[doc_id, doc_claim],
+    )
+
+    assert result.id_expired is False
+    assert result.verdict == AgentVerdict.PASS
+    assert "EXPIRED_GOVERNMENT_ID" not in result.flags
+    assert "EXPIRING_SOON_GOVERNMENT_ID" in result.flags
+    assert result.id_expiration_date == date(2025, 11, 12)
+
+
+
+def test_kyc_agent_prefers_grounded_birthdate_key_value_pair() -> None:
+    repo = InMemoryMemberRepository([
+        MemberRecord(
+            member_id="MEM-12345",
+            first_name="Elizabeth",
+            last_name="Taylor",
+            date_of_birth=date(1976, 2, 25),
+        )
+    ])
+    agent = KYCAgent(member_repo=repo)
+    text = """STATE CLAIM FORM
+MEMBER ID: MEM-12345
+NAME: Elizabeth Taylor
+10 BIRTHDATE
+12 ADMISSION DATE
+09/09/2025
+02/25/1976
+EXP DATE: 2030-01-01
+"""
+    doc = make_test_ocr_doc("doc-birthdate-kvp", text)
+    date_span = next(span for span in doc.pages[0].spans if span.text.strip() == "02/25/1976")
+    doc.pages[0].key_value_pairs = [
+        {
+            "key": "10 BIRTHDATE",
+            "value": "02/25/1976",
+            "val_span_id": date_span.span_id,
+        }
+    ]
+
+    result = agent.execute(case_id="case-birthdate-kvp", document_payloads=[doc])
+
+    assert result.dob_matched is True
+    assert result.date_of_birth is not None
+    assert result.date_of_birth.value == "1976-02-25"
+    assert "DEMOGRAPHIC_DOB_MISMATCH" not in result.flags
+
+
 def test_kyc_agent_tamper_detected_clone_stamp() -> None:
     repo = InMemoryMemberRepository([
         MemberRecord(
@@ -273,3 +415,22 @@ TOTAL CHARGE: $250.00
     assert result.claim_amount.provenance.provenance_type == ProvenanceType.SPAN
     assert result.claim_amount.provenance.evidence_quality_score == 1.0
     assert result.claim_amount.provenance.document_id == "doc-claim-5"
+
+
+def test_claims_agent_indeterminate_unsupported_cpt_code() -> None:
+    """Proves that a claim with CPT codes outside the supported synthetic catalog fails closed as INDETERMINATE."""
+    agent = ClaimsAgent()
+    text = """HEALTH INSURANCE CLAIM FORM
+NPI: 9876543210
+DATE OF SERVICE: 2026-04-01
+1. 99999 Experimental Procedure 2026-04-01 1.0 $450.00 $450.00
+TOTAL CHARGE: $450.00
+"""
+    doc = make_test_ocr_doc("doc-claim-unsupported", text)
+    result = agent.execute(case_id="case-unsupported-cpt", document_payloads=[doc])
+
+    assert result.verdict == AgentVerdict.INDETERMINATE
+    assert any("UNSUPPORTED_CPT_CODES" in err for err in result.validation_errors)
+    # The code was NOT silently omitted:
+    assert any(c.value == "99999" for c in result.cpt_codes) or any(line.hcpcs.value == "99999" for line in result.service_lines if line.hcpcs)
+

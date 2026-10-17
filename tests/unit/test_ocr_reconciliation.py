@@ -15,9 +15,12 @@ from medishield.ocr.ocr_reconcile import (
     SYNTHETIC_VALID_CPT_CODES,
     ArithmeticCheckStatus,
     ReconcileStatus,
+    ResilientVisionClient,
+    VLMProviderError,
     evaluate_claim_totals,
     extract_cpt_codes_from_table,
     extract_money_value_geometrically,
+    extract_service_lines_from_table,
     reconcile_field_reading,
 )
 
@@ -302,3 +305,309 @@ def test_extract_geometric_key_value_pairs_box_and_colon() -> None:
     span_ids = [s.span_id for s in add_spans]
     assert any(sid.endswith("-k") for sid in span_ids)
     assert any(sid.endswith("-v") for sid in span_ids)
+
+
+def test_extract_cpt_codes_preserves_unsupported_codes() -> None:
+    """Proves that 5-digit CPT candidates survive extraction and unsupported codes get calibrated confidence."""
+    spans = [
+        _make_span("s1", "CPT/HCPCS: 59400", 0.05, 0.30, 0.35, 0.32),
+        _make_span("s2", "PROCEDURE 27447 KNEE ARTHROPLASTY", 0.05, 0.35, 0.50, 0.37),
+        _make_span("s3", "LINE 3: 99999 UNKNOWN EXPERIMENTAL", 0.05, 0.40, 0.50, 0.42),
+        _make_span("s4", "LINE 4: 99213 OFFICE VISIT", 0.05, 0.45, 0.50, 0.47),
+    ]
+    doc = _make_doc(spans)
+    extracted = extract_cpt_codes_from_table([(doc, 1, s) for s in spans])
+
+    extracted_values = [p.value for p in extracted]
+    assert "59400" in extracted_values
+    assert "27447" in extracted_values
+    assert "99999" in extracted_values
+    assert "99213" in extracted_values
+
+    # Supported codes get high confidence, unsupported codes get calibrated candidate confidence
+    val_map = {p.value: p for p in extracted}
+    assert val_map["99213"].confidence == 0.96
+    assert val_map["59400"].confidence == 0.70
+    assert val_map["27447"].confidence == 0.70
+    assert val_map["99999"].confidence == 0.70
+
+
+
+def test_extract_cpt_codes_ignores_prescriptions_and_ids() -> None:
+    """Proves that prescription and ID documents are ignored to prevent barcode/NDC/DL leakage into CPT codes."""
+    rx_spans = [_make_span("s1", "RX NUMBER 88671:0", 0.05, 0.40, 0.50, 0.42)]
+    id_spans = [_make_span("s2", "ZIP 60611 LIC 12345", 0.05, 0.40, 0.50, 0.42)]
+    rx_doc = _make_doc(rx_spans, doc_id="rx_PT_12345")
+    id_doc = _make_doc(id_spans, doc_id="id_PT_12345")
+
+    extracted = extract_cpt_codes_from_table([
+        (rx_doc, 1, rx_spans[0]),
+        (id_doc, 1, id_spans[0]),
+    ])
+    assert len(extracted) == 0
+
+
+
+def test_is_plausible_revenue_code() -> None:
+    """Proves that calendar years like 2025 are rejected as revenue codes, while UB-04 codes pass."""
+    from medishield.ocr.ocr_reconcile import is_plausible_revenue_code
+
+    assert is_plausible_revenue_code("0110") is True
+    assert is_plausible_revenue_code("0120") is True
+    assert is_plausible_revenue_code("250") is True
+    assert is_plausible_revenue_code("2025") is False
+    assert is_plausible_revenue_code("2024") is False
+    assert is_plausible_revenue_code("0") is False
+    assert is_plausible_revenue_code("abc") is False
+
+
+def test_extract_service_lines_ignores_discharge_rx_and_ids() -> None:
+    """Proves that discharge summaries, prescriptions, and ID cards never emit billing service lines."""
+    rx_span = _make_span("rx-1", "RX 88671:0 AMOXICILLIN 500MG $45.00", 0.1, 0.35, 0.8, 0.37)
+    id_span = _make_span("id-1", "LIC 12345 FEE $25.00 01/01/2025", 0.1, 0.40, 0.8, 0.42)
+    discharge_span = _make_span("dc-1", "DISCHARGE SUMMARY TOTAL ESTIMATE $1,500.00", 0.1, 0.45, 0.8, 0.47)
+
+    rx_doc = _make_doc([rx_span], doc_id="rx_PT_001")
+    id_doc = _make_doc([id_span], doc_id="id_PT_001")
+    dc_doc = _make_doc([discharge_span], doc_id="discharge_PT_001")
+
+    spans = [
+        (rx_doc, 1, rx_span),
+        (id_doc, 1, id_span),
+        (dc_doc, 1, discharge_span),
+    ]
+
+    lines = extract_service_lines_from_table(spans)
+    assert len(lines) == 0
+
+
+def test_extract_service_lines_excludes_total_charges_row() -> None:
+    """Proves that summary total rows (e.g. 28. TOTAL CHARGE) are excluded from individual service lines."""
+    line1_date = _make_span("s1", "11/15/2025", 0.05, 0.65, 0.15, 0.66)
+    line1_cpt = _make_span("s2", "99213", 0.25, 0.65, 0.35, 0.66)
+    line1_amt = _make_span("s3", "$150.00", 0.60, 0.65, 0.70, 0.66)
+
+    total_label = _make_span("s4", "28. TOTAL CHARGES:", 0.45, 0.84, 0.58, 0.86)
+    total_amt = _make_span("s5", "$150.00", 0.65, 0.84, 0.75, 0.86)
+
+    claim_doc = _make_doc([line1_date, line1_cpt, line1_amt, total_label, total_amt], doc_id="claim_PT_001")
+    spans = [(claim_doc, 1, s) for s in [line1_date, line1_cpt, line1_amt, total_label, total_amt]]
+
+    lines = extract_service_lines_from_table(spans)
+    assert len(lines) == 1
+    assert lines[0].amount.value == 150.00
+    assert lines[0].hcpcs.value == "99213"
+
+
+def test_claims_agent_document_routing_and_isolation() -> None:
+    """Proves that ClaimsAgent routes financial fields and service lines strictly from claim forms."""
+    claim_line_cpt = _make_span("cl-1", "90837", 0.25, 0.65, 0.35, 0.66)
+    claim_line_amt = _make_span("cl-2", "$250.00", 0.60, 0.65, 0.70, 0.66)
+    claim_tot_label = _make_span("cl-3", "TOTAL CHARGE:", 0.50, 0.84, 0.62, 0.86)
+    claim_tot_amt = _make_span("cl-4", "$250.00", 0.65, 0.84, 0.75, 0.86)
+    claim_npi = _make_span("cl-5", "NPI: 1234567890", 0.05, 0.90, 0.25, 0.92)
+
+    discharge_diag = _make_span("dc-1", "DIAGNOSIS: ICD-10 I21.9", 0.05, 0.30, 0.40, 0.32)
+    discharge_date = _make_span("dc-2", "ADMISSION DATE: 11/15/2025", 0.05, 0.35, 0.40, 0.37)
+
+    id_name = _make_span("id-1", "JOHN DOE DL 99999999", 0.05, 0.20, 0.40, 0.22)
+    id_fake_amt = _make_span("id-2", "$5000.00", 0.60, 0.40, 0.75, 0.42)
+
+    claim_doc = _make_doc([claim_line_cpt, claim_line_amt, claim_tot_label, claim_tot_amt, claim_npi], doc_id="claim_PT_999")
+    discharge_doc = _make_doc([discharge_diag, discharge_date], doc_id="discharge_PT_999")
+    id_doc = _make_doc([id_name, id_fake_amt], doc_id="id_PT_999")
+
+    agent = ClaimsAgent(llm_client=None)
+    out = agent.execute("CASE-TEST", [id_doc, discharge_doc, claim_doc])
+
+    assert out.claim_amount is not None
+    assert out.claim_amount.value == 250.00
+    assert len(out.service_lines) == 1
+    assert out.service_lines[0].amount.value == 250.00
+    assert out.provider_npi.value == "1234567890"
+    assert any(c.value == "I21.9" for c in out.icd10_codes)
+    assert any(c.value == "90837" for c in out.cpt_codes)
+    assert out.verdict == AgentVerdict.PASS
+
+
+def test_resilient_vision_client_token_expired_fallback() -> None:
+    """Proves that ResilientVisionClient catches 401 token expired on primary and cascades to secondary."""
+    class MockPrimaryExpired:
+        def is_available(self) -> bool:
+            return True
+
+        def read_fields(self, image_bytes: bytes, spans_with_ids: list, field_queries: list):
+            raise VLMProviderError("Gemini", "TOKEN_EXPIRED", 401, "API key expired")
+
+    class MockSecondaryActive:
+        def is_available(self) -> bool:
+            return True
+
+        def read_fields(self, image_bytes: bytes, spans_with_ids: list, field_queries: list):
+            return {"total_amount": {"value": 350.0, "span_id": "span-1"}}
+
+    client = ResilientVisionClient(
+        gemini_client=MockPrimaryExpired(),
+        hf_client=MockSecondaryActive(),
+        groq_client=None,
+    )
+    res = client.read_fields(b"", [], ["total_amount"])
+    assert res == {"total_amount": {"value": 350.0, "span_id": "span-1"}}
+
+
+def test_resilient_vision_client_rate_limit_fallback() -> None:
+    """Proves that ResilientVisionClient catches 429 rate limit on secondary and cascades to tertiary."""
+    class MockPrimaryUnavailable:
+        def is_available(self) -> bool:
+            return False
+
+        def read_fields(self, image_bytes: bytes, spans_with_ids: list, field_queries: list):
+            return {}
+
+    class MockSecondaryRateLimited:
+        def is_available(self) -> bool:
+            return True
+
+        def read_fields(self, image_bytes: bytes, spans_with_ids: list, field_queries: list):
+            raise VLMProviderError("HuggingFace", "RATE_LIMIT_EXCEEDED", 429, "TPM exhausted")
+
+    class MockTertiaryActive:
+        def is_available(self) -> bool:
+            return True
+
+        def read_fields(self, image_bytes: bytes, spans_with_ids: list, field_queries: list):
+            return {"total_amount": {"value": 900.0, "span_id": "span-2"}}
+
+    client = ResilientVisionClient(
+        gemini_client=MockPrimaryUnavailable(),
+        hf_client=MockSecondaryRateLimited(),
+        groq_client=MockTertiaryActive(),
+    )
+    res = client.read_fields(b"", [], ["total_amount"])
+    assert res == {"total_amount": {"value": 900.0, "span_id": "span-2"}}
+
+
+def test_resilient_vision_client_all_exhausted_returns_empty() -> None:
+    """Proves that when all VLM providers fail or tokens expire, it safely returns empty dict without crashing."""
+    class MockPrimaryFailed:
+        def is_available(self) -> bool:
+            return True
+
+        def read_fields(self, image_bytes: bytes, spans_with_ids: list, field_queries: list):
+            raise VLMProviderError("Gemini", "TOKEN_EXPIRED", 401, "Expired")
+
+    class MockSecondaryFailed:
+        def is_available(self) -> bool:
+            return True
+
+        def read_fields(self, image_bytes: bytes, spans_with_ids: list, field_queries: list):
+            raise VLMProviderError("HuggingFace", "RATE_LIMIT_EXCEEDED", 429, "Quota")
+
+    class MockTertiaryFailed:
+        def is_available(self) -> bool:
+            return True
+
+        def read_fields(self, image_bytes: bytes, spans_with_ids: list, field_queries: list):
+            raise VLMProviderError("Groq", "RATE_LIMIT_EXCEEDED", 429, "TPD")
+
+    client = ResilientVisionClient(
+        gemini_client=MockPrimaryFailed(),
+        hf_client=MockSecondaryFailed(),
+        groq_client=MockTertiaryFailed(),
+    )
+    res = client.read_fields(b"", [], ["total_amount"])
+    assert res == {}
+
+
+def test_extract_service_lines_excludes_box55_estimated_amt_due_and_post_totals_rows() -> None:
+    """Proves that Box 55 ESTIMATED AMT DUE and rows below PAGE TOTALS are excluded from service lines."""
+    # Line 1: Room & Board $3,750.00 at y ~ 0.35
+    l1_rev = _make_span("s1", "0120", 0.05, 0.34, 0.15, 0.36)
+    l1_desc = _make_span("s2", "Room & Board - Semi-Private", 0.20, 0.34, 0.45, 0.36)
+    l1_amt = _make_span("s3", "$3,750.00", 0.60, 0.34, 0.70, 0.36)
+
+    # Line 2: Psychotherapy CPT 90837 $250.00 at y ~ 0.38
+    l2_rev = _make_span("s4", "0490", 0.05, 0.38, 0.15, 0.40)
+    l2_desc = _make_span("s5", "Psychotherapy Session, 60 min", 0.20, 0.38, 0.45, 0.40)
+    l2_cpt = _make_span("s6", "90837", 0.48, 0.38, 0.55, 0.40)
+    l2_amt = _make_span("s7", "$250.00", 0.60, 0.38, 0.70, 0.40)
+
+    # PAGE TOTALS at y ~ 0.53
+    tot_label = _make_span("s8", "PAGE TOTALS", 0.08, 0.53, 0.18, 0.55)
+    tot_amt = _make_span("s9", "$4,000.00", 0.60, 0.53, 0.70, 0.55)
+
+    # Box 55 ESTIMATED AMT DUE at y ~ 0.57 - 0.60
+    b55_label = _make_span("s10", "55 ESTIMATED AMT DUE", 0.70, 0.565, 0.85, 0.58)
+    b50_payer = _make_span("s11", "MediShield Health Ins. Ltd.", 0.03, 0.585, 0.20, 0.60)
+    b56_npi = _make_span("s12", "NPI-4756102938", 0.35, 0.585, 0.50, 0.60)
+    b55_amt = _make_span("s13", "$4,000.00", 0.70, 0.585, 0.85, 0.60)
+
+    # Box 74 PRINCIPAL PROCEDURE at y ~ 0.75
+    b74_label = _make_span("s14", "74 PRINCIPAL PROCEDURE (CPT)", 0.05, 0.74, 0.30, 0.76)
+    b74_cpt = _make_span("s15", "CPT 90837", 0.05, 0.76, 0.20, 0.78)
+
+    spans = [
+        l1_rev, l1_desc, l1_amt,
+        l2_rev, l2_desc, l2_cpt, l2_amt,
+        tot_label, tot_amt,
+        b55_label, b50_payer, b56_npi, b55_amt,
+        b74_label, b74_cpt,
+    ]
+    doc = _make_doc(spans, doc_id="claim_PT_TEST")
+    doc_spans = [(doc, 1, s) for s in spans]
+
+    lines = extract_service_lines_from_table(doc_spans)
+    # Must only extract the 2 actual service lines, excluding PAGE TOTALS and Box 55
+    assert len(lines) == 2
+    assert lines[0].amount.value == 3750.00
+    assert lines[1].amount.value == 250.00
+    assert sum(l.amount.value for l in lines) == 4000.00
+
+
+def test_extract_table_cpt_row_occurrences_excludes_box74_principal_procedure() -> None:
+    """Proves that Box 74 PRINCIPAL PROCEDURE CPT code below table is not counted as duplicate table row."""
+    from medishield.agents.claims import ClaimsAgent
+
+    # Table row CPT 90837 at y ~ 0.38
+    t_cpt = _make_span("s1", "90837", 0.48, 0.38, 0.55, 0.40)
+    # PAGE TOTALS at y ~ 0.53
+    tot_label = _make_span("s2", "PAGE TOTALS", 0.08, 0.53, 0.18, 0.55)
+    # Box 74 Principal Procedure CPT 90837 at y ~ 0.75
+    b74_label = _make_span("s3", "74 PRINCIPAL PROCEDURE (CPT)", 0.05, 0.74, 0.30, 0.76)
+    b74_cpt = _make_span("s4", "CPT 90837", 0.05, 0.76, 0.20, 0.78)
+
+    spans = [t_cpt, tot_label, b74_label, b74_cpt]
+    doc = _make_doc(spans, doc_id="claim_PT_TEST")
+    doc_spans = [(doc, 1, s) for s in spans]
+
+    agent = ClaimsAgent()
+    occurrences = agent._extract_table_cpt_row_occurrences(doc_spans)
+    # Should only find 1 table occurrence (at y=0.39), not 2
+    assert len(occurrences) == 1
+    assert occurrences[0][0] == "90837"
+    assert occurrences[0][1] == "s1"
+
+
+def test_extract_service_lines_preserves_cms1500_rows_with_rendering_provider_npi() -> None:
+    """Proves that CMS-1500 service lines containing Box 24J rendering provider NPI (e.g. NPI-7293847561)
+    are preserved as valid service lines and not dropped by payer metadata filters."""
+    line1_date = _make_span("s1", "09/25/2025", 0.06, 0.65, 0.12, 0.66)
+    line1_cpt = _make_span("s2", "36415", 0.26, 0.65, 0.30, 0.66)
+    line1_desc = _make_span("s3", "Collection of venous blood", 0.35, 0.65, 0.53, 0.66)
+    line1_amt = _make_span("s4", "$35.00", 0.58, 0.65, 0.62, 0.66)
+    line1_npi = _make_span("s5", "NPI-7293847561", 0.78, 0.65, 0.86, 0.66)
+
+    total_label = _make_span("s6", "28. TOTAL CHARGE:", 0.52, 0.84, 0.62, 0.86)
+    total_amt = _make_span("s7", "$35.00", 0.67, 0.84, 0.76, 0.86)
+
+    spans = [line1_date, line1_cpt, line1_desc, line1_amt, line1_npi, total_label, total_amt]
+    claim_doc = _make_doc(spans, doc_id="claim_PT_39451")
+    doc_spans = [(claim_doc, 1, s) for s in spans]
+
+    lines = extract_service_lines_from_table(doc_spans)
+    assert len(lines) == 1
+    assert lines[0].hcpcs.value == "36415"
+    assert lines[0].amount.value == 35.00
+
+
+

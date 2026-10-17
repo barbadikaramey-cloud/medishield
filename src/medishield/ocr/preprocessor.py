@@ -16,6 +16,7 @@ except ImportError:
     RapidOCR = None  # type: ignore[assignment,misc]
     _RAPID_OCR_AVAILABLE = False
 
+from medishield.core.tracing import trace_span
 from medishield.db.enums import AgentVerdict
 from medishield.domain.contracts import (
     OCRBoundingBox,
@@ -205,8 +206,11 @@ class DefaultOCREngine:
         if not content or not content.strip():
             return [], 0.0, False
 
-        text_str = ""
-        is_pdf = content.startswith(b"%PDF-") or "pdf" in mime_type.lower()
+        # Prioritize magic bytes over MIME type to prevent images (e.g. ID cards, PNG claims) from being misparsed as PDFs
+        is_raster_image = content.startswith(
+            (b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"II*\x00", b"MM\x00*", b"BM")
+        )
+        is_pdf = not is_raster_image and (content.startswith(b"%PDF-") or "pdf" in mime_type.lower())
         is_searchable_pdf = False
 
         if is_pdf:
@@ -376,102 +380,145 @@ class OCRPreprocessorEngine:
         mime_type: str,
         storage_backend: StorageBackend,
     ) -> OCRPreprocessorOutput:
-        start_time = time.perf_counter()
+        with trace_span(
+            name="ocr_process_document",
+            run_type="tool",
+            component="ocr_preprocessor_engine",
+            operation="process_document",
+            inputs={},
+        ) as span:
+            span.set_summary(is_complete=False)
+            start_time = time.perf_counter()
 
-        if not content:
-            return OCRPreprocessorOutput(
+            if not content:
+                span.set_summary(
+                    status="FAILED",
+                    ocr_span_count=0,
+                    is_complete=False,
+                )
+                return OCRPreprocessorOutput(
+                    document_id=document_id,
+                    total_pages=0,
+                    image_quality_score=0.0,
+                    verdict=AgentVerdict.UNAVAILABLE,
+                    is_searchable_pdf=False,
+                    payload_storage_uri="",
+                    latency_ms=0,
+                )
+
+            pages, quality_score, is_searchable_pdf = self.engine.extract(content, mime_type)
+            total_spans = sum(len(p.spans) for p in pages) if pages else 0
+
+            if not pages or quality_score < 0.40 or not pages[0].raw_text.strip():
+                latency = int((time.perf_counter() - start_time) * 1000)
+                span.set_summary(
+                    status="FAILED",
+                    ocr_span_count=total_spans,
+                    is_complete=False,
+                )
+                return OCRPreprocessorOutput(
+                    document_id=document_id,
+                    total_pages=len(pages) if pages else 1,
+                    image_quality_score=quality_score,
+                    verdict=AgentVerdict.INDETERMINATE,
+                    is_searchable_pdf=is_searchable_pdf,
+                    payload_storage_uri="",
+                    latency_ms=latency,
+                )
+
+            now_str = datetime.now(UTC).isoformat()
+            
+            vlm_extraction = {}
+            # Optional Gemini VLM Enhancement (ADR-009)
+            try:
+                from medishield.core.config import settings
+                if settings.GEMINI_API_KEY and (content.startswith((b"\x89PNG", b"\xff\xd8\xff", b"GIF8")) or "image" in mime_type.lower()):
+                    import json
+
+                    from google import genai
+                    from google.genai import types
+                    
+                    client = genai.Client(api_key=settings.GEMINI_API_KEY)
+                    prompt = (
+                        "Extract the following fields from this identity document and return ONLY a valid JSON object. "
+                        "Fields: member_id, first_name, last_name, date_of_birth, government_id_number, government_id_expiration_date. "
+                        "If a field is missing, use null."
+                    )
+                    
+                    # Determine mime type for Gemini
+                    gemini_mime = "image/jpeg"
+                    if content.startswith(b"\x89PNG"):
+                        gemini_mime = "image/png"
+                        
+                    with trace_span(
+                        name="gemini_vision_generate",
+                        run_type="llm",
+                        component="gemini_vision_client",
+                        operation="id_extraction",
+                        inputs={},
+                    ) as vlm_span:
+                        vlm_span.set_summary(provider="google")
+                        response = client.models.generate_content(
+                            model=settings.GEMINI_MODEL,
+                            contents=[
+                                types.Part.from_bytes(data=content, mime_type=gemini_mime),
+                                prompt,
+                            ],
+                            config=types.GenerateContentConfig(
+                                response_mime_type="application/json",
+                                temperature=0.0
+                            ),
+                        )
+                        prompt_toks = 0
+                        comp_toks = 0
+                        if hasattr(response, "usage_metadata") and response.usage_metadata:
+                            prompt_toks = getattr(response.usage_metadata, "prompt_token_count", 0) or 0
+                            comp_toks = getattr(response.usage_metadata, "candidates_token_count", 0) or 0
+                        vlm_span.set_summary(
+                            status="SUCCESS",
+                            prompt_tokens=prompt_toks,
+                            completion_tokens=comp_toks,
+                            total_tokens=prompt_toks + comp_toks,
+                        )
+                        if response.text:
+                            vlm_extraction = json.loads(response.text)
+            except Exception as e:  # noqa: BLE001
+                import logging
+                logging.getLogger(__name__).warning("VLM extraction failed: %s", e)
+                
+            all_kv_pairs: list[dict[str, Any]] = []
+            for p in pages:
+                if hasattr(p, "key_value_pairs") and p.key_value_pairs:
+                    all_kv_pairs.extend(p.key_value_pairs)
+
+            doc_payload = OCRDocumentPayload(
                 document_id=document_id,
-                total_pages=0,
-                image_quality_score=0.0,
-                verdict=AgentVerdict.UNAVAILABLE,
-                is_searchable_pdf=False,
-                payload_storage_uri="",
-                latency_ms=0,
+                case_id=case_id,
+                total_pages=len(pages),
+                pages=pages,
+                created_at=now_str,
+                vlm_extraction=vlm_extraction,
+                key_value_pairs=all_kv_pairs,
             )
 
-        pages, quality_score, is_searchable_pdf = self.engine.extract(content, mime_type)
+            object_key = f"ocr/{case_id}/{document_id}.json"
+            storage_backend.put_bytes(object_key, doc_payload.model_dump_json().encode("utf-8"), "application/json")
 
-        if not pages or quality_score < 0.40 or not pages[0].raw_text.strip():
             latency = int((time.perf_counter() - start_time) * 1000)
+            span.set_summary(
+                status="SUCCESS",
+                ocr_span_count=total_spans,
+                is_complete=True,
+            )
             return OCRPreprocessorOutput(
                 document_id=document_id,
-                total_pages=len(pages) if pages else 1,
+                total_pages=len(pages),
                 image_quality_score=quality_score,
-                verdict=AgentVerdict.INDETERMINATE,
+                verdict=AgentVerdict.PASS,
                 is_searchable_pdf=is_searchable_pdf,
-                payload_storage_uri="",
+                payload_storage_uri=object_key,
                 latency_ms=latency,
             )
-
-        now_str = datetime.now(UTC).isoformat()
-        
-        vlm_extraction = {}
-        # Optional Gemini VLM Enhancement (ADR-009)
-        try:
-            from medishield.core.config import settings
-            if settings.GEMINI_API_KEY and (content.startswith((b"\x89PNG", b"\xff\xd8\xff", b"GIF8")) or "image" in mime_type.lower()):
-                import json
-
-                from google import genai
-                from google.genai import types
-                
-                client = genai.Client(api_key=settings.GEMINI_API_KEY)
-                prompt = (
-                    "Extract the following fields from this identity document and return ONLY a valid JSON object. "
-                    "Fields: member_id, first_name, last_name, date_of_birth, government_id_number, government_id_expiration_date. "
-                    "If a field is missing, use null."
-                )
-                
-                # Determine mime type for Gemini
-                gemini_mime = "image/jpeg"
-                if content.startswith(b"\x89PNG"):
-                    gemini_mime = "image/png"
-                    
-                response = client.models.generate_content(
-                    model=settings.GEMINI_MODEL,
-                    contents=[
-                        types.Part.from_bytes(data=content, mime_type=gemini_mime),
-                        prompt,
-                    ],
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.0
-                    ),
-                )
-                if response.text:
-                    vlm_extraction = json.loads(response.text)
-        except Exception as e:  # noqa: BLE001
-            import logging
-            logging.getLogger(__name__).warning("VLM extraction failed: %s", e)
-            
-        all_kv_pairs: list[dict[str, Any]] = []
-        for p in pages:
-            if hasattr(p, "key_value_pairs") and p.key_value_pairs:
-                all_kv_pairs.extend(p.key_value_pairs)
-
-        doc_payload = OCRDocumentPayload(
-            document_id=document_id,
-            case_id=case_id,
-            total_pages=len(pages),
-            pages=pages,
-            created_at=now_str,
-            vlm_extraction=vlm_extraction,
-            key_value_pairs=all_kv_pairs,
-        )
-
-        object_key = f"ocr/{case_id}/{document_id}.json"
-        storage_backend.put_bytes(object_key, doc_payload.model_dump_json().encode("utf-8"), "application/json")
-
-        latency = int((time.perf_counter() - start_time) * 1000)
-        return OCRPreprocessorOutput(
-            document_id=document_id,
-            total_pages=len(pages),
-            image_quality_score=quality_score,
-            verdict=AgentVerdict.PASS,
-            is_searchable_pdf=is_searchable_pdf,
-            payload_storage_uri=object_key,
-            latency_ms=latency,
-        )
 
 
 def retrieve_ocr_payload(

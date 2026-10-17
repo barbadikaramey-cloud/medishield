@@ -102,3 +102,46 @@ class CaseRerunResponse(BaseModel):
     version: int
     message: str
 
+
+class ClaimerDocumentItem(BaseModel):
+    """Sanitized document summary for patient view."""
+    document_id: str
+    file_name: str
+    doc_type: str
+    size_bytes: int
+    created_at: datetime
+
+
+class ClaimerAdjudicationSummary(BaseModel):
+    """Patient-facing financial breakdown and plain-language explanation."""
+    decision: str
+    covered_amount: float | None = None
+    total_billed: float | None = None
+    deductible_applied: float | None = None
+    copay_percentage: float | None = None
+    member_responsibility: float | None = None
+    explanation_letter: str | None = None
+
+
+class ClaimerStatusResponse(BaseModel):
+    """Sanitized, patient-facing claim tracking response (Spec 11 § 2, ADR-012)."""
+    case_id: str
+    workflow_state: str
+    is_complete: bool
+    status_label: str
+    missing_documents: list[str] = Field(default_factory=list)
+    adjudication: ClaimerAdjudicationSummary | None = None
+    submitted_documents: list[ClaimerDocumentItem] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class CaseExplanationResponse(BaseModel):
+    """Clinical and policy explanation for claims adjudication (ADR-011)."""
+    case_id: str
+    decision: str
+    rule_id_matched: str
+    decision_confidence: float | None = None
+    detailed_explanation: str
+    model_source: str
+    generated_at: datetime
