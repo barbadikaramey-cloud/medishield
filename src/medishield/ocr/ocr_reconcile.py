@@ -679,10 +679,27 @@ def _parse_vlm_candidate_rows(
 
 
 class GeminiVisionClient:
-    """Gemini 2.5 Flash implementation of VisionClient."""
+    """Gemini 3.8 Flash implementation of VisionClient."""
 
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        fallback_models: list[str] | str | None = None,
+    ) -> None:
         self.api_key = api_key or settings.GEMINI_API_KEY
+        self.model = model or settings.GEMINI_MODEL
+        candidates: list[str] = []
+        if fallback_models is not None:
+            if isinstance(fallback_models, str):
+                candidates = [m.strip() for m in fallback_models.split(",") if m.strip()]
+            else:
+                candidates = [m.strip() for m in fallback_models if m.strip()]
+        else:
+            cfg_models = getattr(settings, "GEMINI_FALLBACK_MODELS", None)
+            if cfg_models:
+                candidates = list(cfg_models)
+        self.fallback_models = [m for m in candidates if m and m != self.model]
         self._available = bool(self.api_key)
 
     def is_available(self) -> bool:
@@ -728,9 +745,7 @@ class GeminiVisionClient:
                     contents.insert(0, types.Part.from_bytes(data=image_bytes, mime_type="image/png"))
 
                 import time
-                models_to_try = [settings.GEMINI_MODEL] + [
-                    m for m in getattr(settings, "GEMINI_FALLBACK_MODELS", []) if m != settings.GEMINI_MODEL
-                ]
+                models_to_try = [self.model] + self.fallback_models
                 response = None
                 last_err = None
                 retries = 0
@@ -842,12 +857,10 @@ class GeminiVisionClient:
                 contents.insert(0, types.Part.from_bytes(data=image_bytes, mime_type="image/png"))
 
                 import time
-                models_to_try = [settings.GEMINI_MODEL] + [
-                    m for m in getattr(settings, "GEMINI_FALLBACK_MODELS", []) if m != settings.GEMINI_MODEL
-                ]
+                models_to_try = [self.model] + self.fallback_models
                 response = None
                 last_err = None
-                active_model = settings.GEMINI_MODEL
+                active_model = self.model
                 retries = 0
                 for m in models_to_try:
                     for attempt in range(2):
@@ -923,8 +936,25 @@ class GeminiVisionClient:
 class HuggingFaceVisionClient:
     """Hugging Face Inference API implementation of VisionClient using Pixtral-12B."""
 
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        fallback_models: list[str] | str | None = None,
+    ) -> None:
         self.api_key = api_key or settings.HF_API_KEY
+        self.model = model or settings.HF_VLM_MODEL
+        candidates: list[str] = []
+        if fallback_models is not None:
+            if isinstance(fallback_models, str):
+                candidates = [m.strip() for m in fallback_models.split(",") if m.strip()]
+            else:
+                candidates = [m.strip() for m in fallback_models if m.strip()]
+        else:
+            cfg_models = getattr(settings, "HF_VLM_FALLBACK_MODELS", None)
+            if cfg_models:
+                candidates = list(cfg_models)
+        self.fallback_models = [m for m in candidates if m and m != self.model]
         self._available = bool(self.api_key)
 
     def is_available(self) -> bool:
@@ -974,9 +1004,7 @@ class HuggingFaceVisionClient:
                 b64_img = base64.b64encode(image_bytes).decode("utf-8")
                 user_content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_img}"}})
 
-            models_to_try = [settings.HF_VLM_MODEL] + [
-                m for m in getattr(settings, "HF_VLM_FALLBACK_MODELS", []) if m != settings.HF_VLM_MODEL
-            ]
+            models_to_try = [self.model] + self.fallback_models
             last_hf_err: Exception | None = None
             for model_name in models_to_try:
                 url = f"https://router.huggingface.co/hf-inference/models/{model_name}/v1/chat/completions"
@@ -1086,11 +1114,9 @@ class HuggingFaceVisionClient:
                 {"type": "text", "text": prompt},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_img}"}},
             ]
-            models_to_try = [settings.HF_VLM_MODEL] + [
-                m for m in getattr(settings, "HF_VLM_FALLBACK_MODELS", []) if m != settings.HF_VLM_MODEL
-            ]
+            models_to_try = [self.model] + self.fallback_models
             last_hf_err: Exception | None = None
-            active_hf_model = settings.HF_VLM_MODEL
+            active_hf_model = self.model
             for model_name in models_to_try:
                 url = f"https://router.huggingface.co/hf-inference/models/{model_name}/v1/chat/completions"
                 payload = {
@@ -1163,8 +1189,25 @@ class HuggingFaceVisionClient:
 class GroqVisionClient:
     """OpenAI-compatible Groq API implementation of VisionClient using structured OCR layout reading."""
 
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        fallback_models: list[str] | str | None = None,
+    ) -> None:
         self.api_key = api_key or settings.GROQ_API_KEY
+        self.model = model or settings.GROQ_MODEL
+        candidates: list[str] = []
+        if fallback_models is not None:
+            if isinstance(fallback_models, str):
+                candidates = [m.strip() for m in fallback_models.split(",") if m.strip()]
+            else:
+                candidates = [m.strip() for m in fallback_models if m.strip()]
+        else:
+            cfg_models = getattr(settings, "GROQ_FALLBACK_MODELS", None)
+            if cfg_models:
+                candidates = list(cfg_models)
+        self.fallback_models = [m for m in candidates if m and m != self.model]
         self._available = bool(self.api_key)
 
     def is_available(self) -> bool:
@@ -1207,9 +1250,7 @@ class GroqVisionClient:
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             }
-            models_to_try = [settings.GROQ_MODEL] + [
-                m for m in getattr(settings, "GROQ_FALLBACK_MODELS", []) if m != settings.GROQ_MODEL
-            ]
+            models_to_try = [self.model] + self.fallback_models
             last_groq_err: Exception | None = None
             for model_name in models_to_try:
                 payload = {
@@ -1332,11 +1373,9 @@ class GroqVisionClient:
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
                 }
-                models_to_try = [settings.GROQ_MODEL] + [
-                    m for m in getattr(settings, "GROQ_FALLBACK_MODELS", []) if m != settings.GROQ_MODEL
-                ]
+                models_to_try = [self.model] + self.fallback_models
                 last_groq_err: Exception | None = None
-                active_groq_model = settings.GROQ_MODEL
+                active_groq_model = self.model
                 for model_name in models_to_try:
                     payload = {
                         "model": model_name,

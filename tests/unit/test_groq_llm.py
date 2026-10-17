@@ -528,3 +528,37 @@ def test_groq_client_all_models_rate_limited_exhaustion() -> None:
         client.generate_json("Prompt")
 
     assert mock_post.call_count == 3
+
+
+def test_groq_client_cascades_to_qwen_on_double_rate_limit() -> None:
+    """Proves that when 120B and 20B are rate-limited, GroqLLMClient cascades to qwen/qwen3.8-27b."""
+    client = GroqLLMClient(
+        api_key="gsk_test_mock_key",
+        model="openai/gpt-oss-120b",
+        fallback_models=["openai/gpt-oss-20b", "qwen/qwen3.8-27b"],
+    )
+
+    resp_429_1 = MagicMock(spec=httpx.Response, status_code=429, text="Rate limit 120B")
+    resp_429_2 = MagicMock(spec=httpx.Response, status_code=429, text="Rate limit 20B")
+    resp_200 = MagicMock(
+        spec=httpx.Response,
+        status_code=200,
+        json=lambda: {
+            "choices": [{"message": {"role": "assistant", "content": json.dumps({"qwen_recovered": True})}}],
+            "usage": {"total_tokens": 80},
+        },
+    )
+
+    err1 = httpx.HTTPStatusError("429", request=MagicMock(), response=resp_429_1)
+    err2 = httpx.HTTPStatusError("429", request=MagicMock(), response=resp_429_2)
+
+    with patch("httpx.Client.post", side_effect=[err1, err2, resp_200]) as mock_post:
+        res = client.generate_json("Prompt")
+
+        assert res == {"qwen_recovered": True}
+        assert client.last_used_model == "qwen/qwen3.8-27b"
+        assert client.fallback_used is True
+        assert mock_post.call_count == 3
+        assert mock_post.call_args_list[0][1]["json"]["model"] == "openai/gpt-oss-120b"
+        assert mock_post.call_args_list[1][1]["json"]["model"] == "openai/gpt-oss-20b"
+        assert mock_post.call_args_list[2][1]["json"]["model"] == "qwen/qwen3.8-27b"

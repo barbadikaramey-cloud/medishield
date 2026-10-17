@@ -114,8 +114,8 @@ class Settings(BaseSettings):
     GROQ_FALLBACK_MODELS: list[str] | str = Field(
         default_factory=lambda: [
             "openai/gpt-oss-20b",
-            "llama-3.3-70b-versatile",
-            "llama-3.1-8b-instant",
+            "qwen/qwen3.8-27b",
+            "allam-2-7b",
         ],
         description="Ordered list of Groq fallback models when primary model (e.g. gpt-oss-120b) hits rate limits or errors",
     )
@@ -138,14 +138,14 @@ class Settings(BaseSettings):
         description="Gemini API Key for VLM OCR extraction (local dev only)",
     )
     GEMINI_MODEL: str = Field(
-        default="gemini-2.5-flash",
+        default="gemini-3.8-flash",
         description="Gemini model identifier for VLM extraction",
     )
     GEMINI_FALLBACK_MODELS: list[str] | str = Field(
         default_factory=lambda: [
-            "gemini-2.0-flash",
-            "gemini-1.5-flash",
-            "gemini-2.0-flash-lite",
+            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-flash-lite-latest",
         ],
         description="Ordered list of Gemini fallback models when primary model hits rate limits or errors",
     )

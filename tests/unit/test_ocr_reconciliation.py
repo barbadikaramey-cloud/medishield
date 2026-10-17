@@ -646,6 +646,42 @@ def test_gemini_vision_client_rate_limit_cascades_to_fallback_model() -> None:
         assert calls[0] != calls[1]
 
 
+def test_gemini_vision_client_rate_limit_multi_model_cascade() -> None:
+    """Proves that GeminiVisionClient cascades across 3 models when 1st and 2nd hit 429 quota."""
+    from unittest.mock import MagicMock, patch
+
+    from medishield.ocr.ocr_reconcile import GeminiVisionClient
+
+    client = GeminiVisionClient(
+        api_key="mock_gemini_key",
+        model="gemini-3.8-flash",
+        fallback_models=["gemini-3.5-flash", "gemini-3.5-flash-lite"],
+    )
+
+    mock_resp_200 = MagicMock()
+    mock_resp_200.text = json.dumps({"fields": {"total_amount": {"value": 500.0, "span_id": "sp-3"}}})
+    mock_resp_200.usage_metadata = MagicMock(prompt_token_count=15, candidates_token_count=10, total_token_count=25)
+
+    calls: list[str] = []
+
+    def mock_generate_content(model: str, **kwargs):
+        calls.append(model)
+        if len(calls) in (1, 2):
+            raise RuntimeError(f"429 RESOURCE_EXHAUSTED: quota exceeded for {model}")
+        return mock_resp_200
+
+    with patch("google.genai.Client") as mock_genai_cls:
+        mock_genai_inst = MagicMock()
+        mock_genai_inst.models.generate_content.side_effect = mock_generate_content
+        mock_genai_cls.return_value = mock_genai_inst
+
+        fields = client.read_fields(image_bytes=b"fake_img", spans_with_ids=[], field_queries=["total_amount"])
+
+        assert fields == {"total_amount": {"value": 500.0, "span_id": "sp-3"}}
+        assert len(calls) == 3
+        assert calls == ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"]
+
+
 def test_huggingface_vision_client_rate_limit_cascades_to_fallback_model() -> None:
     """Proves that HuggingFaceVisionClient cascades to secondary model when primary hits 429."""
     from unittest.mock import MagicMock, patch
