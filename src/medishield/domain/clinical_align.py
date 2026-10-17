@@ -42,6 +42,12 @@ class ClinicalGuidelineRepository(Protocol):
     def get_indication(self, service_code: str) -> dict[str, Any] | None:
         ...
 
+    def register_guideline(self, service_code: str, data: dict[str, Any]) -> None:
+        ...
+
+    def register_indication(self, service_code: str, data: dict[str, Any]) -> None:
+        ...
+
 
 class DeterministicClinicalAlignmentEngine:
     """

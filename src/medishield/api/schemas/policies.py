@@ -33,3 +33,19 @@ class PolicyPublishResponse(BaseModel):
     published_at: datetime
     vector_collection_name: str
 
+
+class PolicyListItem(BaseModel):
+    """Schema for listing policies and their versions in admin UI."""
+    policy_id: str
+    plan_name: str
+    policy_type: str
+    is_active: bool
+    version_tag: str
+    effective_start_date: date | None = None
+    effective_end_date: date | None = None
+    is_published: bool
+    published_by: str | None = None
+    published_at: datetime | None = None
+    source_pdf_key: str
+    chunk_count: int = 0
+

@@ -347,3 +347,54 @@ def test_claimer_status_when_completed_by_human(client, test_db_session):
     assert "Claim approved" in data["adjudication"]["explanation_letter"]
 
 
+def test_list_policies_admin_only(client, test_db_session):
+    import uuid
+    from datetime import UTC, date, datetime
+
+    from medishield.db.models import Policy, PolicyVersion
+
+    now = datetime.now(UTC)
+    pol = Policy(
+        id=uuid.uuid4(),
+        policy_id="POL-CORP-TEST",
+        plan_name="Test Health Plan",
+        policy_type="COMPREHENSIVE_HEALTH",
+        is_active=True,
+        created_at=now,
+    )
+    test_db_session.add(pol)
+    test_db_session.flush()
+
+    ver = PolicyVersion(
+        id=uuid.uuid4(),
+        policy_id=pol.id,
+        version_tag="2026.1",
+        effective_start_date=date(2025, 1, 1),
+        effective_end_date=date(2026, 12, 31),
+        source_pdf_key="policies/POL-CORP-TEST/2026.1.pdf",
+        vector_collection_name="policy_pol_corp_test_2026_1",
+        is_published=True,
+        published_by="admin-user",
+        published_at=now,
+        created_at=now,
+    )
+    test_db_session.add(ver)
+    test_db_session.commit()
+
+    # Unauthorized role (Claimer / Reviewer forbidden)
+    resp = client.get("/api/v1/policies", headers={"X-User-Role": ROLE_CLAIMER})
+    assert resp.status_code == 403
+
+    # Authorized admin
+    resp = client.get("/api/v1/policies", headers={"X-User-Role": ROLE_ADMIN})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) >= 1
+    match = [p for p in data if p["policy_id"] == "POL-CORP-TEST"]
+    assert len(match) == 1
+    assert match[0]["plan_name"] == "Test Health Plan"
+    assert match[0]["version_tag"] == "2026.1"
+    assert match[0]["is_published"] is True
+
+
+

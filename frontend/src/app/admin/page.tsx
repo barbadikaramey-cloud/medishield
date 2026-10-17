@@ -28,9 +28,13 @@ import {
   CodeListResponse,
   CodeUploadSummary,
   MedicalCodeItem,
+  PolicyVersionItem,
   getAdminDashboardMetrics,
   listMedicalCodes,
+  listPolicies,
+  publishPolicyVersion,
   uploadMedicalCodesCsv,
+  uploadPolicyPdf,
 } from "@/lib/api";
 
 export default function AdminPortalPage() {
@@ -50,6 +54,23 @@ export default function AdminPortalPage() {
   const [uploadingCsv, setUploadingCsv] = useState(false);
   const [uploadResult, setUploadResult] = useState<CodeUploadSummary | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+
+  // Policies (RAG Firewall) State
+  const [policies, setPolicies] = useState<PolicyVersionItem[]>([]);
+  const [loadingPolicies, setLoadingPolicies] = useState(false);
+  const [policyId, setPolicyId] = useState("");
+  const [planName, setPlanName] = useState("");
+  const [versionTag, setVersionTag] = useState("2026.1");
+  const [policyType, setPolicyType] = useState("COMPREHENSIVE_HEALTH");
+  const [startDate, setStartDate] = useState("2025-01-01");
+  const [endDate, setEndDate] = useState("2026-12-31");
+  const [policyPdfFile, setPolicyPdfFile] = useState<File | null>(null);
+  const [uploadingPolicy, setUploadingPolicy] = useState(false);
+  const [policyUploadSuccess, setPolicyUploadSuccess] = useState<string | null>(null);
+  const [policyUploadError, setPolicyUploadError] = useState<string | null>(null);
+  const [publishingKey, setPublishingKey] = useState<string | null>(null);
+  const [publishSuccess, setPublishSuccess] = useState<string | null>(null);
+  const [publishError, setPublishError] = useState<string | null>(null);
 
   // Load Dashboard Metrics
   const fetchMetrics = useCallback(async () => {
@@ -77,10 +98,72 @@ export default function AdminPortalPage() {
     }
   }, [searchQuery, systemFilter]);
 
+  // Load Policies
+  const fetchPolicies = useCallback(async () => {
+    setLoadingPolicies(true);
+    try {
+      const data = await listPolicies();
+      setPolicies(data);
+    } catch (err) {
+      console.error("Failed to list corporate policies", err);
+    } finally {
+      setLoadingPolicies(false);
+    }
+  }, []);
+
   useEffect(() => {
     fetchMetrics();
     fetchCodes();
-  }, [fetchMetrics, fetchCodes]);
+    fetchPolicies();
+  }, [fetchMetrics, fetchCodes, fetchPolicies]);
+
+  const handlePolicyUpload = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!policyPdfFile || !policyId.trim() || !planName.trim()) {
+      setPolicyUploadError("Please provide Policy ID, Plan Name, and a valid PDF file.");
+      return;
+    }
+    setUploadingPolicy(true);
+    setPolicyUploadError(null);
+    setPolicyUploadSuccess(null);
+    try {
+      const formData = new FormData();
+      formData.append("policy_id", policyId.trim());
+      formData.append("version_tag", versionTag.trim());
+      formData.append("plan_name", planName.trim());
+      formData.append("policy_type", policyType);
+      formData.append("effective_start_date", startDate);
+      if (endDate) formData.append("effective_end_date", endDate);
+      formData.append("file", policyPdfFile);
+
+      const res = await uploadPolicyPdf(formData);
+      setPolicyUploadSuccess(`Draft version ${res.version_tag} for policy ${res.policy_id} uploaded to storage. Staged for ADR-006 Publishing Firewall.`);
+      setPolicyPdfFile(null);
+      fetchPolicies();
+      fetchMetrics();
+    } catch (err: any) {
+      setPolicyUploadError(err.message || "Failed to upload policy PDF.");
+    } finally {
+      setUploadingPolicy(false);
+    }
+  };
+
+  const handlePublishPolicy = async (pId: string, vTag: string) => {
+    const key = `${pId}:${vTag}`;
+    setPublishingKey(key);
+    setPublishError(null);
+    setPublishSuccess(null);
+    try {
+      const res = await publishPolicyVersion(pId, vTag, "Corporate administration publishing firewall promotion");
+      setPublishSuccess(`Policy ${res.policy_id} (${res.version_tag}) published successfully! Vector collection '${res.vector_collection_name}' is now active in Qdrant.`);
+      fetchPolicies();
+      fetchMetrics();
+    } catch (err: any) {
+      setPublishError(err.message || `Failed to publish policy version ${vTag} for ${pId}.`);
+    } finally {
+      setPublishingKey(null);
+    }
+  };
 
 
   const handleCsvUpload = async (e: React.FormEvent) => {
@@ -179,6 +262,16 @@ export default function AdminPortalPage() {
               }`}
             >
               Medical Codes (CSV)
+            </button>
+            <button
+              onClick={() => setActiveTab("policies")}
+              className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
+                activeTab === "policies"
+                  ? "bg-cyan-500 text-slate-950 font-bold shadow-md"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              Policies (RAG Firewall)
             </button>
           </div>
         </div>
@@ -452,6 +545,278 @@ export default function AdminPortalPage() {
                 <span>Page 1</span>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Tab 3: Policies (RAG Knowledge & ADR-006 Firewall) */}
+      {activeTab === "policies" && (
+        <div className="space-y-8">
+          {/* Top Architecture Notice Banner */}
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-xl">
+            <div className="flex items-center space-x-3 mb-3">
+              <FileCheck className="w-6 h-6 text-amber-400" />
+              <div>
+                <h2 className="text-lg font-bold text-white">Policy Administration & Publishing Firewall (ADR-006)</h2>
+                <p className="text-xs text-slate-400">
+                  Customer submissions are strictly read-only evidence. Only authorized administrators can stage and publish corporate policy PDFs into the Qdrant semantic vector index.
+                </p>
+              </div>
+            </div>
+
+            {policyUploadError && (
+              <div className="p-4 bg-rose-500/10 border border-rose-500/30 text-rose-300 rounded-lg text-sm flex items-center space-x-3 mb-4">
+                <AlertCircle className="w-5 h-5 flex-shrink-0" />
+                <span>{policyUploadError}</span>
+              </div>
+            )}
+
+            {policyUploadSuccess && (
+              <div className="p-4 bg-amber-500/10 border border-amber-500/30 text-amber-300 rounded-lg text-sm flex items-center space-x-3 mb-4">
+                <CheckCircle2 className="w-5 h-5 flex-shrink-0" />
+                <div>
+                  <div className="font-bold">Draft Policy Uploaded</div>
+                  <div className="text-xs text-amber-400 mt-0.5">{policyUploadSuccess}</div>
+                </div>
+              </div>
+            )}
+
+            {publishSuccess && (
+              <div className="p-4 bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 rounded-lg text-sm flex items-center space-x-3 mb-4">
+                <ShieldCheck className="w-5 h-5 flex-shrink-0" />
+                <div>
+                  <div className="font-bold">ADR-006 Publishing Firewall Complete</div>
+                  <div className="text-xs text-emerald-400 mt-0.5">{publishSuccess}</div>
+                </div>
+              </div>
+            )}
+
+            {publishError && (
+              <div className="p-4 bg-rose-500/10 border border-rose-500/30 text-rose-300 rounded-lg text-sm flex items-center space-x-3 mb-4">
+                <AlertCircle className="w-5 h-5 flex-shrink-0" />
+                <span>{publishError}</span>
+              </div>
+            )}
+
+            {/* Upload Draft Form */}
+            <form onSubmit={handlePolicyUpload} className="space-y-4 mt-4 bg-slate-950/80 p-5 rounded-lg border border-slate-800">
+              <div className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2 flex items-center space-x-1.5">
+                <Plus className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Stage New Policy Document (Phase 1 Draft)</span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Policy Identifier *</label>
+                  <input
+                    type="text"
+                    required
+                    value={policyId}
+                    onChange={(e) => setPolicyId(e.target.value)}
+                    placeholder="e.g. POL-CORP-2026"
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white placeholder-slate-500 text-sm focus:outline-none focus:border-cyan-500 font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Plan Display Name *</label>
+                  <input
+                    type="text"
+                    required
+                    value={planName}
+                    onChange={(e) => setPlanName(e.target.value)}
+                    placeholder="e.g. MediShield Gold Health Plan"
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white placeholder-slate-500 text-sm focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Version Tag *</label>
+                  <input
+                    type="text"
+                    required
+                    value={versionTag}
+                    onChange={(e) => setVersionTag(e.target.value)}
+                    placeholder="e.g. 2026.1"
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white placeholder-slate-500 text-sm focus:outline-none focus:border-cyan-500 font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Policy Type</label>
+                  <select
+                    value={policyType}
+                    onChange={(e) => setPolicyType(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-cyan-500"
+                  >
+                    <option value="COMPREHENSIVE_HEALTH">Comprehensive Health</option>
+                    <option value="EMERGENCY_ONLY">Emergency Only</option>
+                    <option value="HIGH_DEDUCTIBLE">High Deductible Health Plan (HDHP)</option>
+                    <option value="MEDICARE_ADVANTAGE">Medicare Advantage</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Effective Start Date *</label>
+                  <input
+                    type="date"
+                    required
+                    value={startDate}
+                    onChange={(e) => setStartDate(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Effective End Date</label>
+                  <input
+                    type="date"
+                    value={endDate}
+                    onChange={(e) => setEndDate(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-400 mb-1">Authoritative Policy PDF Document *</label>
+                <input
+                  type="file"
+                  required
+                  accept="application/pdf,.pdf"
+                  onChange={(e) => setPolicyPdfFile(e.target.files?.[0] || null)}
+                  className="block w-full text-sm text-slate-400 file:mr-4 file:py-2.5 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-slate-800 file:text-cyan-400 hover:file:bg-slate-700 cursor-pointer"
+                />
+              </div>
+
+              <div className="flex justify-end pt-2">
+                <button
+                  type="submit"
+                  disabled={uploadingPolicy || !policyPdfFile}
+                  className="px-6 py-2.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold rounded-lg transition-colors flex items-center space-x-2 text-sm shadow-md"
+                >
+                  {uploadingPolicy ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Staging Document...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Upload className="w-4 h-4" />
+                      <span>Upload Draft Policy PDF</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+
+          {/* Master Policies and Vector Index Registry Table */}
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-xl">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="text-sm font-bold text-white uppercase tracking-wider flex items-center space-x-2">
+                  <Database className="w-4 h-4 text-purple-400" />
+                  <span>Corporate Policies & Vector Index Registry</span>
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Published versions are indexed in Qdrant and actively queried by the PolicyCoverageAgent.
+                </p>
+              </div>
+              <button
+                onClick={fetchPolicies}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium rounded-lg text-xs flex items-center space-x-1.5 transition-colors"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Refresh</span>
+              </button>
+            </div>
+
+            <div className="border border-slate-800 rounded-lg overflow-x-auto bg-slate-950">
+              <table className="w-full text-left text-sm text-slate-300">
+                <thead className="bg-slate-900/90 text-xs uppercase font-semibold text-slate-400 border-b border-slate-800">
+                  <tr>
+                    <th className="px-4 py-3">Policy ID</th>
+                    <th className="px-4 py-3">Plan Name</th>
+                    <th className="px-4 py-3">Version</th>
+                    <th className="px-4 py-3">Effective Window</th>
+                    <th className="px-4 py-3">RAG Status</th>
+                    <th className="px-4 py-3 text-right">Firewall Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800">
+                  {loadingPolicies ? (
+                    <tr>
+                      <td colSpan={6} className="text-center py-8 text-slate-500">
+                        <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2 text-cyan-400" />
+                        Loading corporate policies...
+                      </td>
+                    </tr>
+                  ) : policies.length > 0 ? (
+                    policies.map((p, idx) => {
+                      const pKey = `${p.policy_id}:${p.version_tag}`;
+                      const isPublishingThis = publishingKey === pKey;
+                      return (
+                        <tr key={idx} className="hover:bg-slate-900/50">
+                          <td className="px-4 py-3 font-mono font-bold text-amber-400">{p.policy_id}</td>
+                          <td className="px-4 py-3 max-w-xs truncate font-medium text-white" title={p.plan_name}>
+                            {p.plan_name}
+                          </td>
+                          <td className="px-4 py-3 font-mono text-xs">{p.version_tag}</td>
+                          <td className="px-4 py-3 text-xs text-slate-400 font-mono">
+                            {p.effective_start_date || "—"} to {p.effective_end_date || "Open"}
+                          </td>
+                          <td className="px-4 py-3">
+                            {p.is_published ? (
+                              <span className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                                <ShieldCheck className="w-3.5 h-3.5" />
+                                <span>Published (Vectorized)</span>
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                                <Lock className="w-3.5 h-3.5" />
+                                <span>Draft Quarantined</span>
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            {p.is_published ? (
+                              <span className="text-xs text-slate-500 font-mono">
+                                {p.chunk_count > 0 ? `${p.chunk_count} Chunks` : "Vector Active"}
+                              </span>
+                            ) : (
+                              <button
+                                onClick={() => handlePublishPolicy(p.policy_id, p.version_tag)}
+                                disabled={isPublishingThis}
+                                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded text-xs font-semibold transition-colors inline-flex items-center space-x-1.5 shadow-md shadow-emerald-950"
+                              >
+                                {isPublishingThis ? (
+                                  <>
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    <span>Vectorizing...</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <ShieldCheck className="w-3.5 h-3.5" />
+                                    <span>Publish to RAG (ADR-006)</span>
+                                  </>
+                                )}
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  ) : (
+                    <tr>
+                      <td colSpan={6} className="text-center py-8 text-slate-500">
+                        No policy versions registered. Stage a draft policy above to get started.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}

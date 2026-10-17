@@ -22,6 +22,7 @@ from medishield.api.deps import (
     require_role,
 )
 from medishield.api.schemas.policies import (
+    PolicyListItem,
     PolicyPublishRequest,
     PolicyPublishResponse,
     PolicyUploadResponse,
@@ -31,6 +32,39 @@ from medishield.db.models import Policy, PolicyChunk, PolicyVersion
 from medishield.intake.storage import StorageBackend
 
 router = APIRouter(prefix="/policies", tags=["policies"])
+
+
+@router.get(
+    "",
+    response_model=list[PolicyListItem],
+    summary="List All Policies and Versions (Admin Only)",
+)
+def list_policies(
+    current_user: AuthUser = Depends(require_role(ROLE_ADMIN)),
+    db: Session = Depends(get_db),
+) -> list[PolicyListItem]:
+    """Lists all corporate policies and their corresponding effective-dated versions."""
+    policies = db.query(Policy).order_by(Policy.policy_id.asc()).all()
+    results: list[PolicyListItem] = []
+    for p in policies:
+        for v in p.versions:
+            results.append(
+                PolicyListItem(
+                    policy_id=p.policy_id,
+                    plan_name=p.plan_name,
+                    policy_type=p.policy_type,
+                    is_active=p.is_active,
+                    version_tag=v.version_tag,
+                    effective_start_date=v.effective_start_date,
+                    effective_end_date=v.effective_end_date,
+                    is_published=v.is_published,
+                    published_by=v.published_by,
+                    published_at=v.published_at,
+                    source_pdf_key=v.source_pdf_key,
+                    chunk_count=len(v.chunks) if hasattr(v, "chunks") and v.chunks else 0,
+                )
+            )
+    return results
 
 
 @router.post(
