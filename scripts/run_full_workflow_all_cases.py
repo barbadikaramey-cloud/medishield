@@ -74,6 +74,7 @@ def reset_case_persistence(session: Session) -> None:
     session.execute(text("DELETE FROM audit_events"))
     session.execute(text("DELETE FROM decisions"))
     session.execute(text("DELETE FROM documents"))
+    session.execute(text("DELETE FROM claim_lines"))
     session.execute(text("DELETE FROM claims"))
     session.execute(text("DELETE FROM cases"))
     session.commit()

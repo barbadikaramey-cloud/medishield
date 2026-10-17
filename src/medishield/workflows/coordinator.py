@@ -64,14 +64,24 @@ class CaseWorkflowCoordinator:
         self.storage = storage or InMemoryStorageBackend()
         self.ocr_engine = ocr_engine or OCRPreprocessorEngine()
         self.classifier_agent = classifier_agent or DocumentClassifierAgent()
-        if kyc_agent is not None:
-            self.kyc_agent = kyc_agent
-        elif db_session is not None:
+        self.db_session = db_session
+        self.code_catalog: Any | None
+        self.claim_history_repo: Any | None
+        if db_session is not None:
             from medishield.agents.kyc import SqlMemberRepository
-            self.kyc_agent = KYCAgent(member_repo=SqlMemberRepository(db_session))
+            self.kyc_agent = kyc_agent or KYCAgent(member_repo=SqlMemberRepository(db_session))
+            from medishield.db.catalog import SqlClaimHistoryRepository, SqlCodeCatalogRepository
+            self.code_catalog = SqlCodeCatalogRepository(db_session)
+            self.claim_history_repo = SqlClaimHistoryRepository(db_session)
         else:
-            self.kyc_agent = KYCAgent()
-        self.claims_agent = claims_agent or ClaimsAgent(storage_backend=self.storage)
+            self.kyc_agent = kyc_agent or KYCAgent()
+            self.code_catalog = None
+            self.claim_history_repo = None
+
+        self.claims_agent = claims_agent or ClaimsAgent(
+            storage_backend=self.storage,
+            code_catalog=self.code_catalog,
+        )
         if policy_context_agent is not None:
             self.policy_context_agent = policy_context_agent
         elif db_session is not None:
@@ -86,7 +96,10 @@ class CaseWorkflowCoordinator:
             )
         self.policy_corpus = policy_corpus or PolicyCorpusRepository()
         self.policy_coverage_agent = (
-            policy_coverage_agent or PolicyCoverageAgent(corpus_repo=self.policy_corpus)
+            policy_coverage_agent or PolicyCoverageAgent(
+                corpus_repo=self.policy_corpus,
+                code_catalog=self.code_catalog,
+            )
         )
         self.fraud_engine = fraud_engine or DeterministicFraudEngine
         self.clinical_alignment_engine = (
@@ -111,6 +124,11 @@ class CaseWorkflowCoordinator:
             operation="execute",
             inputs={"document_count": doc_count},
         ) as span:
+            if self.code_catalog is not None and "code_catalog" not in state:
+                state["code_catalog"] = self.code_catalog
+            if self.claim_history_repo is not None and "claim_history_repo" not in state:
+                state["claim_history_repo"] = self.claim_history_repo
+
             # ── Phase 1: Intake Sequential Pipeline (Nodes 1 - 4) ─────────────────
             state = ocr_preprocessor_node(state, self.storage, self.ocr_engine)
             state = split_group_node(state)
@@ -195,7 +213,12 @@ class CaseWorkflowCoordinator:
             )
 
             # ── Phase 4: Independent Concurrent Fraud & Clinical Alignment Specialist Evaluation ───
-            state = fraud_agent_node(state, self.fraud_engine, storage=self.storage)
+            state = fraud_agent_node(
+                state,
+                self.fraud_engine,
+                claim_history_repo=self.claim_history_repo,
+                storage=self.storage,
+            )
             state = clinical_alignment_node(state, self.storage, self.clinical_alignment_engine)
 
             logger.info(
@@ -237,22 +260,19 @@ class CaseWorkflowCoordinator:
 
             # ── Phase 7: Tamper-Evident Audit & State Persistence ─────────────────
             state = audit_persistence_node(state, self.audit_ledger)
+            self._persist_claims_to_db(state)
 
             raw_decision = state.get("decision")
             decision_str = (
-                raw_decision.value
-                if hasattr(raw_decision, "value")
-                else str(raw_decision)
-                if raw_decision
+                getattr(raw_decision, "value", str(raw_decision))
+                if raw_decision is not None
                 else None
             )
             rule_id = state.get("rule_id_matched")
             sub_reason = state.get("escalation_sub_reason")
             sub_reason_str = (
-                sub_reason.value
-                if hasattr(sub_reason, "value")
-                else str(sub_reason)
-                if sub_reason
+                getattr(sub_reason, "value", str(sub_reason))
+                if sub_reason is not None
                 else None
             )
             dec_summary = state.get("decision_summary")
@@ -290,3 +310,102 @@ class CaseWorkflowCoordinator:
 
         state = audit_persistence_node(state, self.audit_ledger)
         return state
+
+    def _persist_claims_to_db(self, state: CaseState) -> None:
+        """Persists validated claim and service lines to the database (Spec 07 § 2, Gap CLM-002)."""
+        if self.db_session is None:
+            return
+        claims_summary = state.get("claims_summary")
+        if not claims_summary or not isinstance(claims_summary, dict):
+            return
+
+        case_id_str = state.get("case_id")
+        if not case_id_str:
+            return
+
+        import uuid
+        from datetime import date
+        from decimal import Decimal
+
+        from sqlalchemy import select
+        from sqlalchemy.exc import SQLAlchemyError
+
+        from medishield.db.models import Claim, ClaimLine
+        from medishield.domain.faithfulness import parse_medical_date
+
+        try:
+            case_uuid = uuid.UUID(str(case_id_str))
+        except (ValueError, TypeError):
+            return
+
+        try:
+            existing = self.db_session.scalar(select(Claim).where(Claim.case_id == case_uuid))
+            if existing:
+                return
+
+            kyc_summary = state.get("kyc_summary") or {}
+            mem_id = None
+            if isinstance(kyc_summary, dict):
+                mem_raw = kyc_summary.get("member_id")
+                mem_id = mem_raw.get("value") if isinstance(mem_raw, dict) else mem_raw
+
+            amt_raw = claims_summary.get("claim_amount", {})
+            amt_val = amt_raw.get("value", 0.0) if isinstance(amt_raw, dict) else 0.0
+
+            svc_raw = claims_summary.get("service_date", {})
+            svc_val = svc_raw.get("value") if isinstance(svc_raw, dict) else svc_raw
+            svc_dt = parse_medical_date(svc_val) or date(2025, 1, 1)
+
+            npi_raw = claims_summary.get("provider_npi", {})
+            npi_val = str(npi_raw.get("value", "0000000000") if isinstance(npi_raw, dict) else "0000000000")
+
+            cpt_raw = claims_summary.get("cpt_codes", [])
+            cpts = [c.get("value") for c in cpt_raw if isinstance(c, dict) and c.get("value")]
+
+            icd_raw = claims_summary.get("icd10_codes", [])
+            icds = [i.get("value") for i in icd_raw if isinstance(i, dict) and i.get("value")]
+
+            claim_record = Claim(
+                id=uuid.uuid4(),
+                case_id=case_uuid,
+                claim_number=f"CLM-{case_id_str[:16]}",
+                member_id=str(mem_id) if mem_id else None,
+                provider_npi=npi_val[:10],
+                service_date=svc_dt,
+                total_amount=Decimal(str(round(float(amt_val or 0.0), 2))),
+                cpt_codes=cpts,
+                icd10_codes=icds,
+                schema_valid=bool(claims_summary.get("schema_valid", True)),
+                validation_errors=[],
+            )
+            self.db_session.add(claim_record)
+
+            lines_raw = claims_summary.get("service_lines", [])
+            for idx, line in enumerate(lines_raw, start=1):
+                if not isinstance(line, dict):
+                    continue
+                hcpcs_raw = line.get("hcpcs", {})
+                hcpcs_val = hcpcs_raw.get("value") if isinstance(hcpcs_raw, dict) else line.get("service_code", "")
+                amt_l = line.get("amount", {})
+                amt_l_val = amt_l.get("value", 0.0) if isinstance(amt_l, dict) else 0.0
+                unit_l = line.get("units", {})
+                unit_val = unit_l.get("value", 1.0) if isinstance(unit_l, dict) else 1.0
+                ln_record = ClaimLine(
+                    id=uuid.uuid4(),
+                    claim_id=claim_record.id,
+                    line_number=idx,
+                    cpt_code=str(hcpcs_val or "UNKNOWN"),
+                    description=str(line.get("description", "")),
+                    service_date=svc_dt,
+                    quantity=Decimal(str(round(float(unit_val or 1.0), 2))),
+                    unit_charge=Decimal(str(round(float(amt_l_val or 0.0) / max(float(unit_val or 1.0), 1.0), 2))),
+                    total_charge=Decimal(str(round(float(amt_l_val or 0.0), 2))),
+                )
+                self.db_session.add(ln_record)
+
+            self.db_session.commit()
+            logger.info("[%s] Successfully persisted extracted Claim and %d ClaimLine(s) to database", case_id_str, len(lines_raw))
+        except (SQLAlchemyError, ValueError, KeyError, TypeError, OSError) as exc:
+            self.db_session.rollback()
+            logger.warning("[%s] Failed to persist Claim record to database: %s", case_id_str, exc)
+

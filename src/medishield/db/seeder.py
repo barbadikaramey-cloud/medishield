@@ -6,13 +6,16 @@ for all 30 benchmark patient clusters (including PT_16658 / Cluster C_012).
 
 import logging
 import uuid
-from datetime import date, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy.orm import Session
 
+from medishield.db.enums import CodingSystem
 from medishield.db.models import (
     Enrollment,
+    MedicalCode,
     Member,
     Policy,
     PolicyChunk,
@@ -21,6 +24,101 @@ from medishield.db.models import (
 from medishield.db.session import get_sqlite_session_factory
 
 logger = logging.getLogger(__name__)
+
+
+def seed_medical_codes(session: Session) -> int:
+    """
+    Seeds comprehensive baseline medical terminology (CPT, HCPCS, Revenue, ICD-10)
+    into the medical_codes table (ADR-012, Spec 07 § 5).
+    """
+    existing_codes: set[tuple[CodingSystem, str]] = {
+        (row[0], row[1]) for row in session.query(MedicalCode.coding_system, MedicalCode.code).all()
+    }
+
+    codes_to_seed: list[dict[str, Any]] = [
+        # Outpatient Evaluation & Management
+        {"code": "99213", "coding_system": CodingSystem.CPT, "short_description": "Office/outpatient visit, established, low-moderate", "category": "Evaluation and Management", "standard_charge": Decimal("150.00"), "requires_prior_auth": False},
+        {"code": "99214", "coding_system": CodingSystem.CPT, "short_description": "Office/outpatient visit, established, moderate-high", "category": "Evaluation and Management", "standard_charge": Decimal("225.00"), "requires_prior_auth": False},
+        {"code": "99215", "coding_system": CodingSystem.CPT, "short_description": "Office/outpatient visit, established, high complexity", "category": "Evaluation and Management", "standard_charge": Decimal("320.00"), "requires_prior_auth": False},
+        {"code": "99203", "coding_system": CodingSystem.CPT, "short_description": "Office/outpatient visit, new, low-moderate", "category": "Evaluation and Management", "standard_charge": Decimal("180.00"), "requires_prior_auth": False},
+        {"code": "99204", "coding_system": CodingSystem.CPT, "short_description": "Office/outpatient visit, new, moderate", "category": "Evaluation and Management", "standard_charge": Decimal("260.00"), "requires_prior_auth": False},
+        {"code": "99205", "coding_system": CodingSystem.CPT, "short_description": "Office/outpatient visit, new, high complexity", "category": "Evaluation and Management", "standard_charge": Decimal("360.00"), "requires_prior_auth": False},
+        {"code": "99283", "coding_system": CodingSystem.CPT, "short_description": "Emergency department visit, moderate severity", "category": "Emergency", "standard_charge": Decimal("450.00"), "requires_prior_auth": False},
+        {"code": "99284", "coding_system": CodingSystem.CPT, "short_description": "Emergency department visit, high severity", "category": "Emergency", "standard_charge": Decimal("750.00"), "requires_prior_auth": False},
+        {"code": "99291", "coding_system": CodingSystem.CPT, "short_description": "Critical care, evaluation and management, first 30-74 min", "category": "Critical Care", "standard_charge": Decimal("1200.00"), "requires_prior_auth": False},
+
+        # Diagnostic Imaging & Tests
+        {"code": "71045", "coding_system": CodingSystem.CPT, "short_description": "Radiologic examination, chest; single view", "category": "Diagnostic Radiology", "standard_charge": Decimal("95.00"), "requires_prior_auth": False},
+        {"code": "71046", "coding_system": CodingSystem.CPT, "short_description": "Radiologic examination, chest; 2 views", "category": "Diagnostic Radiology", "standard_charge": Decimal("140.00"), "requires_prior_auth": False},
+        {"code": "71250", "coding_system": CodingSystem.CPT, "short_description": "Computed tomography, thorax; without contrast", "category": "Diagnostic Radiology", "standard_charge": Decimal("650.00"), "requires_prior_auth": False},
+        {"code": "70553", "coding_system": CodingSystem.CPT, "short_description": "Magnetic resonance imaging, brain; with/without contrast", "category": "Diagnostic Radiology", "standard_charge": Decimal("1250.00"), "requires_prior_auth": False},
+        {"code": "72148", "coding_system": CodingSystem.CPT, "short_description": "Magnetic resonance imaging, lumbar spine; without contrast", "category": "Diagnostic Radiology", "standard_charge": Decimal("1100.00"), "requires_prior_auth": False},
+        {"code": "93000", "coding_system": CodingSystem.CPT, "short_description": "Electrocardiogram, routine ECG with interpretation", "category": "Cardiovascular", "standard_charge": Decimal("85.00"), "requires_prior_auth": False},
+        {"code": "93306", "coding_system": CodingSystem.CPT, "short_description": "Echocardiography, transthoracic, complete with Doppler", "category": "Cardiovascular", "standard_charge": Decimal("850.00"), "requires_prior_auth": False},
+
+        # Laboratory & Pathology
+        {"code": "80053", "coding_system": CodingSystem.CPT, "short_description": "Comprehensive metabolic panel (CMP)", "category": "Pathology and Laboratory", "standard_charge": Decimal("75.00"), "requires_prior_auth": False},
+        {"code": "85025", "coding_system": CodingSystem.CPT, "short_description": "Complete blood count (CBC) with differential", "category": "Pathology and Laboratory", "standard_charge": Decimal("45.00"), "requires_prior_auth": False},
+        {"code": "36415", "coding_system": CodingSystem.CPT, "short_description": "Routine venipuncture for blood specimen collection", "category": "Pathology and Laboratory", "standard_charge": Decimal("25.00"), "requires_prior_auth": False},
+        {"code": "86849", "coding_system": CodingSystem.CPT, "short_description": "Unlisted immunology procedure", "category": "Pathology and Laboratory", "standard_charge": Decimal("150.00"), "requires_prior_auth": False},
+        {"code": "90837", "coding_system": CodingSystem.CPT, "short_description": "Psychotherapy, 60 minutes with patient", "category": "Behavioral Health", "standard_charge": Decimal("210.00"), "requires_prior_auth": False},
+
+        # Surgical Procedures (Requiring Prior Auth)
+        {"code": "27447", "coding_system": CodingSystem.CPT, "short_description": "Arthroplasty, knee, condyle and plateau (TKA)", "category": "Surgery / Musculoskeletal", "standard_charge": Decimal("42000.00"), "requires_prior_auth": True},
+        {"code": "47562", "coding_system": CodingSystem.CPT, "short_description": "Laparoscopy, surgical; cholecystectomy", "category": "Surgery / Digestive", "standard_charge": Decimal("8500.00"), "requires_prior_auth": True},
+        {"code": "33533", "coding_system": CodingSystem.CPT, "short_description": "Coronary artery bypass, using arterial graft(s); single arterial graft", "category": "Surgery / Cardiovascular", "standard_charge": Decimal("38000.00"), "requires_prior_auth": True},
+        {"code": "29827", "coding_system": CodingSystem.CPT, "short_description": "Arthroscopy, shoulder, surgical; with rotator cuff repair", "category": "Surgery / Musculoskeletal", "standard_charge": Decimal("12500.00"), "requires_prior_auth": True},
+        {"code": "21120", "coding_system": CodingSystem.CPT, "short_description": "Genioplasty; augmentation, bone graft", "category": "Surgery / Musculoskeletal", "standard_charge": Decimal("9500.00"), "requires_prior_auth": True},
+        {"code": "44204", "coding_system": CodingSystem.CPT, "short_description": "Laparoscopy, surgical; colectomy, partial", "category": "Surgery / Digestive", "standard_charge": Decimal("16000.00"), "requires_prior_auth": True},
+        {"code": "63030", "coding_system": CodingSystem.CPT, "short_description": "Laminotomy with decompression of nerve root(s), lumbar", "category": "Surgery / Nervous", "standard_charge": Decimal("14000.00"), "requires_prior_auth": True},
+        {"code": "22842", "coding_system": CodingSystem.CPT, "short_description": "Posterior segmental instrumentation, 3 to 6 vertebral segments", "category": "Surgery / Musculoskeletal", "standard_charge": Decimal("11000.00"), "requires_prior_auth": True},
+        {"code": "22612", "coding_system": CodingSystem.CPT, "short_description": "Arthrodesis, posterior or posterolateral, single level; lumbar", "category": "Surgery / Musculoskeletal", "standard_charge": Decimal("18500.00"), "requires_prior_auth": True},
+        {"code": "43644", "coding_system": CodingSystem.CPT, "short_description": "Laparoscopy, surgical, gastric restrictive procedure; with gastric bypass", "category": "Surgery / Digestive", "standard_charge": Decimal("24000.00"), "requires_prior_auth": True},
+
+        # Surgical Procedures (Standard/Emergency - No Prior Auth)
+        {"code": "44970", "coding_system": CodingSystem.CPT, "short_description": "Laparoscopy, surgical, appendectomy", "category": "Surgery / Digestive", "standard_charge": Decimal("8750.00"), "requires_prior_auth": False},
+        {"code": "43239", "coding_system": CodingSystem.CPT, "short_description": "Esophagogastroduodenoscopy, flexible, transoral; with biopsy", "category": "Surgery / Digestive", "standard_charge": Decimal("1850.00"), "requires_prior_auth": False},
+        {"code": "00790", "coding_system": CodingSystem.CPT, "short_description": "Anesthesia for intraperitoneal procedures in upper abdomen", "category": "Anesthesiology", "standard_charge": Decimal("1200.00"), "requires_prior_auth": False},
+        {"code": "15822", "coding_system": CodingSystem.CPT, "short_description": "Blepharoplasty, upper eyelid", "category": "Surgery / Integumentary", "standard_charge": Decimal("3200.00"), "requires_prior_auth": False},
+        {"code": "17000", "coding_system": CodingSystem.CPT, "short_description": "Destruction premalignant lesion; first lesion", "category": "Surgery / Integumentary", "standard_charge": Decimal("165.00"), "requires_prior_auth": False},
+        {"code": "15780", "coding_system": CodingSystem.CPT, "short_description": "Dermabrasion; total face", "category": "Surgery / Integumentary", "standard_charge": Decimal("2800.00"), "requires_prior_auth": False},
+        {"code": "58300", "coding_system": CodingSystem.CPT, "short_description": "Insertion of intrauterine device (IUD)", "category": "Surgery / Female Genital", "standard_charge": Decimal("350.00"), "requires_prior_auth": False},
+
+        # Revenue Codes (Inpatient Room & Board)
+        {"code": "0100", "coding_system": CodingSystem.REV_CODE, "short_description": "All Inclusive Room and Board", "category": "Room and Board", "standard_charge": Decimal("1500.00"), "requires_prior_auth": False},
+        {"code": "0110", "coding_system": CodingSystem.REV_CODE, "short_description": "Room & Board - Private (Medical/Surgical)", "category": "Room and Board", "standard_charge": Decimal("1800.00"), "requires_prior_auth": False},
+        {"code": "0120", "coding_system": CodingSystem.REV_CODE, "short_description": "Room & Board - Semi-Private (Two Bed)", "category": "Room and Board", "standard_charge": Decimal("1250.00"), "requires_prior_auth": False},
+        {"code": "0200", "coding_system": CodingSystem.REV_CODE, "short_description": "Intensive Care Unit (ICU) - General", "category": "Intensive Care", "standard_charge": Decimal("3500.00"), "requires_prior_auth": False},
+        {"code": "0250", "coding_system": CodingSystem.REV_CODE, "short_description": "Pharmacy - General", "category": "Pharmacy", "standard_charge": Decimal("200.00"), "requires_prior_auth": False},
+        {"code": "0270", "coding_system": CodingSystem.REV_CODE, "short_description": "Medical/Surgical Supplies and Devices", "category": "Supplies", "standard_charge": Decimal("350.00"), "requires_prior_auth": False},
+    ]
+
+    seeded = 0
+    now = datetime.now(UTC)
+    for c in codes_to_seed:
+        c_sys: CodingSystem = c["coding_system"]
+        c_code: str = str(c["code"]).strip().upper()
+        key = (c_sys, c_code)
+        if key not in existing_codes:
+            mc = MedicalCode(
+                id=uuid.uuid4(),
+                code=c_code,
+                coding_system=c_sys,
+                short_description=str(c["short_description"]),
+                category=str(c["category"]),
+                standard_charge=Decimal(str(c["standard_charge"])),
+                requires_prior_auth=bool(c["requires_prior_auth"]),
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(mc)
+            existing_codes.add(key)
+            seeded += 1
+
+    session.flush()
+    logger.info("Successfully seeded %d medical codes into catalog", seeded)
+    return seeded
 
 # Baseline default test members (preserving full backwards compatibility with unit tests)
 BASELINE_MEMBERS: list[dict[str, Any]] = [
@@ -122,9 +220,10 @@ def _parse_dob(dob_str: str) -> date:
 
 def seed_benchmark_dataset(session: Session) -> int:
     """
-    Seeds all 30 benchmark patients, policies, enrollments, and clauses into the database.
+    Seeds all 30 benchmark patients, policies, enrollments, clauses, and medical terminology into the database.
     Returns the number of seeded members. Idempotent: checks for existence before adding.
     """
+    seed_medical_codes(session)
     seeded_count = 0
     seen_member_ids: set[str] = {
         row[0].upper() for row in session.query(Member.member_id).all()

@@ -5,8 +5,10 @@ bed days) and clinical documentation (discharge summaries, operative reports, la
 Executes deterministic logic with zero generative LLM decisioning.
 """
 
+from __future__ import annotations
+
 from datetime import date, datetime
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Protocol, runtime_checkable
 
 from medishield.db.enums import AgentVerdict
 from medishield.domain.contracts import (
@@ -30,12 +32,25 @@ from medishield.domain.contracts import (
 from medishield.domain.provenance import FieldProvenance
 
 
+@runtime_checkable
+class ClinicalGuidelineRepository(Protocol):
+    """Protocol for dynamic clinical guideline and indication repository (ADR-015, Spec 09 § 4)."""
+
+    def get_guideline(self, service_code: str) -> dict[str, Any] | None:
+        ...
+
+    def get_indication(self, service_code: str) -> dict[str, Any] | None:
+        ...
+
+
 class DeterministicClinicalAlignmentEngine:
     """
     Authoritative, deterministic clinical verification engine.
     Cross-verifies medical procedures, laboratory diagnostics, imaging, and bed-day
     units against verified clinical evidence and coverage guidelines.
     """
+
+    _default_repo_instance: ClassVar[DefaultClinicalGuidelineRepository | None] = None
 
     # ── Standard Clinical Guideline Registry ─────────────────────────────────
     STANDARD_GUIDELINE_CATALOG: ClassVar[dict[str, dict[str, Any]]] = {
@@ -242,16 +257,24 @@ class DeterministicClinicalAlignmentEngine:
         return ServiceModality.OTHER_SERVICE
 
     @classmethod
+    def _get_default_repo(cls) -> DefaultClinicalGuidelineRepository:
+        if cls._default_repo_instance is None:
+            cls._default_repo_instance = DefaultClinicalGuidelineRepository()
+        return cls._default_repo_instance
+
+    @classmethod
     def get_guideline_for_code(
         cls,
         service_code: str,
         service_date: date | None = None,
         criteria_satisfied_overrides: dict[str, bool] | None = None,
         spans_override: list[FieldProvenance] | None = None,
+        guideline_repo: ClinicalGuidelineRepository | None = None,
     ) -> GuidelineCitation | None:
         """Retrieves and populates a GuidelineCitation for an authoritative medical code."""
         code_key = service_code.strip().replace("REV_", "")
-        template = cls.STANDARD_GUIDELINE_CATALOG.get(code_key)
+        repo = guideline_repo or cls._get_default_repo()
+        template = repo.get_guideline(code_key) if hasattr(repo, "get_guideline") else cls.STANDARD_GUIDELINE_CATALOG.get(code_key)
         if not template:
             return None
 
@@ -534,12 +557,14 @@ class DeterministicClinicalAlignmentEngine:
         service_timestamp: datetime | None = None,
         clinical_notes_text: str | None = None,
         diagnosis_codes: list[str] | None = None,
+        guideline_repo: ClinicalGuidelineRepository | None = None,
     ) -> LineClinicalEvidence:
         """
         Deterministically evaluates clinical alignment for an individual claim line.
         Resolves modality, date boundaries, performance evidence, indication, necessity,
         prior authorization, and repeat service status.
         """
+        repo = guideline_repo or cls._get_default_repo()
         resolved_modality = modality or cls.classify_modality(service_code)
         spans = list(supporting_spans or [])
 
@@ -619,7 +644,11 @@ class DeterministicClinicalAlignmentEngine:
             )
 
         # 3. Prior Authorization Requirement Resolution
-        template = cls.STANDARD_GUIDELINE_CATALOG.get(service_code.strip().replace("REV_", ""))
+        template = (
+            repo.get_guideline(service_code)
+            if hasattr(repo, "get_guideline")
+            else cls.STANDARD_GUIDELINE_CATALOG.get(service_code.strip().replace("REV_", ""))
+        )
         requires_pa_catalog = template["requires_prior_auth"] if template else False
 
         if prior_auth_requirement is not None:
@@ -648,7 +677,11 @@ class DeterministicClinicalAlignmentEngine:
 
         # 6. Clinical Indication Status Resolution
         resolved_indication = indication_status or ClinicalIndicationStatus.NO_DOCUMENTED_INDICATION
-        diag_rule = cls.DIAGNOSIS_INDICATION_MAP.get(service_code.strip().replace("REV_", ""))
+        diag_rule = (
+            repo.get_indication(service_code)
+            if hasattr(repo, "get_indication")
+            else cls.DIAGNOSIS_INDICATION_MAP.get(service_code.strip().replace("REV_", ""))
+        )
         if diag_rule:
             proc_name = diag_rule["name"]
             if diagnosis_codes:
@@ -684,6 +717,7 @@ class DeterministicClinicalAlignmentEngine:
                 service_code=service_code,
                 service_date=service_date,
                 spans_override=spans,
+                guideline_repo=guideline_repo,
             )
 
         if necessity_status is not None:
@@ -786,3 +820,40 @@ class DeterministicClinicalAlignmentEngine:
             low_ocr_quality_pages=low_ocr_quality_pages or [],
             latency_ms=latency_ms,
         )
+
+
+class DefaultClinicalGuidelineRepository:
+    """Authoritative in-memory clinical guideline repository allowing dynamic registration (ADR-015)."""
+
+    def __init__(
+        self,
+        guidelines: dict[str, dict[str, Any]] | None = None,
+        indications: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
+        self._guidelines = (
+            dict(guidelines)
+            if guidelines is not None
+            else dict(DeterministicClinicalAlignmentEngine.STANDARD_GUIDELINE_CATALOG)
+        )
+        self._indications = (
+            dict(indications)
+            if indications is not None
+            else dict(DeterministicClinicalAlignmentEngine.DIAGNOSIS_INDICATION_MAP)
+        )
+
+    def get_guideline(self, service_code: str) -> dict[str, Any] | None:
+        code_key = service_code.strip().replace("REV_", "")
+        return self._guidelines.get(code_key)
+
+    def get_indication(self, service_code: str) -> dict[str, Any] | None:
+        code_key = service_code.strip().replace("REV_", "")
+        return self._indications.get(code_key)
+
+    def register_guideline(self, service_code: str, data: dict[str, Any]) -> None:
+        code_key = service_code.strip().replace("REV_", "")
+        self._guidelines[code_key] = data
+
+    def register_indication(self, service_code: str, data: dict[str, Any]) -> None:
+        code_key = service_code.strip().replace("REV_", "")
+        self._indications[code_key] = data
+

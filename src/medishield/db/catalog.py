@@ -276,16 +276,46 @@ class InMemoryCodeCatalogRepository:
                 "coding_system": CodingSystem.CPT,
                 "short_description": f"Benchmark Procedure {cpt}",
                 "category": "Benchmark Evaluation",
+                "requires_prior_auth": False,
                 "is_active": True,
             })
+
+        # Major inpatient and surgical codes requiring mandatory prior authorization under policy terms
+        major_pa_benchmarks = {
+            "27447": "Total Knee Arthroplasty (TKA)",
+            "47562": "Laparoscopic Cholecystectomy",
+            "33533": "Coronary Artery Bypass Graft (CABG)",
+            "33510": "Coronary Artery Bypass Single Graft",
+            "29827": "Arthroscopic Rotator Cuff Repair",
+            "21120": "Genioplasty / Facial Reconstruction",
+            "44204": "Laparoscopic Partial Colectomy",
+            "63030": "Laminotomy / Lumbar Discectomy",
+            "22842": "Posterior Segmental Instrumentation",
+            "22612": "Arthrodesis Posterior Lumbar",
+            "43644": "Laparoscopic Gastric Bypass",
+        }
+        for cpt, desc in major_pa_benchmarks.items():
+            self._insert_from_dict({
+                "code": cpt,
+                "coding_system": CodingSystem.CPT,
+                "short_description": desc,
+                "category": "Inpatient / Major Surgery",
+                "requires_prior_auth": True,
+                "is_active": True,
+            })
+
         # Seed additional common benchmark procedure codes
-        extra_benchmarks = ["27447", "43239", "71250", "29827", "99284", "99291", "70553", "72148", "33533"]
+        extra_benchmarks = [
+            "43239", "71250", "99284", "99291", "70553", "72148",
+            "93306", "71046", "36415", "15822", "58300", "86849", "15780",
+        ]
         for cpt in extra_benchmarks:
             self._insert_from_dict({
                 "code": cpt,
                 "coding_system": CodingSystem.CPT,
                 "short_description": f"Benchmark Surgical/Diagnostic {cpt}",
                 "category": "Benchmark Evaluation",
+                "requires_prior_auth": False,
                 "is_active": True,
             })
 
@@ -371,4 +401,104 @@ class InMemoryCodeCatalogRepository:
         for item in items:
             self._insert_from_dict(item)
         return len(items)
+
+
+class SqlClaimHistoryRepository:
+    """Production SQL claim repository for cross-case duplicate and velocity checks (Spec 10 § 3, Spec 07 § 2)."""
+
+    def __init__(self, db: Session) -> None:
+        self.db = db
+
+    def find_duplicate(
+        self,
+        case_id: str | None,
+        member_id: str | None,
+        provider_npi: str | None,
+        service_date: Any | None,
+        total_amount: float | Decimal | None,
+    ) -> str | None:
+        """Finds any prior claim matching member, service date, and total amount or provider."""
+        from medishield.db.models import Claim
+
+        if not member_id:
+            return None
+
+        clean_member_id = str(member_id).strip()
+        stmt = select(Claim).where(Claim.member_id == clean_member_id)
+
+        claims = self.db.scalars(stmt).all()
+        for clm in claims:
+            # Skip same case
+            if case_id:
+                try:
+                    cid = uuid.UUID(str(case_id))
+                    if clm.case_id == cid:
+                        continue
+                except (ValueError, TypeError):
+                    if str(clm.case_id) == str(case_id):
+                        continue
+
+            date_match = False
+            if service_date and clm.service_date:
+                svc_str = str(service_date)[:10]
+                clm_str = (
+                    clm.service_date.isoformat()
+                    if hasattr(clm.service_date, "isoformat")
+                    else str(clm.service_date)[:10]
+                )
+                date_match = (svc_str == clm_str)
+
+            amt_match = False
+            if total_amount is not None and clm.total_amount is not None:
+                amt_match = abs(float(clm.total_amount) - float(total_amount)) < 0.01
+
+            npi_match = bool(provider_npi and clm.provider_npi == str(provider_npi).strip())
+
+            if date_match and (amt_match or npi_match):
+                return str(clm.claim_number or clm.case_id)
+
+        return None
+
+
+class InMemoryClaimHistoryRepository:
+    """In-memory historical claim repository for offline duplicate and velocity tests."""
+
+    def __init__(self, initial_claims: list[dict[str, Any]] | None = None) -> None:
+        self._claims: list[dict[str, Any]] = list(initial_claims or [])
+
+    def add_claim(self, claim_data: dict[str, Any]) -> None:
+        self._claims.append(claim_data)
+
+    def find_duplicate(
+        self,
+        case_id: str | None,
+        member_id: str | None,
+        provider_npi: str | None,
+        service_date: Any | None,
+        total_amount: float | Decimal | None,
+    ) -> str | None:
+        if not member_id:
+            return None
+        clean_member = str(member_id).strip().upper()
+        for c in self._claims:
+            if case_id and str(c.get("case_id")) == str(case_id):
+                continue
+            if str(c.get("member_id", "")).strip().upper() != clean_member:
+                continue
+
+            date_match = False
+            if service_date and c.get("service_date"):
+                date_match = str(service_date)[:10] == str(c["service_date"])[:10]
+
+            amt_match = False
+            if total_amount is not None and c.get("total_amount") is not None:
+                amt_match = abs(float(c["total_amount"]) - float(total_amount)) < 0.01
+
+            npi_match = bool(provider_npi and str(c.get("provider_npi")) == str(provider_npi).strip())
+
+            if date_match and (amt_match or npi_match):
+                return str(c.get("claim_number") or c.get("case_id"))
+
+        return None
+
 

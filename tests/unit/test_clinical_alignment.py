@@ -41,7 +41,6 @@ from medishield.domain.contracts import (
     ServiceModality,
     build_clinical_alignment_output,
 )
-from medishield.domain.provenance import FieldProvenance, ProvenanceValue
 from medishield.domain.decision import (
     CLINICAL_CONFIDENCE_THRESHOLD,
     RULE_P1_SECURITY,
@@ -55,7 +54,7 @@ from medishield.domain.decision import (
     DecisionInputContext,
     DeterministicDecisionEngine,
 )
-from medishield.domain.provenance import FieldProvenance
+from medishield.domain.provenance import FieldProvenance, ProvenanceValue
 from medishield.workflows.nodes import clinical_alignment_node, decision_engine_node
 from medishield.workflows.state import DocumentReference, create_initial_case_state
 

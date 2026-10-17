@@ -156,3 +156,150 @@ def test_sql_code_catalog_repository():
 
     session.close()
 
+
+def test_sql_and_in_memory_claim_history_repository():
+    """Verify historical claim duplicate detection via SqlClaimHistoryRepository and InMemoryClaimHistoryRepository."""
+    import uuid
+
+    from medishield.db.catalog import InMemoryClaimHistoryRepository, SqlClaimHistoryRepository
+    from medishield.db.models import Claim
+
+    # 1. Test InMemoryClaimHistoryRepository
+    in_mem_repo = InMemoryClaimHistoryRepository([
+        {
+            "case_id": "case-old-01",
+            "claim_number": "CLM-HIST-01",
+            "member_id": "MEM-123",
+            "provider_npi": "1234567890",
+            "service_date": "2025-06-15",
+            "total_amount": 1500.0,
+        }
+    ])
+
+    # Same member, date, amount -> duplicate found
+    match = in_mem_repo.find_duplicate(
+        case_id="case-new-02",
+        member_id="MEM-123",
+        provider_npi="1234567890",
+        service_date="2025-06-15",
+        total_amount=1500.0,
+    )
+    assert match == "CLM-HIST-01"
+
+    # Same case_id is ignored
+    match_same = in_mem_repo.find_duplicate(
+        case_id="case-old-01",
+        member_id="MEM-123",
+        provider_npi="1234567890",
+        service_date="2025-06-15",
+        total_amount=1500.0,
+    )
+    assert match_same is None
+
+    # Different date -> no duplicate
+    match_diff_date = in_mem_repo.find_duplicate(
+        case_id="case-new-02",
+        member_id="MEM-123",
+        provider_npi="1234567890",
+        service_date="2025-08-20",
+        total_amount=1500.0,
+    )
+    assert match_diff_date is None
+
+    # 2. Test SqlClaimHistoryRepository
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    claim_uuid = uuid.uuid4()
+    c = Claim(
+        id=claim_uuid,
+        case_id=uuid.uuid4(),
+        claim_number="CLM-SQL-01",
+        member_id="MEM-SQL-999",
+        provider_npi="9876543210",
+        service_date=date(2025, 9, 1),
+        total_amount=Decimal("4500.00"),
+        cpt_codes=["47562"],
+        icd10_codes=["K80.20"],
+        schema_valid=True,
+    )
+    session.add(c)
+    session.commit()
+
+    sql_repo = SqlClaimHistoryRepository(session)
+    dup = sql_repo.find_duplicate(
+        case_id="other-case-id",
+        member_id="MEM-SQL-999",
+        provider_npi="9876543210",
+        service_date=date(2025, 9, 1),
+        total_amount=4500.0,
+    )
+    assert dup == "CLM-SQL-01"
+
+    # Non-duplicate member returns None
+    no_dup = sql_repo.find_duplicate(
+        case_id="other-case-id",
+        member_id="MEM-SQL-000",
+        provider_npi="9876543210",
+        service_date=date(2025, 9, 1),
+        total_amount=4500.0,
+    )
+    assert no_dup is None
+    session.close()
+
+
+def test_seed_medical_codes_populates_catalog():
+    """Verify seed_medical_codes seeds CPT, Revenue, and prior authorization flags."""
+    from medishield.db.seeder import seed_medical_codes
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    count = seed_medical_codes(session)
+    assert count >= 30
+
+    # Query major surgery requiring prior auth
+    sql_repo = SqlCodeCatalogRepository(session)
+    knee_details = sql_repo.get_code_details("27447", CodingSystem.CPT)
+    assert knee_details is not None
+    assert knee_details.requires_prior_auth is True
+
+    # Query emergency surgery not requiring prior auth
+    app_details = sql_repo.get_code_details("44970", CodingSystem.CPT)
+    assert app_details is not None
+    assert app_details.requires_prior_auth is False
+
+    # Query revenue code
+    rev_details = sql_repo.get_code_details("0120", CodingSystem.REV_CODE)
+    assert rev_details is not None
+    assert rev_details.coding_system == CodingSystem.REV_CODE
+
+    session.close()
+
+
+def test_clinical_guideline_repository_dynamic_registration():
+    """Verify ClinicalGuidelineRepository abstraction allows dynamic guideline registration (ADR-015)."""
+    from medishield.domain.clinical_align import DefaultClinicalGuidelineRepository
+
+    repo = DefaultClinicalGuidelineRepository()
+    # Check default guideline exists
+    g = repo.get_guideline("99214")
+    assert g is not None
+    assert g["guideline_id"] == "LCD-99214-01"
+
+    # Register custom guideline
+    repo.register_guideline("99999", {
+        "guideline_id": "CUSTOM-99999-01",
+        "guideline_version": "1.0",
+        "guideline_title": "Custom Specialized Procedure",
+        "effective_date": date(2025, 1, 1),
+        "requires_prior_auth": True,
+        "mandatory_criteria": [{"criterion_id": "CRIT-01", "description": "Mandatory specialist eval"}],
+    })
+    custom_g = repo.get_guideline("99999")
+    assert custom_g is not None
+    assert custom_g["guideline_id"] == "CUSTOM-99999-01"
+
+

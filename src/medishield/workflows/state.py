@@ -97,6 +97,15 @@ class CaseState(TypedDict, total=False):
     detailed_explanation: str | None
     rule_id_matched: str
     is_auto_decided: bool
+    decision_summary: str | None
+    decisive_factors: str | None
+    blocking_condition_count: int | None
+
+    # Dynamic Repositories & Duplicate Tracking
+    code_catalog: Any | None
+    claim_history_repo: Any | None
+    duplicate_claim_match_id: str | None
+    duplicate_claim_detected: bool | None
 
 
 def create_initial_case_state(

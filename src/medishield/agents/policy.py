@@ -238,17 +238,37 @@ def _get_default_policy_chunks() -> list[PolicyChunkRecord]:
                 section_number="SEC-5.4",
                 section_title="Inpatient Surgical and Major Procedures",
                 chunk_text=(
-                    "Major surgical procedures including laparoscopic cholecystectomy, knee arthroplasty, and esophagogastroduodenoscopy "
+                    "Major surgical procedures including laparoscopic cholecystectomy, knee arthroplasty, and coronary artery bypass "
                     "require prior authorization submitted at least 48 hours in advance. Covered at 90% after deductible when prior authorization is approved."
                 ),
                 page_number=25,
+                is_exclusion=False,
+                requires_prior_auth=True,
+                covered_percentage=90.0,
+                deductible_limit=500.0,
+                copay_percentage=10.0,
+                matching_cpt_codes=[
+                    "47562", "27447", "33533", "29827", "21120", "44204", "63030", "22842", "22612", "43644",
+                ],
+            ),
+            PolicyChunkRecord(
+                chunk_id=f"chk-002b-{pol_id}",
+                policy_id=pol_id,
+                version_tag=ver,
+                section_number="SEC-5.1",
+                section_title="Inpatient Emergency and Routine Digestive Procedures",
+                chunk_text=(
+                    "Inpatient emergency procedures including laparoscopic appendectomy, flexible endoscopy, and anesthesia for intraperitoneal procedures "
+                    "are covered at 90% after deductible."
+                ),
+                page_number=24,
                 is_exclusion=False,
                 requires_prior_auth=False,
                 covered_percentage=90.0,
                 deductible_limit=500.0,
                 copay_percentage=10.0,
                 matching_cpt_codes=[
-                    "47562", "44970", "00790", "27447", "43239", "33533", "29827",
+                    "44970", "00790", "43239",
                 ],
             ),
             PolicyChunkRecord(
@@ -833,6 +853,12 @@ class PolicyCoverageAgent:
 
             if chunk.requires_prior_auth and matches_scope:
                 prior_authorization_required = True
+
+        if self.code_catalog is not None:
+            for code in cpt_codes:
+                details = self.code_catalog.get_code_details(code, CodingSystem.CPT)
+                if details and getattr(details, "requires_prior_auth", False):
+                    prior_authorization_required = True
 
         applicable_service_codes = sorted(set(applicable_service_codes))
 

@@ -838,10 +838,14 @@ def fraud_agent_node(
         # Optional cross-case duplicate claim lookup via claim_history_repo
         repo = claim_history_repo or state.get("claim_history_repo")
         if repo and not state.get("duplicate_claim_match_id") and hasattr(repo, "find_duplicate"):
-            svc_date = claims_summary.get("service_date", {}).get("value")
-            amt = claims_summary.get("claim_amount", {}).get("value")
-            npi = claims_summary.get("provider_npi", {}).get("value")
-            mem_id = kyc_summary.get("member_id", {}).get("value")
+            svc_raw = claims_summary.get("service_date")
+            svc_date = svc_raw.get("value") if isinstance(svc_raw, dict) else svc_raw
+            amt_raw = claims_summary.get("claim_amount")
+            amt = amt_raw.get("value") if isinstance(amt_raw, dict) else amt_raw
+            npi_raw = claims_summary.get("provider_npi")
+            npi = npi_raw.get("value") if isinstance(npi_raw, dict) else npi_raw
+            mem_raw = kyc_summary.get("member_id")
+            mem_id = mem_raw.get("value") if isinstance(mem_raw, dict) else mem_raw
             cross_match = repo.find_duplicate(
                 case_id=state.get("case_id"),
                 member_id=mem_id,
@@ -1323,6 +1327,7 @@ def faithfulness_gate_node(
             clinical_output=clin_obj,
             document_texts=doc_texts,
             fraud_output=fraud_obj,
+            code_catalog=state.get("code_catalog"),
         )
         state["consistency_report"] = consistency_report.model_dump()
 

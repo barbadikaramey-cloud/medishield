@@ -2,7 +2,7 @@ import re
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from medishield.db.enums import AgentVerdict
+from medishield.db.enums import AgentVerdict, CodingSystem
 from medishield.domain.contracts import (
     ClaimsAgentOutput,
     ClinicalAlignmentOutput,
@@ -180,6 +180,7 @@ def evaluate_case_consistency(
     clinical_output: ClinicalAlignmentOutput | None = None,
     document_texts: dict[str, str] | None = None,
     fraud_output: FraudAgentOutput | None = None,
+    code_catalog: Any | None = None,
 ) -> ConsistencyCheckReport:
     """
     Case-Level Cross-Agent & Cross-Document Consistency Engine (Spec 06 § 4, ADR-011).
@@ -436,12 +437,28 @@ def evaluate_case_consistency(
         if code:
             billed_codes.add(str(code).strip())
 
-    # Procedures requiring mandatory prior authorization (major surgical / inpatient)
-    major_pa_codes = billed_codes.intersection({
-        "27447", "47562", "43644", "29827", "21120", "33533", "33510", "63030", "22842", "22612", "44204",
-    })
+    # 8. Mandatory Prior Authorization Verification (Spec 06 § 4, Spec 09 § 4, ADR-012)
+    prior_authorization_verified = True
     policy_pa_req = getattr(policy_output, "prior_authorization_required", False)
-    if major_pa_codes or policy_pa_req:
+
+    catalog_pa_req = False
+    pa_trigger_codes: set[str] = set()
+    cat = code_catalog
+    if cat is None:
+        try:
+            from medishield.db.catalog import InMemoryCodeCatalogRepository
+            cat = InMemoryCodeCatalogRepository()
+        except ImportError:
+            cat = None
+
+    if cat is not None and hasattr(cat, "get_code_details"):
+        for code in billed_codes:
+            details = cat.get_code_details(code, CodingSystem.CPT)
+            if details and getattr(details, "requires_prior_auth", False):
+                catalog_pa_req = True
+                pa_trigger_codes.add(code)
+
+    if policy_pa_req or catalog_pa_req:
         has_pa = bool(
             getattr(policy_output, "prior_authorization_present", False)
             or getattr(policy_output, "prior_authorization_number", None)
@@ -449,7 +466,7 @@ def evaluate_case_consistency(
         )
         if not has_pa:
             prior_authorization_verified = False
-            trigger_codes = sorted(major_pa_codes) if major_pa_codes else sorted(billed_codes)
+            trigger_codes = sorted(pa_trigger_codes) if pa_trigger_codes else sorted(billed_codes)
             codes_str = ", ".join(trigger_codes) if trigger_codes else "applicable services"
             conflicts.append(
                 f"Missing prior authorization: Major procedure(s) ({codes_str}) require mandatory prior authorization under policy terms, but no valid authorization was submitted."
