@@ -106,7 +106,7 @@ export default function LoginPage() {
           Medi<span className="text-cyan-400">Shield</span> Access Control
         </h1>
         <p className="mt-2 text-sm text-slate-400 max-w-lg mx-auto">
-          Role-Based Access Governance (ADR-012, ADR-013). Select a user persona or enter your enterprise credentials below.
+          Enterprise Role-Based Access Governance. Select a user persona or enter your enterprise credentials below.
         </p>
       </div>
 

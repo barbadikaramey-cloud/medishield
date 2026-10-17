@@ -396,7 +396,7 @@ class DeterministicDecisionEngine:
                 escalation_sub_reason=p3_sub_reason,
                 decision_confidence=min_confidence,
                 rule_id_matched=RULE_P3_AMBIGUITY,
-                justification=f"Ambiguity Escalation (P3): Case exhibits {'; '.join(reasons)}. Routed to human reviewer.",
+                justification=f"Review Escalation (Information Discrepancy): Case exhibits {'; '.join(reasons)}. Routed to human reviewer.",
                 agent_summaries=agent_summaries,
                 is_auto_decided=True,
                 created_at=now,
@@ -419,7 +419,7 @@ class DeterministicDecisionEngine:
                     decision_confidence=context.fraud_output.confidence,
                     rule_id_matched=RULE_P4_HIGH_FRAUD,
                     justification=(
-                        f"Fraud Escalation (P4): Fraud anomaly detected (score: {context.fraud_output.fraud_score:.2f}). "
+                        f"Billing Pattern Escalation: High anomaly pattern detected (score: {context.fraud_output.fraud_score:.2f}). "
                         f"Anomalies: {'; '.join(context.fraud_output.anomalies) or 'None'}."
                     ),
                     agent_summaries=agent_summaries,
@@ -452,7 +452,7 @@ class DeterministicDecisionEngine:
                     decision_confidence=min_confidence,
                     rule_id_matched=RULE_P3_AMBIGUITY,
                     justification=(
-                        "Ambiguity Escalation (P3): policy FAIL lacks a verified exclusion "
+                        "Review Escalation: Policy determination lacks a verified exclusion "
                         "citation applicable to a billed service. Routed to human review."
                     ),
                     agent_summaries=agent_summaries,
@@ -470,7 +470,7 @@ class DeterministicDecisionEngine:
                 decision_confidence=min_confidence,
                 rule_id_matched=RULE_P5_HARD_REJECT,
                 justification=(
-                    f"Autonomous Rejection (P5, ADR-002): Confirmed hard business rule failure: {'; '.join(hard_failures)}."
+                    f"Autonomous Policy Denial: Confirmed business rule requirement unfulfilled: {'; '.join(hard_failures)}."
                 ),
                 agent_summaries=agent_summaries,
                 is_auto_decided=True,
@@ -804,11 +804,11 @@ def build_decision_diagnostics(
             ambig_agents.append("policy")
         decisive = ",".join(ambig_agents) if ambig_agents else "specialists"
         if has_conflict:
-            summary = "Ambiguity escalation: Contradictory data detected across intake documents (CONFLICT)."
+            summary = "Review escalation: Contradictory information detected across intake documents (CONFLICT)."
         elif has_indeterminate:
-            summary = "Ambiguity escalation: Insufficient evidence or low extraction quality in specialist findings (INDETERMINATE)."
+            summary = "Review escalation: Insufficient evidence or low extraction quality in specialist findings (INDETERMINATE)."
         else:
-            summary = "Ambiguity escalation: Specialist confidence below threshold or unverified policy exclusion citation."
+            summary = "Review escalation: Specialist confidence below threshold or unverified policy exclusion citation."
         return (
             summary,
             decisive,

@@ -30,7 +30,11 @@ import {
   Unlock,
   XCircle,
 } from "lucide-react";
-import { ClinicalExplanationViewer } from "@/components/ClinicalExplanationViewer";
+import {
+  ClinicalExplanationViewer,
+  formatRuleLabel,
+  formatSubReason,
+} from "@/components/ClinicalExplanationViewer";
 import {
   acquireReviewLock,
   explainCase,
@@ -79,7 +83,7 @@ export default function CaseDetailPage() {
   const [isRfiModalOpen, setIsRfiModalOpen] = useState(false);
   const [rfiRemarks, setRfiRemarks] = useState("");
 
-  // AI Decision Explanation State (ADR-011)
+  // AI Decision Explanation State
   const [isExplanationExpanded, setIsExplanationExpanded] = useState(true);
   const [copiedExplanation, setCopiedExplanation] = useState(false);
   const [explaining, setExplaining] = useState(false);
@@ -287,7 +291,7 @@ export default function CaseDetailPage() {
         </div>
         <h2 className="text-2xl font-bold text-white mb-2">Claimer Account Restricted</h2>
         <p className="text-sm text-slate-400 mb-6 max-w-lg mx-auto leading-relaxed">
-          The Operational Case Workbench contains adjustor-only tools and fraud analytics. Under MediShield RBAC (ADR-012/ADR-013), please track your claim status using your dedicated Claimer Portal.
+          The Operational Case Workbench contains adjustor-only tools and fraud analytics. Under MediShield RBAC, please track your claim status using your dedicated Claimer Portal.
         </p>
         <Link
           href={`/claimer?case_id=${caseId}`}
@@ -710,7 +714,7 @@ export default function CaseDetailPage() {
                         Extracted Findings vs. Adjudication Comparison
                       </span>
                     </div>
-                    <span className="text-[10px] font-mono text-cyan-400">Spec 05 / 06 Reconciled</span>
+                    <span className="text-[10px] font-mono text-cyan-400">Cross-Document Reconciled</span>
                   </div>
 
                   {/* Financial Totals Comparison Grid */}
@@ -820,7 +824,7 @@ export default function CaseDetailPage() {
                       <div className="flex items-center space-x-2">
                         <span className="font-semibold">VLM Semantic Extraction (Fallback)</span>
                       </div>
-                      <span className="text-[10px] font-mono">ADR-009 Enhancement</span>
+                      <span className="text-[10px] font-mono text-indigo-400">Policy Intelligence</span>
                     </div>
                     <div className="p-3 bg-indigo-950/20 rounded font-mono text-xs text-indigo-200 whitespace-pre-wrap leading-relaxed">
                       <pre className="m-0 overflow-x-auto">
@@ -844,7 +848,7 @@ export default function CaseDetailPage() {
               <h2 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
                 Autonomous Adjudication Engine
               </h2>
-              <span className="text-[10px] font-mono text-cyan-400">ADR-001 Priority P1–P8</span>
+              <span className="text-[10px] font-mono text-cyan-400">Adjudication Policy Engine</span>
             </div>
 
             <div className="flex items-center justify-between bg-slate-950 p-4 rounded-xl border border-slate-800">
@@ -886,22 +890,22 @@ export default function CaseDetailPage() {
               )}
             </div>
 
-            {/* Escalation Sub-Reason Callout */}
+            {/* Escalation Reason Callout */}
             {caseData.current_sub_reason && (
               <div className="p-3 bg-amber-950/40 border border-amber-800/80 rounded-xl text-xs flex items-center justify-between">
                 <div className="text-amber-300 font-semibold flex items-center space-x-1.5">
                   <AlertCircle className="w-4 h-4 text-amber-400 flex-shrink-0" />
-                  <span>Escalation Sub-Reason: {caseData.current_sub_reason}</span>
+                  <span>Escalation Reason: {formatSubReason(caseData.current_sub_reason)}</span>
                 </div>
                 {caseData.rule_id_matched && (
-                  <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-900/60 text-amber-200 border border-amber-700">
-                    {caseData.rule_id_matched}
+                  <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-amber-900/60 text-amber-200 border border-amber-700">
+                    {formatRuleLabel(caseData.rule_id_matched)}
                   </span>
                 )}
               </div>
             )}
 
-            {/* AI Decision Analysis & Clinical Rationale (ADR-011) */}
+            {/* AI Decision Analysis & Clinical Rationale */}
             <div className="bg-slate-950/90 border border-indigo-900/70 rounded-xl overflow-hidden shadow-xl space-y-0">
               <div className="bg-gradient-to-r from-indigo-950/90 via-slate-900 to-slate-950 px-3.5 py-2.5 border-b border-indigo-900/40 flex items-center justify-between flex-wrap gap-2">
                 <div className="flex items-center space-x-2">
@@ -909,13 +913,13 @@ export default function CaseDetailPage() {
                   <span className="text-xs font-bold text-slate-100 uppercase tracking-wider flex items-center gap-1.5 flex-wrap">
                     <span>AI Decision Analysis & Clinical Rationale</span>
                     {caseData.rule_id_matched && (
-                      <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-cyan-950 text-cyan-300 border border-cyan-800">
-                        {caseData.rule_id_matched}
+                      <span className="px-1.5 py-0.5 rounded text-[9px] font-medium bg-cyan-950 text-cyan-300 border border-cyan-800">
+                        {formatRuleLabel(caseData.rule_id_matched)}
                       </span>
                     )}
                     <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-indigo-950 text-indigo-300 border border-indigo-800 flex items-center gap-1">
                       <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping inline-block" />
-                      <span>{modelSource || (caseData.agent_findings?.explanation_model as string) || "LLM Clinical Synthesizer"}</span>
+                      <span>{(modelSource || (caseData.agent_findings?.explanation_model as string) || "LLM Clinical Synthesizer").replace(/\s*\/\s*ADR-\d+\s*Engine/gi, "")}</span>
                     </span>
                   </span>
                 </div>
@@ -1012,7 +1016,7 @@ export default function CaseDetailPage() {
               <div className="p-3.5 bg-slate-950/80 border border-slate-800 rounded-xl space-y-2.5">
                 <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
                   <span className="text-[10px] font-bold text-slate-300 uppercase tracking-wider">Multi-Agent Diagnostics</span>
-                  <span className="text-[10px] text-cyan-400 font-mono">Spec 05 / ADR-015 Pipeline</span>
+                  <span className="text-[10px] text-cyan-400 font-mono">Clinical Adjudication Pipeline</span>
                 </div>
                 <div className="grid grid-cols-2 gap-2 text-[11px]">
                   {/* KYC Card */}
@@ -1103,14 +1107,14 @@ export default function CaseDetailPage() {
                     </div>
                   </div>
 
-                  {/* Clinical Alignment Card (Stage B ADR-015) */}
+                  {/* Clinical Alignment Card */}
                   <div className="col-span-2 p-2.5 rounded-lg bg-emerald-950/20 border border-emerald-900/60 space-y-1">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center space-x-1.5">
                         <Stethoscope className="w-3.5 h-3.5 text-emerald-400" />
                         <span className="font-semibold text-emerald-200">Clinical Alignment Specialist</span>
                         <span className="px-1.5 py-0.2 rounded text-[8px] font-mono bg-emerald-900/60 text-emerald-300 border border-emerald-800">
-                          ADR-015
+                          Medical Necessity
                         </span>
                       </div>
                       <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold ${

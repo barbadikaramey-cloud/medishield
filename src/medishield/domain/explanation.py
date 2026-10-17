@@ -57,16 +57,35 @@ def generate_deterministic_explanation(
         BusinessDecision.ESCALATE: "⚠️",
     }.get(decision_output.decision, "ℹ️")
 
+    rule_name_map = {
+        "RULE-P1-SECURITY": "Document Security & Tamper Check",
+        "RULE-P1-TECH-FAIL": "Technical Validation Check",
+        "RULE-P2-INCOMPLETE": "Intake Documentation Completeness",
+        "RULE-P3-AMBIGUITY": "Information Discrepancy & Verification Review",
+        "RULE-P3-AMBIGUITY-ESCALATE": "Information Discrepancy & Verification Review",
+        "RULE-P4-HIGH-FRAUD": "Billing Pattern & Anomaly Review",
+        "RULE-P5-HARD-REJECT": "Policy Exclusion & Eligibility Denial",
+        "RULE-P6-CLEAN-PASS": "Automated Clean Approval",
+        "RULE-P7-BORDERLINE-REVIEW": "Medical Necessity & Guideline Review",
+        "RULE-P8-CATCH-ALL": "Operational Adjudication Review",
+    }
+    human_rule = rule_name_map.get(
+        decision_output.rule_id_matched,
+        decision_output.rule_id_matched.replace("RULE-", "").replace("-", " ").title(),
+    )
+
     lines = [
         f"### {verdict_emoji} Adjudication Decision: {decision_output.decision.value}",
         (
-            f"**Matched Rule:** `{decision_output.rule_id_matched}` &bull; "
+            f"**Adjudication Policy Rule:** {human_rule} (`{decision_output.rule_id_matched}`) &bull; "
             f"**Confidence:** `{decision_output.decision_confidence * 100:.1f}%`"
         ),
     ]
 
     if decision_output.escalation_sub_reason:
-        lines.append(f"**Escalation Sub-Reason:** `{decision_output.escalation_sub_reason.value}`")
+        sub_val = decision_output.escalation_sub_reason.value
+        friendly_sub = "Information Discrepancy" if sub_val == "AMBIGUITY" else sub_val
+        lines.append(f"**Escalation Review Reason:** {friendly_sub} (`{sub_val}`)")
 
     lines.extend([
         "",
@@ -274,7 +293,7 @@ def generate_deterministic_explanation(
 
     lines.extend([
         "",
-        "#### 6. Clinical Alignment & Medical Necessity (ADR-015)",
+        "#### 6. Clinical Alignment & Medical Necessity",
     ])
 
     clin = getattr(context, "clinical_output", None)
@@ -406,7 +425,7 @@ def generate_deterministic_explanation(
         lines.append(
             "- **Human Review Required:** Automated straight-through processing was halted per governance rules. "
             "Operator should inspect the flagged items above (such as missing signatures, prior authorization, "
-            "policy coverage ambiguities, or fraud risk indicators) and apply human review discretion."
+            "policy coverage discrepancies, or billing risk indicators) and apply human review discretion."
         )
 
     return "\n".join(lines)
@@ -605,18 +624,27 @@ def generate_decision_explanation(
         "You are MediShield's Lead Clinical & Healthcare Adjudication Auditor.\n"
         "Your task is to produce an authoritative, comprehensive, and compassionate clinical and financial "
         "decision explanation of the already-decided claims adjudication outcome for the clinical operations review console.\n\n"
-        "CRITICAL DIRECTIVES:\n"
-        "1. You MUST NEVER change, contradict, or override the binding decision provided.\n"
-        "2. Structure your output in strict, well-formatted Markdown with the following clear sections:\n"
-        "   - ### Executive Decision Summary (decision badge, rule ID, confidence, plain English summary)\n"
+        "STRICT VOCABULARY & HEALTHCARE PRESENTATION DIRECTIVES:\n"
+        "1. NEVER use internal architectural codes, engineering acronyms, or specification jargon:\n"
+        "   - Do NOT use 'ADR', 'ADR-015', 'ADR-011', 'ADR-002', or similar acronyms.\n"
+        "   - Do NOT use internal priority codes like 'rule P3', 'RULE-P3', 'rule P1', 'P5', 'P6', or 'P-rules'.\n"
+        "   - Do NOT use the word 'ambiguity' or 'ambiguities'.\n"
+        "   - Instead, always use clear, professional medical and claims adjudication terms:\n"
+        "     * Instead of 'rule P3' or 'ambiguity', state 'escalated for human review due to information discrepancy', 'conflicting clinical records', 'unverified documentation', or 'clarification required'.\n"
+        "     * Instead of 'rule P6', state 'automated policy approval'.\n"
+        "     * Instead of 'rule P5' or 'ADR-002', state 'policy exclusion' or 'ineligibility criterion'.\n"
+        "     * Instead of 'ADR-015', state 'Clinical Alignment & Medical Necessity Evaluation'.\n"
+        "2. You MUST NEVER change, contradict, or override the binding decision provided.\n"
+        "3. Structure your output in strict, well-formatted Markdown with the following clear sections:\n"
+        "   - ### Executive Decision Summary (decision badge, policy rule description, calibrated confidence, plain English summary)\n"
         "   - #### 1. Member Identity & KYC Verification\n"
         "   - #### 2. Claims Financial & Line-Item Validation\n"
         "   - #### 3. Policy Coverage & Benefit Grounding\n"
         "   - #### 4. Fraud Risk & Anomaly Assessment\n"
         "   - #### 5. Cross-Document Consistency & Regulatory Attestation (Doctor/Patient signatures, NPI, PA, dates)\n"
-        "   - #### 6. Clinical Alignment & Medical Necessity (ADR-015)\n"
+        "   - #### 6. Clinical Alignment & Medical Necessity\n"
         "   - #### 7. Actionable Guidance for Human Reviewer / Adjuster\n"
-        "3. EXPLICIT CLINICAL ALIGNMENT DIRECTIVES FOR SECTION 6:\n"
+        "4. EXPLICIT CLINICAL ALIGNMENT DIRECTIVES FOR SECTION 6:\n"
         "   - DO NOT merely state high-level numbers, scores, or counts (e.g. avoid '3 lines evaluated, 100% score').\n"
         "   - Provide comprehensive, medical-grade clinical rationale for why the procedures were or were not justified:\n"
         "     * Medical Indication Rationale: For each billed procedure code (CPT/HCPCS), explain how the primary diagnosis (chief complaint) and any secondary diagnoses (comorbidities or inpatient complications) establish medical indication. Explain the underlying clinical rationale connecting the diagnosis to the surgical, diagnostic, or medical service.\n"
@@ -624,8 +652,8 @@ def generate_decision_explanation(
         "     * Clinical Practice Guidelines: Cite the governing clinical guidelines (e.g. ACS, AHA, AMA/CPT, ACC, CMS LCD/NCD) evaluated and explain how the patient met (or failed) standard of care necessity criteria.\n"
         "     * Inpatient Bed-Day & Stay Reconciliation: If room-and-board bed days were billed, detail the admission and discharge timeline, calendar stay duration vs billed units, and why the stay length is clinically justified under facility billing conventions (e.g. midnight census or calendar day span).\n"
         "     * Clinical Discrepancies & Adjuster Guidance: If any line item is indeterminate, unperformed, unindicated, or lacks guideline evidence, detail the exact clinical gap and what clinical documentation is required.\n"
-        "4. Keep Sections 1-5 and 7 concise and factual (2-3 bullet points each), while providing full clinical depth in Section 6.\n"
-        "5. Respond with a JSON object containing a single key: 'detailed_explanation'."
+        "5. Keep Sections 1-5 and 7 concise and factual (2-3 bullet points each), while providing full clinical depth in Section 6.\n"
+        "6. Respond with a JSON object containing a single key: 'detailed_explanation'."
     )
 
     try:

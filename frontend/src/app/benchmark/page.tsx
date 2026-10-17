@@ -19,6 +19,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import benchmarkData from "@/data/benchmark_cases.json";
+import { formatRuleLabel } from "@/components/ClinicalExplanationViewer";
 
 interface BenchmarkCase {
   cluster_id: string;
@@ -123,8 +124,7 @@ export default function BenchmarkEvaluationPage() {
             </h1>
             <p className="text-sm text-slate-300 max-w-3xl mt-2 leading-relaxed">
               Exhaustive evaluation of all 30 benchmark patient clusters (<code className="text-cyan-300 font-mono text-xs">C_001</code> to <code className="text-cyan-300 font-mono text-xs">C_030</code>).
-              Each case combines strict deterministic code rules (Rules P1–P8 per ADR-001/ADR-002) with rich,
-              multi-agent clinical narratives synthesized via Groq LLM under ADR-011 governance.
+              Each case combines strict deterministic policy rules with rich, multi-agent clinical narratives synthesized via LLM.
             </p>
           </div>
 
@@ -149,17 +149,17 @@ export default function BenchmarkEvaluationPage() {
           <div className="bg-slate-950/80 p-3 rounded-xl border border-emerald-900/40">
             <div className="text-[11px] text-emerald-400 font-medium uppercase tracking-wider">Clean Approvals</div>
             <div className="text-2xl font-extrabold text-emerald-300 font-mono mt-0.5">{approveCount} (26.7%)</div>
-            <div className="text-[10px] text-emerald-500 mt-0.5">STP Clean Pass (P6)</div>
+            <div className="text-[10px] text-emerald-500 mt-0.5">Automated Clean Pass</div>
           </div>
           <div className="bg-slate-950/80 p-3 rounded-xl border border-rose-900/40">
             <div className="text-[11px] text-rose-400 font-medium uppercase tracking-wider">Policy Denials</div>
             <div className="text-2xl font-extrabold text-rose-300 font-mono mt-0.5">{rejectCount} (30.0%)</div>
-            <div className="text-[10px] text-rose-500 mt-0.5">Hard Rejection (P5)</div>
+            <div className="text-[10px] text-rose-500 mt-0.5">Confirmed Policy Exclusion</div>
           </div>
           <div className="bg-slate-950/80 p-3 rounded-xl border border-amber-900/40">
             <div className="text-[11px] text-amber-400 font-medium uppercase tracking-wider">Specialist Review</div>
             <div className="text-2xl font-extrabold text-amber-300 font-mono mt-0.5">{escalateCount} (43.3%)</div>
-            <div className="text-[10px] text-amber-500 mt-0.5">Human Queue (P3/P7)</div>
+            <div className="text-[10px] text-amber-500 mt-0.5">Human Review Queue</div>
           </div>
         </div>
       </div>
@@ -325,8 +325,8 @@ export default function BenchmarkEvaluationPage() {
                       <span>{c.final_decision}</span>
                     </span>
 
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-950 text-slate-300 border border-slate-800">
-                      {c.rule_id_matched}
+                    <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-slate-950 text-slate-300 border border-slate-800">
+                      {formatRuleLabel(c.rule_id_matched)}
                     </span>
 
                     <button
@@ -385,16 +385,16 @@ export default function BenchmarkEvaluationPage() {
                       </div>
                     </div>
 
-                    {/* LLM-Backed Clinical Decision Explanation (ADR-011) */}
+                    {/* LLM-Backed Clinical Decision Explanation */}
                     <div className="bg-slate-900 border border-indigo-900/60 rounded-xl overflow-hidden shadow-md">
                       <div className="bg-gradient-to-r from-indigo-950 via-slate-900 to-slate-950 px-4 py-2.5 border-b border-indigo-900/40 flex items-center justify-between">
                         <div className="flex items-center space-x-2">
                           <Sparkles className="w-4 h-4 text-cyan-400" />
                           <span className="text-xs font-bold text-white uppercase tracking-wider">
-                            LLM-Backed Clinical & Policy Narrative (ADR-011)
+                            Clinical & Policy Decision Narrative
                           </span>
                           <span className="text-[9px] px-1.5 py-0.5 rounded bg-indigo-950 text-indigo-300 border border-indigo-800 font-mono">
-                            {c.model_source}
+                            {c.model_source.replace(/\s*\/\s*ADR-\d+\s*Engine/gi, "")}
                           </span>
                         </div>
                         <button

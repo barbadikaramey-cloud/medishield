@@ -33,6 +33,74 @@ import {
   XCircle,
 } from "lucide-react";
 
+export function formatRuleLabel(ruleId: string | null | undefined): string {
+  if (!ruleId) return "";
+  const map: Record<string, string> = {
+    "RULE-P1-SECURITY": "Document Integrity & Security Check",
+    "RULE-P1-TECH-FAIL": "Technical Validation Check",
+    "RULE-P2-INCOMPLETE": "Intake Completeness Check",
+    "RULE-P3-AMBIGUITY": "Information Discrepancy & Verification Review",
+    "RULE-P3-AMBIGUITY-ESCALATE": "Information Discrepancy & Verification Review",
+    "RULE-P4-HIGH-FRAUD": "Billing Pattern & Anomaly Review",
+    "RULE-P5-HARD-REJECT": "Policy Exclusion & Eligibility Denial",
+    "RULE-P6-CLEAN-PASS": "Automated Clean Approval",
+    "RULE-P7-BORDERLINE-REVIEW": "Medical Necessity & Guideline Review",
+    "RULE-P8-CATCH-ALL": "Operational Adjudication Review",
+  };
+  if (map[ruleId]) return map[ruleId];
+  return ruleId
+    .replace(/^RULE-/, "")
+    .replace(/^P\d+-/, "")
+    .replace(/-/g, " ")
+    .toLowerCase()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+export function formatSubReason(subReason: string | null | undefined): string {
+  if (!subReason) return "";
+  const map: Record<string, string> = {
+    AMBIGUITY: "Information Discrepancy",
+    HUMAN_REVIEW: "Clinical & Document Review",
+    FRAUD_REVIEW: "Billing Pattern Review",
+    TECHNICAL_FAILURE: "Technical System Verification",
+    MISSING_EVIDENCE: "Additional Documentation Required",
+    INCOMPLETE: "Incomplete Documentation",
+    BORDERLINE_CONFIDENCE: "Specialist Confidence Review",
+    RECOMMEND_DENIAL: "Policy Non-Coverage",
+  };
+  return map[subReason] || subReason.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+export function sanitizeArchitecturalJargon(text: string): string {
+  if (!text) return "";
+  return text
+    // Remove ADR citations like (ADR-015), (ADR-002), (ADR-011), (ADR-001)
+    .replace(/\s*\((?:Stage\s+[A-Z]\s+)?ADR-\d+\)/gi, "")
+    .replace(/\bADR-\d+\b/gi, "Clinical Review Standard")
+    // Replace Rule P3 / Ambiguity escalation jargon
+    .replace(/Ambiguity Escalation \(P3\):/gi, "Review Escalation (Information Discrepancy):")
+    .replace(/Ambiguity escalation:/gi, "Review escalation (information discrepancy):")
+    .replace(/Ambiguity Escalation/gi, "Information Discrepancy Review")
+    .replace(/Autonomous Rejection \(P5, ADR-\d+\):/gi, "Autonomous Policy Denial:")
+    .replace(/Autonomous Rejection \(P5\):/gi, "Autonomous Policy Denial:")
+    .replace(/Autonomous Rejection \(P\d+\):/gi, "Autonomous Policy Denial:")
+    // Replace rule IDs when rendered in plain text
+    .replace(/RULE-P3-AMBIGUITY(-ESCALATE)?/g, "Information Discrepancy Review")
+    .replace(/RULE-P6-CLEAN-PASS/g, "Automated Clean Approval")
+    .replace(/RULE-P5-HARD-REJECT/g, "Policy Exclusion Denial")
+    .replace(/RULE-P1-SECURITY/g, "Document Integrity Check")
+    .replace(/RULE-P1-TECH-FAIL/g, "Technical Validation Check")
+    .replace(/RULE-P2-INCOMPLETE/g, "Documentation Completeness Check")
+    .replace(/RULE-P4-HIGH-FRAUD/g, "Billing Anomaly Review")
+    .replace(/RULE-P7-BORDERLINE-REVIEW/g, "Medical Necessity Review")
+    .replace(/RULE-P8-CATCH-ALL/g, "Operational Review")
+    // Humanize standalone ambiguity/ambiguities in prose
+    .replace(/\bAmbiguities\b/g, "Information discrepancies")
+    .replace(/\bambiguities\b/g, "information discrepancies")
+    .replace(/\bAmbiguity\b/g, "Information discrepancy")
+    .replace(/\bambiguity\b/g, "information discrepancy");
+}
+
 export interface ClinicalExplanationViewerProps {
   content: string;
   caseId?: string;
@@ -127,7 +195,7 @@ const CATEGORY_CONFIG: Record<
     shortLabel: "5. Attestation",
   },
   clinical: {
-    name: "Clinical Alignment & Medical Necessity (ADR-015)",
+    name: "Clinical Alignment & Medical Necessity",
     icon: Stethoscope,
     accentBorder: "border-emerald-500/50",
     accentBg: "bg-emerald-950/20",
@@ -195,7 +263,7 @@ export function ClinicalExplanationViewer({
         }
         currentSection = {
           id: "sec-executive",
-          title: trimmed.replace(/^###\s+/, ""),
+          title: sanitizeArchitecturalJargon(trimmed.replace(/^###\s+/, "")),
           category: "executive",
           rawLines: [],
         };
@@ -206,7 +274,7 @@ export function ClinicalExplanationViewer({
         if (currentSection) {
           result.push(currentSection);
         }
-        const title = trimmed.replace(/^####\s+/, "");
+        const title = sanitizeArchitecturalJargon(trimmed.replace(/^####\s+/, ""));
         let category: ParsedSection["category"] = "other";
         const lowerTitle = title.toLowerCase();
 
@@ -236,14 +304,14 @@ export function ClinicalExplanationViewer({
       }
 
       if (currentSection) {
-        currentSection.rawLines.push(line);
+        currentSection.rawLines.push(sanitizeArchitecturalJargon(line));
       } else if (trimmed) {
         // Initial lines before any header
         currentSection = {
           id: "sec-intro",
           title: "Adjudication Summary",
           category: "executive",
-          rawLines: [line],
+          rawLines: [sanitizeArchitecturalJargon(line)],
         };
       }
     }
@@ -322,7 +390,7 @@ export function ClinicalExplanationViewer({
               <HeartPulse className="w-3.5 h-3.5 text-emerald-400" />
               <span>Clinical Alignment</span>
               <span className="px-1.5 py-0.2 rounded-full text-[9px] bg-emerald-900/80 text-emerald-200 border border-emerald-700">
-                ADR-015
+                Medical Necessity
               </span>
             </button>
           )}
@@ -441,8 +509,8 @@ export function ClinicalExplanationViewer({
                       </span>
                     )}
                     {ruleIdMatched && (
-                      <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-indigo-950 text-indigo-300 border border-indigo-800">
-                        {ruleIdMatched}
+                      <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-indigo-950 text-indigo-300 border border-indigo-800">
+                        {formatRuleLabel(ruleIdMatched)}
                       </span>
                     )}
                   </div>
@@ -590,8 +658,8 @@ function SectionCard({
               Outcome: {decisionBadge}
             </span>
             {ruleId && (
-              <span className="px-2 py-1 rounded-md text-xs font-mono bg-slate-800 text-slate-200 border border-slate-700">
-                Rule: {ruleId}
+              <span className="px-2 py-1 rounded-md text-xs font-medium bg-slate-800 text-slate-200 border border-slate-700">
+                Policy: {formatRuleLabel(ruleId)}
               </span>
             )}
           </div>
@@ -633,7 +701,7 @@ function SectionCard({
               <span>{section.title}</span>
               {isClinical && (
                 <span className="px-2 py-0.5 rounded text-[9px] font-mono font-bold bg-emerald-950 text-emerald-300 border border-emerald-700">
-                  Deterministic ADR-015 Verified
+                  Medical Necessity Verified
                 </span>
               )}
             </h4>

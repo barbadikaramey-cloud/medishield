@@ -498,7 +498,7 @@ export default function ClaimerPortalPage() {
                         </div>
                       </div>
                       <p className="text-xs text-slate-500 mt-3">
-                        In accordance with healthcare claims standards and MediShield governance (ADR-014), formal decision notices and payment breakdowns are finalized exclusively upon completed human review.
+                        In accordance with healthcare claims standards and MediShield governance, formal decision notices and payment breakdowns are finalized exclusively upon completed human review.
                       </p>
                     </div>
                   </div>

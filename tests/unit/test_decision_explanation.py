@@ -262,7 +262,7 @@ def test_clinical_alignment_explanation_includes_diagnosis_procedure_misalignmen
 
     explanation = generate_deterministic_explanation(context, decision_output)
 
-    assert "#### 6. Clinical Alignment & Medical Necessity (ADR-015)" in explanation
+    assert "#### 6. Clinical Alignment & Medical Necessity" in explanation
     assert "Diagnosis-procedure clinical misalignment" in explanation
     assert "CPT 27447 (Total Knee Arthroplasty (TKA))" in explanation
     assert "S52, M54.5" in explanation
@@ -538,7 +538,7 @@ def test_generate_decision_explanation_llm_payload_contains_rich_clinical_detail
         return {
             "detailed_explanation": (
                 "### ✅ Executive Decision Summary: APPROVE\n\n"
-                "#### 6. Clinical Alignment & Medical Necessity (ADR-015)\n"
+                "#### 6. Clinical Alignment & Medical Necessity\n"
                 "- **Medical Indication:** CPT 44970 is clinically indicated by acute appendicitis (K35.80).\n"
                 "- **Evidence Grounding:** Operative report validates laparoscopic technique.\n"
                 "- **Guideline Compliance:** ACS Acute Appendicitis guideline met.\n"

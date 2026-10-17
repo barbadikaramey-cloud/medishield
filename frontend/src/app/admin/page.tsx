@@ -137,7 +137,7 @@ export default function AdminPortalPage() {
       formData.append("file", policyPdfFile);
 
       const res = await uploadPolicyPdf(formData);
-      setPolicyUploadSuccess(`Draft version ${res.version_tag} for policy ${res.policy_id} uploaded to storage. Staged for ADR-006 Publishing Firewall.`);
+      setPolicyUploadSuccess(`Draft version ${res.version_tag} for policy ${res.policy_id} uploaded to storage. Staged for Policy Publishing Firewall.`);
       setPolicyPdfFile(null);
       fetchPolicies();
       fetchMetrics();
@@ -207,7 +207,7 @@ export default function AdminPortalPage() {
         </div>
         <h2 className="text-2xl font-bold text-white mb-2">Administrator Access Required</h2>
         <p className="text-sm text-slate-400 mb-6 max-w-lg mx-auto leading-relaxed">
-          Under MediShield Three-Tier RBAC (ADR-012, ADR-013), platform terminology uploads and corporate governance are restricted to the <strong>ADMINISTRATOR</strong> persona.
+          Under MediShield Three-Tier RBAC, platform terminology uploads and corporate governance are restricted to the <strong>ADMINISTRATOR</strong> persona.
           {user ? (
             <span className="block mt-2 text-xs text-slate-300">
               You are currently signed in as: <strong className="text-white font-mono">{user.username}</strong> ({user.role}).
@@ -406,7 +406,7 @@ export default function AdminPortalPage() {
               <div>
                 <h2 className="text-lg font-bold text-white">Upload Medical Codes Fee Schedule (CSV)</h2>
                 <p className="text-xs text-slate-400">
-                  Bulk ingest CPT, HCPCS, ICD-10-CM, or Revenue codes directly into PostgreSQL and Redis cache (ADR-012).
+                  Bulk ingest CPT, HCPCS, ICD-10-CM, or Revenue codes directly into PostgreSQL and Redis cache.
                 </p>
               </div>
             </div>
@@ -560,7 +560,7 @@ export default function AdminPortalPage() {
         </div>
       )}
 
-      {/* Tab 3: Policies (RAG Knowledge & ADR-006 Firewall) */}
+      {/* Tab 3: Policies (RAG Knowledge & Policy Publishing Firewall) */}
       {activeTab === "policies" && (
         <div className="space-y-8">
           {/* Top Architecture Notice Banner */}
@@ -568,7 +568,7 @@ export default function AdminPortalPage() {
             <div className="flex items-center space-x-3 mb-3">
               <FileCheck className="w-6 h-6 text-amber-400" />
               <div>
-                <h2 className="text-lg font-bold text-white">Policy Administration & Publishing Firewall (ADR-006)</h2>
+                <h2 className="text-lg font-bold text-white">Policy Administration & Publishing Firewall</h2>
                 <p className="text-xs text-slate-400">
                   Customer submissions are strictly read-only evidence. Only authorized administrators can stage and publish corporate policy PDFs into the Qdrant semantic vector index.
                 </p>
@@ -596,7 +596,7 @@ export default function AdminPortalPage() {
               <div className="p-4 bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 rounded-lg text-sm flex items-center space-x-3 mb-4">
                 <ShieldCheck className="w-5 h-5 flex-shrink-0" />
                 <div>
-                  <div className="font-bold">ADR-006 Publishing Firewall Complete</div>
+                  <div className="font-bold">Policy Publishing Firewall Complete</div>
                   <div className="text-xs text-emerald-400 mt-0.5">{publishSuccess}</div>
                 </div>
               </div>
@@ -809,7 +809,7 @@ export default function AdminPortalPage() {
                                 ) : (
                                   <>
                                     <ShieldCheck className="w-3.5 h-3.5" />
-                                    <span>Publish to RAG (ADR-006)</span>
+                                    <span>Publish to Knowledge Base</span>
                                   </>
                                 )}
                               </button>

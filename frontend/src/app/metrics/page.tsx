@@ -166,7 +166,7 @@ export default function OperationalMetricsPage() {
             <div className="text-3xl font-extrabold text-white font-mono">
               {metrics ? `${(metrics.escalation_rate * 100).toFixed(1)}%` : "22.5%"}
             </div>
-            <p className="text-[11px] text-amber-400/80 mt-1">Ambiguity, fraud signals, missing docs</p>
+            <p className="text-[11px] text-amber-400/80 mt-1">Information discrepancies, fraud signals, missing docs</p>
           </div>
 
           {/* Total Adjudicated Claims */}
@@ -484,7 +484,7 @@ export default function OperationalMetricsPage() {
               </span>
             </div>
             <div className="flex items-center justify-between p-3 bg-slate-950 rounded-lg border border-slate-800">
-              <span className="text-slate-300">ADR-006 Policy Publishing Admin Firewall</span>
+              <span className="text-slate-300">Policy Publishing Admin Firewall</span>
               <span className="px-2 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 font-bold">
                 LOCKED
               </span>

@@ -150,7 +150,7 @@ export default function QueueDashboardPage() {
         </div>
         <h2 className="text-2xl font-bold text-white mb-2">Claimer Account Detected</h2>
         <p className="text-sm text-slate-400 mb-6 max-w-lg mx-auto leading-relaxed">
-          You are authenticated as a <strong>Claimer</strong> (Patient / Provider). Under MediShield RBAC (ADR-012/ADR-013), the internal operational review queue is reserved for licensed claims adjusters.
+          You are authenticated as a <strong>Claimer</strong> (Patient / Provider). Under MediShield RBAC, the internal operational review queue is reserved for licensed claims adjusters.
         </p>
         <Link
           href="/claimer"
