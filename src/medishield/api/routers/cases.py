@@ -715,6 +715,8 @@ def explain_case_decision(
         claims_output=snapshot.get("claims"),
         policy_output=snapshot.get("policy"),
         fraud_output=snapshot.get("fraud"),
+        clinical_output=snapshot.get("clinical") or snapshot.get("clinical_output"),
+        consistency_report=snapshot.get("consistency") or snapshot.get("consistency_report"),
     )
 
     decision_enum = active_decision.decision

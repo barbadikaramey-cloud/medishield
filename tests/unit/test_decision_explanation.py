@@ -267,3 +267,325 @@ def test_clinical_alignment_explanation_includes_diagnosis_procedure_misalignmen
     assert "CPT 27447 (Total Knee Arthroplasty (TKA))" in explanation
     assert "S52, M54.5" in explanation
     assert "Knee Joint" in explanation
+
+
+def test_deterministic_explanation_rich_clinical_alignment_details():
+    """Verifies that deterministic generator renders granular line-item evidence and bed-day stay reconciliation."""
+    from datetime import date
+
+    from medishield.domain.contracts import (
+        BedDayBillingRuleContract,
+        BedDayReconciliation,
+        ClinicalAlignmentOutput,
+        ClinicalIndicationStatus,
+        CriterionEvaluationOutcome,
+        FacilityBillingConvention,
+        GuidelineCitation,
+        LineClinicalEvidence,
+        MandatoryGuidelineCriterion,
+        MedicalNecessityStatus,
+        PerformanceEvidenceStatus,
+        PriorAuthRequirementStatus,
+        PriorAuthVerificationStatus,
+        RepeatServiceStatus,
+        ServiceModality,
+    )
+    from medishield.domain.provenance import FieldProvenance
+
+    context, decision_output = _build_sample_context()
+
+    guideline = GuidelineCitation(
+        guideline_id="LCD-44970-01",
+        guideline_version="2026.1",
+        guideline_title="Laparoscopic Appendectomy",
+        jurisdiction="NATIONAL",
+        payer_product="COMMERCIAL",
+        effective_date=date(2025, 1, 1),
+        criteria_evaluations=[
+            MandatoryGuidelineCriterion(
+                criterion_id="CRIT-44970-01",
+                description="Clinical, laboratory, or imaging evidence of acute or suspected appendicitis",
+                is_mandatory=True,
+                evaluation_outcome=CriterionEvaluationOutcome.SATISFIED,
+                supporting_spans=[
+                    FieldProvenance(
+                        document_id="DOC-DS-01",
+                        page_number=1,
+                        text_content="Laparoscopic appendectomy performed",
+                        evidence_quality_score=0.95,
+                    )
+                ],
+            )
+        ],
+    )
+
+    line1 = LineClinicalEvidence(
+        line_number=1,
+        service_code="44970",
+        modality=ServiceModality.SURGICAL_PROCEDURE,
+        billed_units=1.0,
+        billed_amount=12500.0,
+        service_date=date(2026, 3, 11),
+        performance_status=PerformanceEvidenceStatus.DIRECTLY_DOCUMENTED_PERFORMANCE,
+        indication_status=ClinicalIndicationStatus.EXPLICITLY_INDICATED,
+        necessity_status=MedicalNecessityStatus.MET,
+        prior_auth_requirement=PriorAuthRequirementStatus.NOT_REQUIRED,
+        prior_auth_verification=PriorAuthVerificationStatus.NOT_APPLICABLE,
+        repeat_service_status=RepeatServiceStatus.NOT_A_REPEATED_SERVICE,
+        line_verdict=AgentVerdict.PASS,
+        primary_icd10_codes=["K35.80"],
+        secondary_icd10_codes=["R10.31"],
+        guideline_citation=guideline,
+        supporting_spans=[
+            FieldProvenance(
+                document_id="DOC-DS-01",
+                page_number=1,
+                text_content="Laparoscopic appendectomy performed",
+                evidence_quality_score=0.95,
+            )
+        ],
+        clinical_finding_summary="Operative report confirms laparoscopic appendectomy; pathology confirms acute suppurative appendicitis.",
+    )
+
+    billing_rule = BedDayBillingRuleContract(
+        rule_id="BR-ACUTE-INP-01",
+        rule_version="1.0",
+        facility_type="INPATIENT_ACUTE",
+        claim_type="INPATIENT",
+        effective_date=date(2025, 1, 1),
+        is_approved=True,
+        convention=FacilityBillingConvention.MIDNIGHT_CENSUS,
+    )
+
+    bdr = BedDayReconciliation(
+        billing_rule=billing_rule,
+        claim_facility_type="INPATIENT_ACUTE",
+        claim_type="INPATIENT",
+        admission_date=date(2026, 3, 10),
+        discharge_date=date(2026, 3, 12),
+        calendar_days_stayed=2,
+        expected_billable_units_min=2.0,
+        expected_billable_units_max=2.0,
+        billed_bed_days=2.0,
+        is_reconciled=True,
+        discrepancy_units=0.0,
+        uncertainty_flag=False,
+        reconciliation_verdict=AgentVerdict.PASS,
+        remarks="Admission on 2026-03-10 through discharge on 2026-03-12 satisfies 2 midnights under facility contract.",
+    )
+
+    clin_output = ClinicalAlignmentOutput(
+        verdict=AgentVerdict.PASS,
+        confidence=0.95,
+        expected_claim_line_numbers=[1],
+        total_lines_assessed=1,
+        line_assessments=[line1],
+        bed_day_reconciliation=bdr,
+        lines_fully_supported_count=1,
+        assessment_sufficient=True,
+        clinical_summary="All surgical and inpatient services clinically justified.",
+        latency_ms=120,
+    )
+    context.clinical_output = clin_output
+
+    explanation = generate_deterministic_explanation(context, decision_output)
+
+    # Verify granular line item reporting
+    assert "Itemized Clinical Indication & Evidence Grounding:" in explanation
+    assert "Line 1 (CPT/Code `44970`" in explanation
+    assert "Primary ICD: K35.80" in explanation
+    assert "Secondary ICD: R10.31" in explanation
+    assert "Performance: `DIRECTLY_DOCUMENTED_PERFORMANCE`" in explanation
+    assert "Indication: `EXPLICITLY_INDICATED`" in explanation
+    assert "Necessity: `MET`" in explanation
+    assert "Laparoscopic Appendectomy (LCD-44970-01)" in explanation
+    assert "Operative report confirms laparoscopic appendectomy" in explanation
+
+    # Verify bed-day reconciliation reporting
+    assert "Inpatient Hospital Stay & Bed-Day Reconciliation:" in explanation
+    assert "2.0 billed bed day(s)" in explanation
+    assert "Admit: 2026-03-10" in explanation
+    assert "Discharge: 2026-03-12" in explanation
+    assert "MIDNIGHT_CENSUS" in explanation
+    assert "satisfies 2 midnights under facility contract" in explanation
+
+
+def test_generate_decision_explanation_llm_payload_contains_rich_clinical_details():
+    """Verifies that Groq LLM receives comprehensive clinical facts in payload and specific clinical directives."""
+    import json
+    from datetime import date
+
+    from medishield.domain.contracts import (
+        BedDayBillingRuleContract,
+        BedDayReconciliation,
+        ClinicalAlignmentOutput,
+        ClinicalIndicationStatus,
+        CriterionEvaluationOutcome,
+        FacilityBillingConvention,
+        GuidelineCitation,
+        LineClinicalEvidence,
+        MandatoryGuidelineCriterion,
+        MedicalNecessityStatus,
+        PerformanceEvidenceStatus,
+        PriorAuthRequirementStatus,
+        PriorAuthVerificationStatus,
+        RepeatServiceStatus,
+        ServiceModality,
+    )
+    from medishield.domain.provenance import FieldProvenance
+
+    context, decision_output = _build_sample_context()
+
+    guideline = GuidelineCitation(
+        guideline_id="LCD-44970-01",
+        guideline_version="2026.1",
+        guideline_title="Laparoscopic Appendectomy",
+        jurisdiction="NATIONAL",
+        payer_product="COMMERCIAL",
+        effective_date=date(2025, 1, 1),
+        criteria_evaluations=[
+            MandatoryGuidelineCriterion(
+                criterion_id="CRIT-44970-01",
+                description="Clinical, laboratory, or imaging evidence of acute or suspected appendicitis",
+                is_mandatory=True,
+                evaluation_outcome=CriterionEvaluationOutcome.SATISFIED,
+                supporting_spans=[
+                    FieldProvenance(
+                        document_id="DOC-DS-01",
+                        page_number=1,
+                        text_content="Laparoscopic appendectomy performed",
+                        evidence_quality_score=0.95,
+                    )
+                ],
+            )
+        ],
+    )
+
+    line1 = LineClinicalEvidence(
+        line_number=1,
+        service_code="44970",
+        modality=ServiceModality.SURGICAL_PROCEDURE,
+        billed_units=1.0,
+        billed_amount=12500.0,
+        service_date=date(2026, 3, 11),
+        performance_status=PerformanceEvidenceStatus.DIRECTLY_DOCUMENTED_PERFORMANCE,
+        indication_status=ClinicalIndicationStatus.EXPLICITLY_INDICATED,
+        necessity_status=MedicalNecessityStatus.MET,
+        prior_auth_requirement=PriorAuthRequirementStatus.NOT_REQUIRED,
+        prior_auth_verification=PriorAuthVerificationStatus.NOT_APPLICABLE,
+        repeat_service_status=RepeatServiceStatus.NOT_A_REPEATED_SERVICE,
+        line_verdict=AgentVerdict.PASS,
+        primary_icd10_codes=["K35.80"],
+        secondary_icd10_codes=["R10.31"],
+        guideline_citation=guideline,
+        supporting_spans=[
+            FieldProvenance(
+                document_id="DOC-DS-01",
+                page_number=1,
+                text_content="Laparoscopic appendectomy performed",
+                evidence_quality_score=0.95,
+            )
+        ],
+        clinical_finding_summary="Operative report confirms laparoscopic appendectomy; pathology confirms acute suppurative appendicitis.",
+    )
+
+    billing_rule = BedDayBillingRuleContract(
+        rule_id="BR-ACUTE-INP-01",
+        rule_version="1.0",
+        facility_type="INPATIENT_ACUTE",
+        claim_type="INPATIENT",
+        effective_date=date(2025, 1, 1),
+        is_approved=True,
+        convention=FacilityBillingConvention.MIDNIGHT_CENSUS,
+    )
+
+    bdr = BedDayReconciliation(
+        billing_rule=billing_rule,
+        claim_facility_type="INPATIENT_ACUTE",
+        claim_type="INPATIENT",
+        admission_date=date(2026, 3, 10),
+        discharge_date=date(2026, 3, 12),
+        calendar_days_stayed=2,
+        expected_billable_units_min=2.0,
+        expected_billable_units_max=2.0,
+        billed_bed_days=2.0,
+        is_reconciled=True,
+        discrepancy_units=0.0,
+        uncertainty_flag=False,
+        reconciliation_verdict=AgentVerdict.PASS,
+        remarks="Admission on 2026-03-10 through discharge on 2026-03-12 satisfies 2 midnights under facility contract.",
+    )
+
+    clin_output = ClinicalAlignmentOutput(
+        verdict=AgentVerdict.PASS,
+        confidence=0.95,
+        expected_claim_line_numbers=[1],
+        total_lines_assessed=1,
+        line_assessments=[line1],
+        bed_day_reconciliation=bdr,
+        lines_fully_supported_count=1,
+        assessment_sufficient=True,
+        clinical_summary="All surgical and inpatient services clinically justified.",
+        latency_ms=120,
+    )
+    context.clinical_output = clin_output
+
+    captured_prompt = {}
+
+    def mock_generate_json(prompt, system_prompt, **kwargs):
+        captured_prompt["prompt"] = prompt
+        captured_prompt["system_prompt"] = system_prompt
+        return {
+            "detailed_explanation": (
+                "### ✅ Executive Decision Summary: APPROVE\n\n"
+                "#### 6. Clinical Alignment & Medical Necessity (ADR-015)\n"
+                "- **Medical Indication:** CPT 44970 is clinically indicated by acute appendicitis (K35.80).\n"
+                "- **Evidence Grounding:** Operative report validates laparoscopic technique.\n"
+                "- **Guideline Compliance:** ACS Acute Appendicitis guideline met.\n"
+                "- **Inpatient Bed Days:** 2.0 bed days reconciled under midnight census convention.\n"
+            )
+        }
+
+    mock_client = MagicMock()
+    mock_client.is_available.return_value = True
+    mock_client.generate_json.side_effect = mock_generate_json
+
+    result = generate_decision_explanation(context, decision_output, llm_client=mock_client)
+
+    # Ensure result adopted
+    assert "CPT 44970 is clinically indicated by acute appendicitis" in result
+
+    # Check payload structure
+    prompt_str = captured_prompt["prompt"]
+    json_start = prompt_str.find("```json\n") + len("```json\n")
+    json_end = prompt_str.find("\n```\n\nGenerate")
+    payload = json.loads(prompt_str[json_start:json_end])
+
+    clin_payload = payload["clinical_alignment"]
+    assert clin_payload["verdict"] == "PASS"
+    assert clin_payload["total_lines_assessed"] == 1
+    assert len(clin_payload["line_assessments"]) == 1
+
+    la_p = clin_payload["line_assessments"][0]
+    assert la_p["service_code"] == "44970"
+    assert la_p["primary_icd10_codes"] == ["K35.80"]
+    assert la_p["secondary_icd10_codes"] == ["R10.31"]
+    assert la_p["guideline_citation"]["guideline_id"] == "LCD-44970-01"
+    assert la_p["guideline_citation"]["guideline_title"] == "Laparoscopic Appendectomy"
+    assert la_p["clinical_finding_summary"] == "Operative report confirms laparoscopic appendectomy; pathology confirms acute suppurative appendicitis."
+
+    # Check bed-day payload
+    bdr_p = clin_payload["bed_day_reconciliation"]
+    assert bdr_p["billed_bed_days"] == 2.0
+    assert bdr_p["admission_date"] == "2026-03-10"
+    assert bdr_p["discharge_date"] == "2026-03-12"
+    assert bdr_p["billing_convention"] == "MIDNIGHT_CENSUS"
+    assert bdr_p["is_reconciled"] is True
+
+    # Check system prompt directives
+    sys_prompt = captured_prompt["system_prompt"]
+    assert "Medical Indication Rationale:" in sys_prompt
+    assert "Performance & Evidence Grounding:" in sys_prompt
+    assert "Clinical Practice Guidelines:" in sys_prompt
+    assert "Inpatient Bed-Day & Stay Reconciliation:" in sys_prompt
+

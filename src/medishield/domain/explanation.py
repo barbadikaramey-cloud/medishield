@@ -36,6 +36,13 @@ def _safe_get(obj: Any, attr: str, default: Any = None) -> Any:
         return default
 
 
+def _enum_str(val: Any, default: str = "N/A") -> str:
+    """Safely extracts enum string value or string representation."""
+    if val is None:
+        return default
+    return str(val.value if hasattr(val, "value") else val)
+
+
 def generate_deterministic_explanation(
     context: DecisionInputContext,
     decision_output: OrchestratorOutput,
@@ -276,22 +283,101 @@ def generate_deterministic_explanation(
         c_v_str = c_verdict.value if hasattr(c_verdict, "value") else str(c_verdict or "PASS")
         c_conf = _safe_get(clin, "confidence")
         conf_str = f"{float(c_conf) * 100:.1f}%" if c_conf is not None else "Uncalibrated"
+        tot_lines = int(_safe_get(clin, "total_lines_assessed", 0) or 0)
+        supp_lines = int(_safe_get(clin, "lines_fully_supported_count", 0) or 0)
         lines.append(f"- **Clinical Alignment Verdict:** `{c_v_str}` (Confidence: {conf_str})")
-        lines.append(f"- **Line Items Evaluated:** {getattr(clin, 'total_lines_assessed', 0)} total | {getattr(clin, 'lines_fully_supported_count', 0)} fully supported")
-        if getattr(clin, "lines_indeterminate_count", 0) > 0:
-            lines.append(f"- **Indeterminate Lines:** {getattr(clin, 'lines_indeterminate_count', 0)} line item(s) require guideline review")
-        if getattr(clin, "lines_failed_necessity_count", 0) > 0:
-            lines.append(f"- **Necessity Gaps:** {getattr(clin, 'lines_failed_necessity_count', 0)} line item(s) unfulfilled under standard medical guidelines")
+        lines.append(f"- **Line Items Evaluated:** {tot_lines} total | {supp_lines} fully supported")
+        if _safe_get(clin, "lines_indeterminate_count", 0) > 0:
+            lines.append(f"- **Indeterminate Lines:** {_safe_get(clin, 'lines_indeterminate_count')} line item(s) require guideline review")
+        if _safe_get(clin, "lines_failed_necessity_count", 0) > 0:
+            lines.append(f"- **Necessity Gaps:** {_safe_get(clin, 'lines_failed_necessity_count')} line item(s) unfulfilled under standard medical guidelines")
+
+        # Granular Line-Item Clinical Evidence Grounding
+        line_assessments = _safe_get(clin, "line_assessments", []) or []
+        if line_assessments:
+            lines.append("- **Itemized Clinical Indication & Evidence Grounding:**")
+            for la in line_assessments:
+                l_num = _safe_get(la, "line_number", 1)
+                code = _safe_get(la, "service_code", "UNKNOWN")
+                modality = _safe_get(la, "modality", "SERVICE")
+                mod_str = modality.value if hasattr(modality, "value") else str(modality)
+                amt = float(_safe_get(la, "billed_amount", 0.0) or 0.0)
+                p_icd = _safe_get(la, "primary_icd10_codes", []) or []
+                s_icd = _safe_get(la, "secondary_icd10_codes", []) or []
+                p_status = _safe_get(la, "performance_status")
+                p_stat_str = p_status.value if hasattr(p_status, "value") else str(p_status or "")
+                ind_status = _safe_get(la, "indication_status")
+                ind_stat_str = ind_status.value if hasattr(ind_status, "value") else str(ind_status or "")
+                nec_status = _safe_get(la, "necessity_status")
+                nec_stat_str = nec_status.value if hasattr(nec_status, "value") else str(nec_status or "")
+
+                icd_desc = f"Primary ICD: {', '.join(p_icd)}" if p_icd else "No primary ICD mapped"
+                if s_icd:
+                    icd_desc += f" | Secondary ICD: {', '.join(s_icd)}"
+
+                finding = _safe_get(la, "clinical_finding_summary", "")
+
+                gc = _safe_get(la, "guideline_citation")
+                guideline_str = ""
+                if gc:
+                    g_title = _safe_get(gc, "guideline_title") or _safe_get(gc, "guideline_id") or "Standard Clinical Guideline"
+                    g_id = _safe_get(gc, "guideline_id", "")
+                    guideline_str = f" [Guideline: {g_title} ({g_id})]" if g_id else f" [Guideline: {g_title}]"
+
+                l_verdict = _safe_get(la, "line_verdict")
+                l_v_str = l_verdict.value if hasattr(l_verdict, "value") else str(l_verdict or "PASS")
+                badge = "✅" if l_v_str == "PASS" else "⚠️" if l_v_str in ("INDETERMINATE", "UNAVAILABLE") else "❌"
+
+                lines.append(
+                    f"  - {badge} **Line {l_num} (CPT/Code `{code}` &bull; {mod_str} &bull; ${amt:,.2f}):** "
+                    f"{icd_desc}. Performance: `{p_stat_str}` | Indication: `{ind_stat_str}` | Necessity: `{nec_stat_str}`{guideline_str}."
+                )
+                if finding:
+                    lines.append(f"    *Clinical Grounding:* {finding}")
+                desc = _safe_get(la, "discrepancy_description")
+                if desc:
+                    lines.append(f"    *Discrepancy Note:* ⚠️ {desc}")
+
+        # Inpatient Bed-Day Reconciliation
+        bdr = _safe_get(clin, "bed_day_reconciliation")
+        if bdr:
+            b_days = float(_safe_get(bdr, "billed_bed_days", 0.0) or 0.0)
+            c_stayed = _safe_get(bdr, "calendar_days_stayed")
+            admit_d = _safe_get(bdr, "admission_date")
+            disch_d = _safe_get(bdr, "discharge_date")
+            b_rule = _safe_get(bdr, "billing_rule")
+            conv = _safe_get(b_rule, "convention") if b_rule else "MIDNIGHT_CENSUS"
+            conv_str = conv.value if hasattr(conv, "value") else str(conv)
+            r_verdict = _safe_get(bdr, "reconciliation_verdict")
+            r_v_str = r_verdict.value if hasattr(r_verdict, "value") else str(r_verdict or "PASS")
+            is_rec = bool(_safe_get(bdr, "is_reconciled", False))
+
+            stay_dates_str = (
+                f"Admit: {admit_d} &bull; Discharge: {disch_d}"
+                if admit_d and disch_d
+                else "Dates documented in clinical record"
+            )
+            cal_str = f" ({c_stayed} calendar days)" if c_stayed is not None else ""
+
+            status_badge = "✅" if is_rec else "⚠️"
+            lines.append(
+                f"- **Inpatient Hospital Stay & Bed-Day Reconciliation:** {status_badge} `{r_v_str}` "
+                f"({b_days:.1f} billed bed day(s) vs stay chronology: {stay_dates_str}{cal_str} under `{conv_str}` convention)."
+            )
+            remarks = _safe_get(bdr, "remarks")
+            if remarks:
+                lines.append(f"  - *Chronology Notes:* {remarks}")
+
+        # Reviewer Flags & Discrepancies
         discrepancies = _safe_get(clin, "blocking_discrepancies", [])
-        line_assessments = getattr(clin, "line_assessments", []) or []
         all_discs = list(discrepancies)
         for la in line_assessments:
-            desc = getattr(la, "discrepancy_description", None)
+            desc = _safe_get(la, "discrepancy_description")
             if desc and desc not in all_discs:
                 all_discs.append(desc)
 
         if all_discs:
-            lines.append("- **Clinical Discrepancies & Guideline Findings:**")
+            lines.append("- **Clinical Discrepancies & Reviewer Flags:**")
             for d in all_discs:
                 lines.append(f"  - ⚠️ {d}")
 
@@ -359,6 +445,88 @@ def generate_decision_explanation(
     cr_out = getattr(context, "consistency_report", None)
     clin_out = getattr(context, "clinical_output", None)
 
+    # Format clinical line assessments for prompt payload
+    formatted_clinical_lines = []
+    line_assessments = _safe_get(clin_out, "line_assessments", []) or []
+    for la in line_assessments:
+        gc = _safe_get(la, "guideline_citation")
+        gc_data = None
+        if gc:
+            criteria_evals = []
+            for c in _safe_get(gc, "criteria_evaluations", []) or []:
+                c_out = _safe_get(c, "evaluation_outcome")
+                c_out_str = c_out.value if hasattr(c_out, "value") else str(c_out)
+                criteria_evals.append({
+                    "criterion_id": _safe_get(c, "criterion_id"),
+                    "description": _safe_get(c, "description"),
+                    "outcome": c_out_str,
+                    "is_mandatory": _safe_get(c, "is_mandatory", True),
+                })
+            gc_data = {
+                "guideline_id": _safe_get(gc, "guideline_id"),
+                "guideline_title": _safe_get(gc, "guideline_title"),
+                "guideline_version": _safe_get(gc, "guideline_version"),
+                "all_mandatory_criteria_satisfied": _safe_get(gc, "all_mandatory_criteria_satisfied", True),
+                "criteria_evaluations": criteria_evals,
+            }
+
+        modality = _safe_get(la, "modality")
+        mod_str = modality.value if hasattr(modality, "value") else str(modality or "")
+        p_stat = _safe_get(la, "performance_status")
+        p_stat_str = p_stat.value if hasattr(p_stat, "value") else str(p_stat or "")
+        ind_stat = _safe_get(la, "indication_status")
+        ind_stat_str = ind_stat.value if hasattr(ind_stat, "value") else str(ind_stat or "")
+        nec_stat = _safe_get(la, "necessity_status")
+        nec_stat_str = nec_stat.value if hasattr(nec_stat, "value") else str(nec_stat or "")
+        l_verd = _safe_get(la, "line_verdict")
+        l_verd_str = l_verd.value if hasattr(l_verd, "value") else str(l_verd or "")
+        pa_req = _safe_get(la, "prior_auth_requirement")
+        pa_req_str = pa_req.value if hasattr(pa_req, "value") else str(pa_req or "")
+        pa_ver = _safe_get(la, "prior_auth_verification")
+        pa_ver_str = pa_ver.value if hasattr(pa_ver, "value") else str(pa_ver or "")
+
+        formatted_clinical_lines.append({
+            "line_number": _safe_get(la, "line_number"),
+            "service_code": _safe_get(la, "service_code"),
+            "modality": mod_str,
+            "billed_amount": float(_safe_get(la, "billed_amount", 0.0) or 0.0),
+            "billed_units": float(_safe_get(la, "billed_units", 1.0) or 1.0),
+            "service_date": str(_safe_get(la, "service_date")) if _safe_get(la, "service_date") else None,
+            "primary_icd10_codes": list(_safe_get(la, "primary_icd10_codes", []) or []),
+            "secondary_icd10_codes": list(_safe_get(la, "secondary_icd10_codes", []) or []),
+            "performance_status": p_stat_str,
+            "indication_status": ind_stat_str,
+            "necessity_status": nec_stat_str,
+            "guideline_citation": gc_data,
+            "clinical_finding_summary": _safe_get(la, "clinical_finding_summary", ""),
+            "discrepancy_description": _safe_get(la, "discrepancy_description"),
+            "prior_auth_requirement": pa_req_str,
+            "prior_auth_verification": pa_ver_str,
+            "line_verdict": l_verd_str,
+        })
+
+    # Bed-day reconciliation
+    bdr = _safe_get(clin_out, "bed_day_reconciliation")
+    bdr_data = None
+    if bdr:
+        b_rule = _safe_get(bdr, "billing_rule")
+        conv = _safe_get(b_rule, "convention") if b_rule else "MIDNIGHT_CENSUS"
+        conv_str = conv.value if hasattr(conv, "value") else str(conv)
+        r_verd = _safe_get(bdr, "reconciliation_verdict")
+        r_verd_str = r_verd.value if hasattr(r_verd, "value") else str(r_verd or "")
+        bdr_data = {
+            "billed_bed_days": float(_safe_get(bdr, "billed_bed_days", 0.0) or 0.0),
+            "calendar_days_stayed": _safe_get(bdr, "calendar_days_stayed"),
+            "admission_date": str(_safe_get(bdr, "admission_date")) if _safe_get(bdr, "admission_date") else None,
+            "discharge_date": str(_safe_get(bdr, "discharge_date")) if _safe_get(bdr, "discharge_date") else None,
+            "is_reconciled": bool(_safe_get(bdr, "is_reconciled", False)),
+            "reconciliation_verdict": r_verd_str,
+            "billing_convention": conv_str,
+            "billing_rule_id": _safe_get(b_rule, "rule_id") if b_rule else None,
+            "discrepancy_units": float(_safe_get(bdr, "discrepancy_units", 0.0) or 0.0),
+            "remarks": str(_safe_get(bdr, "remarks", "")),
+        }
+
     prompt_payload = {
         "case_id": getattr(context, "case_id", "UNKNOWN"),
         "binding_decision": decision_output.decision.value,
@@ -371,7 +539,7 @@ def generate_decision_explanation(
         "confidence": round(decision_output.decision_confidence, 4),
         "deterministic_justification": decision_output.justification,
         "kyc": {
-            "verdict": str(_safe_get(kyc_out, "verdict", "N/A")),
+            "verdict": _enum_str(_safe_get(kyc_out, "verdict", "N/A")),
             "member_matched": bool(_safe_get(kyc_out, "member_db_matched", False)),
             "member_id": str(_safe_get(kyc_out, "member_id", "")),
             "tamper_score": getattr(context, "security_tamper_score", 0.0),
@@ -379,7 +547,7 @@ def generate_decision_explanation(
             "reasoning": str(_safe_get(kyc_out, "reasoning_summary", "")),
         },
         "claims": {
-            "verdict": str(_safe_get(claims_out, "verdict", "N/A")),
+            "verdict": _enum_str(_safe_get(claims_out, "verdict", "N/A")),
             "claim_amount": claim_val,
             "line_items_valid": bool(_safe_get(claims_out, "line_items_sum_valid", False)),
             "cpt_codes": [str(c.value if hasattr(c, "value") else c) for c in _safe_get(claims_out, "cpt_codes", [])],
@@ -387,7 +555,7 @@ def generate_decision_explanation(
             "validation_errors": list(_safe_get(claims_out, "validation_errors", [])),
         },
         "policy": {
-            "verdict": str(_safe_get(pol_out, "verdict", "N/A")),
+            "verdict": _enum_str(_safe_get(pol_out, "verdict", "N/A")),
             "coverage_percentage": float(_safe_get(pol_out, "coverage_percentage", 0.0) or 0.0),
             "policy_id": str(_safe_get(pol_out, "policy_id", "")),
             "service_date_valid": bool(_safe_get(pol_out, "service_date_within_effective_period", _safe_get(pol_out, "effective_on_service_date", True))),
@@ -397,9 +565,9 @@ def generate_decision_explanation(
             "reasoning": str(_safe_get(pol_out, "reasoning_summary", "")),
         },
         "fraud": {
-            "verdict": str(_safe_get(fraud_out, "verdict", "PASS")),
+            "verdict": _enum_str(_safe_get(fraud_out, "verdict", "PASS"), "PASS"),
             "fraud_score": float(_safe_get(fraud_out, "fraud_score", 0.0) or 0.0),
-            "risk_level": str(_safe_get(fraud_out, "risk_level", "LOW")),
+            "risk_level": _enum_str(_safe_get(fraud_out, "risk_level", "LOW"), "LOW"),
             "anomalies": list(_safe_get(fraud_out, "anomalies", [])),
         },
         "consistency": {
@@ -413,24 +581,30 @@ def generate_decision_explanation(
             "conflicts": list(_safe_get(cr_out, "conflicts_detected", []) or []),
         },
         "clinical_alignment": {
-            "verdict": str(_safe_get(clin_out, "verdict", "N/A")),
-            "confidence": float(_safe_get(clin_out, "confidence", 1.0) or 1.0),
-            "lines_assessed": int(_safe_get(clin_out, "total_lines_assessed", 0)),
-            "lines_supported": int(_safe_get(clin_out, "lines_fully_supported_count", 0)),
+            "verdict": _enum_str(_safe_get(clin_out, "verdict", "N/A")),
+            "confidence": float(_safe_get(clin_out, "confidence", 1.0) or 1.0) if _safe_get(clin_out, "confidence") is not None else None,
+            "total_lines_assessed": int(_safe_get(clin_out, "total_lines_assessed", 0) or 0),
+            "lines_fully_supported": int(_safe_get(clin_out, "lines_fully_supported_count", 0) or 0),
+            "lines_indeterminate": int(_safe_get(clin_out, "lines_indeterminate_count", 0) or 0),
+            "lines_failed_necessity": int(_safe_get(clin_out, "lines_failed_necessity_count", 0) or 0),
+            "lines_contradicted": int(_safe_get(clin_out, "lines_contradicted_count", 0) or 0),
+            "clinical_documents_present": list(_safe_get(clin_out, "clinical_documents_present", []) or []),
             "clinical_summary": str(_safe_get(clin_out, "clinical_summary", "")),
+            "line_assessments": formatted_clinical_lines,
+            "bed_day_reconciliation": bdr_data,
             "blocking_discrepancies": list(_safe_get(clin_out, "blocking_discrepancies", []) or []),
             "clinical_discrepancies": [
-                getattr(l, "discrepancy_description", "")
-                for l in getattr(clin_out, "line_assessments", [])
-                if getattr(l, "discrepancy_description", None)
+                _safe_get(l, "discrepancy_description", "")
+                for l in line_assessments
+                if _safe_get(l, "discrepancy_description")
             ],
         },
     }
 
     system_prompt = (
         "You are MediShield's Lead Clinical & Healthcare Adjudication Auditor.\n"
-        "Your task is to produce a detailed, authoritative, and compassionate explanation of the "
-        "already-decided claims adjudication outcome for the clinical operations review console.\n\n"
+        "Your task is to produce an authoritative, comprehensive, and compassionate clinical and financial "
+        "decision explanation of the already-decided claims adjudication outcome for the clinical operations review console.\n\n"
         "CRITICAL DIRECTIVES:\n"
         "1. You MUST NEVER change, contradict, or override the binding decision provided.\n"
         "2. Structure your output in strict, well-formatted Markdown with the following clear sections:\n"
@@ -442,18 +616,28 @@ def generate_decision_explanation(
         "   - #### 5. Cross-Document Consistency & Regulatory Attestation (Doctor/Patient signatures, NPI, PA, dates)\n"
         "   - #### 6. Clinical Alignment & Medical Necessity (ADR-015)\n"
         "   - #### 7. Actionable Guidance for Human Reviewer / Adjuster\n"
-        "3. Explicitly cite any billed amounts, dollar totals, CPT codes, policy clauses, signatures, or anomalies from the data.\n"
-        "4. Keep each section clear and concise (2-3 concise bullet points per section) so the full JSON object closes well within token limits.\n"
+        "3. EXPLICIT CLINICAL ALIGNMENT DIRECTIVES FOR SECTION 6:\n"
+        "   - DO NOT merely state high-level numbers, scores, or counts (e.g. avoid '3 lines evaluated, 100% score').\n"
+        "   - Provide comprehensive, medical-grade clinical rationale for why the procedures were or were not justified:\n"
+        "     * Medical Indication Rationale: For each billed procedure code (CPT/HCPCS), explain how the primary diagnosis (chief complaint) and any secondary diagnoses (comorbidities or inpatient complications) establish medical indication. Explain the underlying clinical rationale connecting the diagnosis to the surgical, diagnostic, or medical service.\n"
+        "     * Performance & Evidence Grounding: State the exact clinical documentation (e.g. operative report, discharge summary hospital course, lab panel, diagnostic imaging) corroborating that the service was performed (not merely ordered).\n"
+        "     * Clinical Practice Guidelines: Cite the governing clinical guidelines (e.g. ACS, AHA, AMA/CPT, ACC, CMS LCD/NCD) evaluated and explain how the patient met (or failed) standard of care necessity criteria.\n"
+        "     * Inpatient Bed-Day & Stay Reconciliation: If room-and-board bed days were billed, detail the admission and discharge timeline, calendar stay duration vs billed units, and why the stay length is clinically justified under facility billing conventions (e.g. midnight census or calendar day span).\n"
+        "     * Clinical Discrepancies & Adjuster Guidance: If any line item is indeterminate, unperformed, unindicated, or lacks guideline evidence, detail the exact clinical gap and what clinical documentation is required.\n"
+        "4. Keep Sections 1-5 and 7 concise and factual (2-3 bullet points each), while providing full clinical depth in Section 6.\n"
         "5. Respond with a JSON object containing a single key: 'detailed_explanation'."
     )
 
     try:
-        prompt_text = f"Adjudication Evidence Snapshot:\n```json\n{json.dumps(prompt_payload, indent=2)}\n```\n\nGenerate the detailed clinical explanation in JSON format."
+        prompt_text = (
+            f"Adjudication Evidence Snapshot:\n```json\n{json.dumps(prompt_payload, indent=2)}\n```\n\n"
+            "Generate the detailed clinical explanation in JSON format."
+        )
         response = client.generate_json(
             prompt=prompt_text,
             system_prompt=system_prompt,
             temperature=0.2,
-            max_tokens=2500,
+            max_tokens=3500,
         )
         if isinstance(response, dict) and "detailed_explanation" in response:
             explanation = response["detailed_explanation"]
