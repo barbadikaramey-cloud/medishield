@@ -38,7 +38,7 @@ import {
 } from "@/lib/api";
 
 export default function AdminPortalPage() {
-  const { user, loading: authLoading } = useAuth();
+  const { user, login, loading: authLoading } = useAuth();
   const [activeTab, setActiveTab] = useState<"dashboard" | "codes" | "policies">("dashboard");
 
   // Dashboard State
@@ -185,6 +185,20 @@ export default function AdminPortalPage() {
     }
   };
 
+  const formatCharge = (charge: number | string | undefined | null) => {
+    if (charge === undefined || charge === null || charge === "") return "—";
+    const num = typeof charge === "number" ? charge : parseFloat(String(charge));
+    return isNaN(num) ? "—" : `$${num.toFixed(2)}`;
+  };
+
+  const handleQuickAdminLogin = async () => {
+    try {
+      await login("admin", "admin123");
+    } catch (err) {
+      console.error("Failed quick admin login", err);
+    }
+  };
+
   if (!authLoading && (!user || user.role !== "ADMINISTRATOR")) {
     return (
       <div className="max-w-2xl mx-auto py-16 text-center">
@@ -204,20 +218,19 @@ export default function AdminPortalPage() {
             </span>
           )}
         </p>
-        <div className="flex justify-center gap-3">
-          {user && (
-            <Link
-              href={user.role === "CLAIMER" ? "/claimer" : "/"}
-              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-sm font-semibold transition-colors"
-            >
-              Return to My Workspace
-            </Link>
-          )}
+        <div className="flex flex-col sm:flex-row justify-center gap-3">
+          <button
+            onClick={handleQuickAdminLogin}
+            className="px-5 py-2.5 bg-gradient-to-r from-purple-600 to-cyan-600 hover:from-purple-500 hover:to-cyan-500 text-white rounded-lg text-sm font-bold transition-all shadow-lg shadow-purple-950 flex items-center justify-center space-x-2"
+          >
+            <ShieldCheck className="w-4 h-4" />
+            <span>1-Click Sign In as Administrator (Demo)</span>
+          </button>
           <Link
             href="/login"
-            className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-sm font-semibold transition-colors shadow-lg shadow-purple-950"
+            className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-sm font-semibold transition-colors flex items-center justify-center"
           >
-            Sign In as Administrator
+            Go to Login Page
           </Link>
         </div>
       </div>
@@ -508,9 +521,7 @@ export default function AdminPortalPage() {
                           {item.short_description}
                         </td>
                         <td className="px-4 py-3 font-mono">
-                          {item.standard_charge !== undefined && item.standard_charge !== null
-                            ? `$${item.standard_charge.toFixed(2)}`
-                            : "—"}
+                          {formatCharge(item.standard_charge)}
                         </td>
                         <td className="px-4 py-3">
                           {item.requires_prior_auth ? (
