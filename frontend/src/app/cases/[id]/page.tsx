@@ -26,9 +26,11 @@ import {
   ShieldAlert,
   ShieldCheck,
   Sparkles,
+  Stethoscope,
   Unlock,
   XCircle,
 } from "lucide-react";
+import { ClinicalExplanationViewer } from "@/components/ClinicalExplanationViewer";
 import {
   acquireReviewLock,
   explainCase,
@@ -971,10 +973,17 @@ export default function CaseDetailPage() {
               )}
 
               {isExplanationExpanded && (
-                <div className="p-3.5 bg-slate-950/70 max-h-[500px] overflow-y-auto space-y-2 border-t border-slate-900">
+                <div className="p-3.5 bg-slate-950/70 border-t border-slate-900">
                   {caseData.detailed_explanation || caseData.justification ? (
-                    <FormattedExplanation
+                    <ClinicalExplanationViewer
                       content={caseData.detailed_explanation || caseData.justification || ""}
+                      caseId={caseData.case_id}
+                      ruleIdMatched={caseData.rule_id_matched}
+                      decisionConfidence={caseData.decision_confidence}
+                      currentDecision={caseData.current_decision}
+                      modelSource={modelSource || (caseData.agent_findings?.explanation_model as string)}
+                      onRefresh={handleGenerateExplanation}
+                      isRefreshing={explaining}
                     />
                   ) : (
                     <div className="p-4 bg-slate-900/80 border border-indigo-900/40 rounded-lg text-center space-y-2">
@@ -1003,7 +1012,7 @@ export default function CaseDetailPage() {
               <div className="p-3.5 bg-slate-950/80 border border-slate-800 rounded-xl space-y-2.5">
                 <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
                   <span className="text-[10px] font-bold text-slate-300 uppercase tracking-wider">Multi-Agent Diagnostics</span>
-                  <span className="text-[10px] text-cyan-400 font-mono">Spec 05 Pipeline</span>
+                  <span className="text-[10px] text-cyan-400 font-mono">Spec 05 / ADR-015 Pipeline</span>
                 </div>
                 <div className="grid grid-cols-2 gap-2 text-[11px]">
                   {/* KYC Card */}
@@ -1091,6 +1100,45 @@ export default function CaseDetailPage() {
                     </div>
                     <div className="text-[10px] text-slate-400">
                       Fraud Score: {(((caseData.agent_findings.fraud?.fraud_score ?? caseData.agent_findings.fraud?.score) || 0) * 100).toFixed(0)}%
+                    </div>
+                  </div>
+
+                  {/* Clinical Alignment Card (Stage B ADR-015) */}
+                  <div className="col-span-2 p-2.5 rounded-lg bg-emerald-950/20 border border-emerald-900/60 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-1.5">
+                        <Stethoscope className="w-3.5 h-3.5 text-emerald-400" />
+                        <span className="font-semibold text-emerald-200">Clinical Alignment Specialist</span>
+                        <span className="px-1.5 py-0.2 rounded text-[8px] font-mono bg-emerald-900/60 text-emerald-300 border border-emerald-800">
+                          ADR-015
+                        </span>
+                      </div>
+                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold ${
+                        (caseData.agent_findings.clinical?.verdict || "PASS") === "PASS"
+                          ? "bg-emerald-950 text-emerald-400 border border-emerald-800"
+                          : caseData.agent_findings.clinical?.verdict === "FAIL"
+                          ? "bg-rose-950 text-rose-400 border border-rose-800"
+                          : "bg-amber-950 text-amber-400 border border-amber-800"
+                      }`}>
+                        {caseData.agent_findings.clinical?.verdict || "PASS"}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between text-[10px] text-slate-300 flex-wrap gap-1">
+                      <span>
+                        Lines Supported:{" "}
+                        <strong className="text-emerald-400 font-mono">
+                          {caseData.agent_findings.clinical?.lines_fully_supported_count ?? caseData.agent_findings.clinical?.lines_supported ?? 1}/
+                          {caseData.agent_findings.clinical?.total_lines_assessed ?? caseData.agent_findings.clinical?.lines_assessed ?? 1}
+                        </strong>
+                      </span>
+                      {caseData.agent_findings.clinical?.bed_day_reconciliation && (
+                        <span>
+                          Stay:{" "}
+                          <strong className="text-indigo-300 font-mono">
+                            {caseData.agent_findings.clinical.bed_day_reconciliation.billed_bed_days} bed day(s)
+                          </strong>
+                        </span>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -1311,96 +1359,5 @@ export default function CaseDetailPage() {
       )}
     </div>
   );
-}
-
-function FormattedExplanation({ content }: { content: string }) {
-  if (!content) return null;
-
-  const lines = content.split("\n");
-  return (
-    <div className="space-y-1.5 text-xs text-slate-300 leading-relaxed font-sans">
-      {lines.map((line, idx) => {
-        const trimmed = line.trim();
-        if (!trimmed) {
-          return <div key={idx} className="h-1" />;
-        }
-        if (trimmed === "---") {
-          return <hr key={idx} className="border-slate-800 my-2" />;
-        }
-        if (trimmed.startsWith("### ")) {
-          return (
-            <h3 key={idx} className="text-xs font-bold text-cyan-300 mt-2.5 mb-1 flex items-center space-x-1.5 border-b border-slate-800/80 pb-1">
-              <span>{trimmed.replace(/^###\s+/, "")}</span>
-            </h3>
-          );
-        }
-        if (trimmed.startsWith("#### ")) {
-          return (
-            <h4 key={idx} className="text-[11px] font-semibold text-slate-200 uppercase tracking-wider mt-2 mb-0.5">
-              {trimmed.replace(/^####\s+/, "")}
-            </h4>
-          );
-        }
-        if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
-          const bulletContent = trimmed.substring(2);
-          return (
-            <div key={idx} className="flex items-start space-x-2 pl-1 text-slate-300">
-              <span className="text-cyan-400 mt-0.5 text-[10px]">&bull;</span>
-              <div className="flex-1">{renderFormattedText(bulletContent)}</div>
-            </div>
-          );
-        }
-        if (trimmed.startsWith("  - ")) {
-          const subContent = trimmed.substring(4);
-          return (
-            <div key={idx} className="flex items-start space-x-2 pl-4 text-slate-400 text-[11px]">
-              <span className="text-slate-500 mt-0.5 text-[9px]">&bull;</span>
-              <div className="flex-1">{renderFormattedText(subContent)}</div>
-            </div>
-          );
-        }
-        return (
-          <p key={idx} className="text-slate-300">
-            {renderFormattedText(trimmed)}
-          </p>
-        );
-      })}
-    </div>
-  );
-}
-
-function renderFormattedText(text: string) {
-  const parts: React.ReactNode[] = [];
-  const regex = /(\*\*.*?\*\*|`.*?`)/g;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = regex.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      parts.push(text.substring(lastIndex, match.index));
-    }
-    const token = match[0];
-    if (token.startsWith("**") && token.endsWith("**")) {
-      parts.push(
-        <strong key={match.index} className="text-slate-100 font-semibold">
-          {token.slice(2, -2)}
-        </strong>
-      );
-    } else if (token.startsWith("`") && token.endsWith("`")) {
-      parts.push(
-        <code
-          key={match.index}
-          className="px-1 py-0.2 rounded bg-slate-900 text-cyan-300 border border-slate-800 font-mono text-[10px]"
-        >
-          {token.slice(1, -1)}
-        </code>
-      );
-    }
-    lastIndex = regex.lastIndex;
-  }
-  if (lastIndex < text.length) {
-    parts.push(text.substring(lastIndex));
-  }
-  return parts.length > 0 ? parts : text;
 }
 
