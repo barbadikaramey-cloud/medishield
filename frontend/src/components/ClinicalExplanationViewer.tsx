@@ -94,11 +94,15 @@ export function sanitizeArchitecturalJargon(text: string): string {
     .replace(/RULE-P4-HIGH-FRAUD/g, "Billing Anomaly Review")
     .replace(/RULE-P7-BORDERLINE-REVIEW/g, "Medical Necessity Review")
     .replace(/RULE-P8-CATCH-ALL/g, "Operational Review")
+    .replace(/\b[Rr]ule\s+P\d+\b/g, "Policy Guideline")
     // Humanize standalone ambiguity/ambiguities in prose
     .replace(/\bAmbiguities\b/g, "Information discrepancies")
     .replace(/\bambiguities\b/g, "information discrepancies")
     .replace(/\bAmbiguity\b/g, "Information discrepancy")
-    .replace(/\bambiguity\b/g, "information discrepancy");
+    .replace(/\bambiguity\b/g, "information discrepancy")
+    // Clean repetitive robotic phrasing
+    .replace(/MediShield's autonomous multi-agent pipeline evaluated claim packet [^\s]+ for member [^\s]+ and (?:recommended|determined)/gi, "Evaluated claim packet for member and recommended")
+    .replace(/Under deterministic rule [^,]+ with calibrated confidence [^,]+,\s*/gi, "");
 }
 
 export interface ClinicalExplanationViewerProps {
@@ -110,6 +114,8 @@ export interface ClinicalExplanationViewerProps {
   modelSource?: string | null;
   onRefresh?: () => void;
   isRefreshing?: boolean;
+  selectedCategory?: string;
+  onCategoryChange?: (category: string) => void;
 }
 
 interface ParsedSection {
@@ -147,7 +153,16 @@ const CATEGORY_CONFIG: Record<
     accentBg: "bg-cyan-950/15",
     badgeBg: "bg-cyan-950/80 border-cyan-800/80",
     badgeText: "text-cyan-300",
-    shortLabel: "Executive",
+    shortLabel: "Summary",
+  },
+  clinical: {
+    name: "Medical Necessity & Clinical Alignment",
+    icon: Stethoscope,
+    accentBorder: "border-emerald-500/50",
+    accentBg: "bg-emerald-950/20",
+    badgeBg: "bg-emerald-950/90 border-emerald-700/80",
+    badgeText: "text-emerald-300",
+    shortLabel: "Medical Necessity",
   },
   kyc: {
     name: "Member Identity & KYC",
@@ -156,7 +171,7 @@ const CATEGORY_CONFIG: Record<
     accentBg: "bg-sky-950/10",
     badgeBg: "bg-sky-950/80 border-sky-800/80",
     badgeText: "text-sky-300",
-    shortLabel: "1. KYC",
+    shortLabel: "Identity",
   },
   claims: {
     name: "Claims Financial & Lines",
@@ -165,7 +180,7 @@ const CATEGORY_CONFIG: Record<
     accentBg: "bg-blue-950/10",
     badgeBg: "bg-blue-950/80 border-blue-800/80",
     badgeText: "text-blue-300",
-    shortLabel: "2. Claims",
+    shortLabel: "Billing",
   },
   policy: {
     name: "Policy Coverage & Benefit",
@@ -174,52 +189,43 @@ const CATEGORY_CONFIG: Record<
     accentBg: "bg-purple-950/10",
     badgeBg: "bg-purple-950/80 border-purple-800/80",
     badgeText: "text-purple-300",
-    shortLabel: "3. Policy",
+    shortLabel: "Coverage",
   },
   fraud: {
-    name: "Fraud Risk & Anomaly",
+    name: "Risk & Anomaly Assessment",
     icon: Radar,
     accentBorder: "border-amber-500/30",
     accentBg: "bg-amber-950/10",
     badgeBg: "bg-amber-950/80 border-amber-800/80",
     badgeText: "text-amber-300",
-    shortLabel: "4. Fraud",
+    shortLabel: "Risk",
   },
   consistency: {
-    name: "Cross-Doc Consistency",
+    name: "Cross-Document Attestation",
     icon: FileCheck,
     accentBorder: "border-indigo-500/30",
     accentBg: "bg-indigo-950/10",
     badgeBg: "bg-indigo-950/80 border-indigo-800/80",
     badgeText: "text-indigo-300",
-    shortLabel: "5. Attestation",
-  },
-  clinical: {
-    name: "Clinical Alignment & Medical Necessity",
-    icon: Stethoscope,
-    accentBorder: "border-emerald-500/50",
-    accentBg: "bg-emerald-950/20",
-    badgeBg: "bg-emerald-950/90 border-emerald-700/80",
-    badgeText: "text-emerald-300",
-    shortLabel: "6. Clinical Alignment",
+    shortLabel: "Attestation",
   },
   guidance: {
-    name: "Reviewer Action Guidance",
+    name: "Reviewer Guidance & Actions",
     icon: Compass,
     accentBorder: "border-cyan-500/30",
     accentBg: "bg-cyan-950/10",
     badgeBg: "bg-cyan-950/80 border-cyan-800/80",
     badgeText: "text-cyan-300",
-    shortLabel: "7. Guidance",
+    shortLabel: "Next Steps",
   },
   other: {
-    name: "Additional Rationale",
+    name: "Additional Details",
     icon: Info,
     accentBorder: "border-slate-800",
     accentBg: "bg-slate-900/40",
     badgeBg: "bg-slate-800 border-slate-700",
     badgeText: "text-slate-300",
-    shortLabel: "Other",
+    shortLabel: "Details",
   },
 };
 
@@ -232,8 +238,16 @@ export function ClinicalExplanationViewer({
   modelSource,
   onRefresh,
   isRefreshing,
+  selectedCategory,
+  onCategoryChange,
 }: ClinicalExplanationViewerProps) {
-  const [activeCategory, setActiveCategory] = useState<string>("all");
+  const [internalCategory, setInternalCategory] = useState<string>("all");
+  const activeCategory = selectedCategory !== undefined ? selectedCategory : internalCategory;
+  const setActiveCategory = (cat: string) => {
+    setInternalCategory(cat);
+    onCategoryChange?.(cat);
+  };
+
   const [searchQuery, setSearchQuery] = useState("");
   const [isReaderModalOpen, setIsReaderModalOpen] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -256,14 +270,23 @@ export function ClinicalExplanationViewer({
     for (const line of rawLines) {
       const trimmed = line.trim();
 
+      // Skip lines that duplicate verdict header in executive section
+      if (
+        trimmed.startsWith("**Adjudication Policy Rule:**") ||
+        trimmed.startsWith("**Escalation Review Reason:**") ||
+        trimmed === "---"
+      ) {
+        continue;
+      }
+
       // Check section header: ### Executive or #### 1-7
       if (trimmed.startsWith("### ")) {
-        if (currentSection) {
+        if (currentSection && currentSection.rawLines.length > 0) {
           result.push(currentSection);
         }
         currentSection = {
           id: "sec-executive",
-          title: sanitizeArchitecturalJargon(trimmed.replace(/^###\s+/, "")),
+          title: "Executive Summary",
           category: "executive",
           rawLines: [],
         };
@@ -271,14 +294,17 @@ export function ClinicalExplanationViewer({
       }
 
       if (trimmed.startsWith("#### ")) {
-        if (currentSection) {
+        if (currentSection && currentSection.rawLines.length > 0) {
           result.push(currentSection);
         }
-        const title = sanitizeArchitecturalJargon(trimmed.replace(/^####\s+/, ""));
+        const cleanTitleText = trimmed.replace(/^####\s+/, "");
+        const title = sanitizeArchitecturalJargon(cleanTitleText);
         let category: ParsedSection["category"] = "other";
         const lowerTitle = title.toLowerCase();
 
-        if (lowerTitle.includes("kyc") || lowerTitle.includes("identity") || lowerTitle.includes("1.")) {
+        if (lowerTitle.includes("executive") || lowerTitle.includes("summary")) {
+          category = "executive";
+        } else if (lowerTitle.includes("kyc") || lowerTitle.includes("identity") || lowerTitle.includes("1.")) {
           category = "kyc";
         } else if (lowerTitle.includes("claims") || lowerTitle.includes("financial") || lowerTitle.includes("2.")) {
           category = "claims";
@@ -296,7 +322,7 @@ export function ClinicalExplanationViewer({
 
         currentSection = {
           id: `sec-${category}-${result.length}`,
-          title,
+          title: title.replace(/^\d+\.\s*/, ""),
           category,
           rawLines: [],
         };
@@ -304,19 +330,22 @@ export function ClinicalExplanationViewer({
       }
 
       if (currentSection) {
-        currentSection.rawLines.push(sanitizeArchitecturalJargon(line));
+        const sanitized = sanitizeArchitecturalJargon(line);
+        if (sanitized.trim() || currentSection.rawLines.length > 0) {
+          currentSection.rawLines.push(sanitized);
+        }
       } else if (trimmed) {
         // Initial lines before any header
         currentSection = {
           id: "sec-intro",
-          title: "Adjudication Summary",
+          title: "Executive Summary",
           category: "executive",
           rawLines: [sanitizeArchitecturalJargon(line)],
         };
       }
     }
 
-    if (currentSection) {
+    if (currentSection && currentSection.rawLines.length > 0) {
       result.push(currentSection);
     }
 
@@ -370,13 +399,13 @@ export function ClinicalExplanationViewer({
                 : "text-slate-400 hover:text-slate-200 hover:bg-slate-900"
             }`}
           >
-            <span>All Sections</span>
+            <span>All</span>
             <span className="px-1.5 py-0.2 rounded-full text-[9px] bg-slate-900 text-slate-400 border border-slate-800">
               {sections.length}
             </span>
           </button>
 
-          {/* Clinical Alignment Priority Tab */}
+          {/* Medical Necessity Priority Tab */}
           {sections.some((s) => s.category === "clinical") && (
             <button
               type="button"
@@ -388,15 +417,12 @@ export function ClinicalExplanationViewer({
               }`}
             >
               <HeartPulse className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Clinical Alignment</span>
-              <span className="px-1.5 py-0.2 rounded-full text-[9px] bg-emerald-900/80 text-emerald-200 border border-emerald-700">
-                Medical Necessity
-              </span>
+              <span>Medical Necessity</span>
             </button>
           )}
 
-          {/* Other Categories */}
-          {["executive", "claims", "policy", "fraud", "consistency", "guidance"].map((cat) => {
+          {/* Other Categories in clean logical order */}
+          {["executive", "claims", "policy", "kyc", "fraud", "consistency", "guidance"].map((cat) => {
             const hasCat = sections.some((s) => s.category === cat);
             if (!hasCat) return null;
             const cfg = CATEGORY_CONFIG[cat];
@@ -644,35 +670,7 @@ function SectionCard({
           </button>
         </div>
 
-        <div className="flex items-center justify-between flex-wrap gap-3 bg-slate-900/80 p-3 rounded-lg border border-slate-800">
-          <div className="flex items-center space-x-2">
-            <span
-              className={`px-2.5 py-1 rounded-md text-xs font-bold uppercase tracking-wider ${
-                decisionBadge === "APPROVE"
-                  ? "bg-emerald-950 text-emerald-400 border border-emerald-800"
-                  : decisionBadge === "REJECT"
-                  ? "bg-rose-950 text-rose-400 border border-rose-800"
-                  : "bg-amber-950 text-amber-400 border border-amber-800"
-              }`}
-            >
-              Outcome: {decisionBadge}
-            </span>
-            {ruleId && (
-              <span className="px-2 py-1 rounded-md text-xs font-medium bg-slate-800 text-slate-200 border border-slate-700">
-                Policy: {formatRuleLabel(ruleId)}
-              </span>
-            )}
-          </div>
 
-          {confidence !== undefined && confidence !== null && (
-            <div className="flex items-center space-x-2">
-              <span className="text-[11px] text-slate-400">Calibrated Confidence:</span>
-              <span className="text-sm font-bold font-mono text-cyan-300">
-                {(confidence * 100).toFixed(0)}%
-              </span>
-            </div>
-          )}
-        </div>
 
         <div className="space-y-1.5 text-xs text-slate-200 leading-relaxed">
           {section.rawLines.map((line, idx) => (

@@ -89,6 +89,7 @@ export default function CaseDetailPage() {
   const [explaining, setExplaining] = useState(false);
   const [explainError, setExplainError] = useState<string | null>(null);
   const [modelSource, setModelSource] = useState<string | null>(null);
+  const [selectedCategory, setSelectedCategory] = useState<string>("all");
 
   const handleCopyExplanation = (text: string) => {
     if (!text) return;
@@ -840,312 +841,257 @@ export default function CaseDetailPage() {
           </div>
         </div>
 
-        {/* Right Column: Adjudication Engine & Operator Decision Console */}
+        {/* Right Column: Adjudication Decision & Operator Console */}
         <div className="lg:col-span-5 space-y-4">
-          {/* AI Autonomous Verdict Card */}
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4 shadow-lg">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h2 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
-                Autonomous Adjudication Engine
-              </h2>
-              <span className="text-[10px] font-mono text-cyan-400">Adjudication Policy Engine</span>
+          {/* Adjudication Decision Card */}
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 sm:p-5 space-y-4 shadow-lg">
+            {/* Top Header */}
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center space-x-2">
+                <Sparkles className="w-4 h-4 text-cyan-400" />
+                <h2 className="text-xs font-bold text-slate-200 uppercase tracking-wider">
+                  Adjudication Decision
+                </h2>
+              </div>
+              <div className="flex items-center space-x-2">
+                <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-full text-[10px] font-mono bg-slate-800 text-cyan-300 border border-slate-700">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block" />
+                  <span>
+                    {(modelSource || (caseData.agent_findings?.explanation_model as string) || "Groq LLM")
+                      .replace(/\s*\/\s*ADR-\d+\s*Engine/gi, "")
+                      .replace(/Clinical Review Standard/gi, "")
+                      .trim()}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleGenerateExplanation}
+                  disabled={explaining}
+                  className="flex items-center space-x-1 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-[10px] font-medium transition border border-slate-700 disabled:opacity-50"
+                  title="Synthesize fresh clinical narrative via Groq LLM"
+                >
+                  <RefreshCw className={`w-3 h-3 ${explaining ? "animate-spin text-cyan-400" : "text-slate-400"}`} />
+                  <span>{explaining ? "Updating..." : "Refresh"}</span>
+                </button>
+                {(caseData.detailed_explanation || caseData.justification) && (
+                  <button
+                    type="button"
+                    onClick={() => handleCopyExplanation(caseData.detailed_explanation || caseData.justification || "")}
+                    className="flex items-center space-x-1 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-[10px] font-mono transition border border-slate-700"
+                    title="Copy explanation markdown"
+                  >
+                    {copiedExplanation ? (
+                      <>
+                        <Check className="w-3 h-3 text-emerald-400" />
+                        <span className="text-emerald-400 font-sans">Copied</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3 h-3 text-slate-400" />
+                        <span className="font-sans">Copy</span>
+                      </>
+                    )}
+                  </button>
+                )}
+              </div>
             </div>
 
-            <div className="flex items-center justify-between bg-slate-950 p-4 rounded-xl border border-slate-800">
-              <div>
-                <span className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold block">
-                  Recommended Outcome
-                </span>
-                <div className="text-xl font-bold mt-1">
-                  {caseData.current_decision === "APPROVE" ? (
-                    <span className="text-emerald-400 flex items-center space-x-1.5">
-                      <CheckCircle2 className="w-5 h-5" />
-                      <span>APPROVE CLAIM</span>
+            {/* Unified Hero Verdict Bar */}
+            <div className={`p-3.5 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+              caseData.current_decision === "APPROVE"
+                ? "bg-emerald-950/30 border-emerald-800/70"
+                : caseData.current_decision === "REJECT"
+                ? "bg-rose-950/30 border-rose-800/70"
+                : "bg-amber-950/30 border-amber-800/70"
+            }`}>
+              <div className="flex items-center space-x-3">
+                <div className={`p-2 rounded-lg border ${
+                  caseData.current_decision === "APPROVE"
+                    ? "bg-emerald-950 text-emerald-400 border-emerald-700"
+                    : caseData.current_decision === "REJECT"
+                    ? "bg-rose-950 text-rose-400 border-rose-700"
+                    : "bg-amber-950 text-amber-400 border-amber-700"
+                }`}>
+                  {caseData.current_decision === "APPROVE" && <CheckCircle2 className="w-5 h-5" />}
+                  {caseData.current_decision === "REJECT" && <XCircle className="w-5 h-5" />}
+                  {caseData.current_decision === "ESCALATE" && <AlertTriangle className="w-5 h-5" />}
+                  {!["APPROVE", "REJECT", "ESCALATE"].includes(caseData.current_decision || "") && (
+                    <Clock className="w-5 h-5 text-slate-400" />
+                  )}
+                </div>
+                <div>
+                  <div className="flex items-center space-x-2 flex-wrap">
+                    <span className="text-base font-bold text-white tracking-wide">
+                      {caseData.current_decision === "APPROVE"
+                        ? "APPROVED"
+                        : caseData.current_decision === "REJECT"
+                        ? "DENIED"
+                        : caseData.current_decision === "ESCALATE"
+                        ? "NEEDS REVIEW"
+                        : "IN PROGRESS"}
                     </span>
-                  ) : caseData.current_decision === "REJECT" ? (
-                    <span className="text-rose-400 flex items-center space-x-1.5">
-                      <XCircle className="w-5 h-5" />
-                      <span>REJECT CLAIM</span>
-                    </span>
-                  ) : caseData.current_decision === "ESCALATE" ? (
-                    <span className="text-amber-400 flex items-center space-x-1.5">
-                      <AlertTriangle className="w-5 h-5" />
-                      <span>ESCALATE REVIEW</span>
-                    </span>
-                  ) : (
-                    <span className="text-slate-500">In Progress...</span>
+                    {caseData.rule_id_matched && (
+                      <span className="text-xs text-slate-300 font-medium">
+                        &bull; {formatRuleLabel(caseData.rule_id_matched)}
+                      </span>
+                    )}
+                  </div>
+                  {caseData.current_sub_reason && (
+                    <div className="text-xs text-amber-300/90 font-medium mt-0.5">
+                      Trigger: {formatSubReason(caseData.current_sub_reason)}
+                    </div>
                   )}
                 </div>
               </div>
 
               {caseData.decision_confidence !== null && caseData.decision_confidence !== undefined && (
-                <div className="text-right">
-                  <span className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold block">
+                <div className="sm:text-right flex sm:flex-col items-baseline sm:items-end justify-between border-t sm:border-t-0 pt-2 sm:pt-0 border-slate-800/60">
+                  <span className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">
                     Confidence
                   </span>
-                  <span className="text-lg font-bold font-mono text-cyan-400">
+                  <span className="text-base font-bold font-mono text-cyan-300">
                     {(caseData.decision_confidence * 100).toFixed(0)}%
                   </span>
                 </div>
               )}
             </div>
 
-            {/* Escalation Reason Callout */}
-            {caseData.current_sub_reason && (
-              <div className="p-3 bg-amber-950/40 border border-amber-800/80 rounded-xl text-xs flex items-center justify-between">
-                <div className="text-amber-300 font-semibold flex items-center space-x-1.5">
-                  <AlertCircle className="w-4 h-4 text-amber-400 flex-shrink-0" />
-                  <span>Escalation Reason: {formatSubReason(caseData.current_sub_reason)}</span>
-                </div>
-                {caseData.rule_id_matched && (
-                  <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-amber-900/60 text-amber-200 border border-amber-700">
-                    {formatRuleLabel(caseData.rule_id_matched)}
+            {/* Specialist Quick-Status Strip */}
+            {caseData.agent_findings && (
+              <div className="grid grid-cols-5 gap-1.5 p-1 bg-slate-950/80 rounded-lg border border-slate-800/80 text-[11px]">
+                {/* Identity */}
+                <button
+                  type="button"
+                  onClick={() => setSelectedCategory("kyc")}
+                  className={`p-1.5 rounded flex flex-col items-center justify-center transition border ${
+                    selectedCategory === "kyc"
+                      ? "bg-slate-800 border-sky-600/70"
+                      : "border-transparent hover:bg-slate-900"
+                  }`}
+                  title="View Identity Verification"
+                >
+                  <span className="text-[10px] text-slate-400 font-medium">Identity</span>
+                  <span className={`text-[10px] font-bold font-mono ${
+                    caseData.agent_findings.kyc?.verdict === "PASS" ? "text-emerald-400" :
+                    caseData.agent_findings.kyc?.verdict === "FAIL" ? "text-rose-400" : "text-amber-400"
+                  }`}>
+                    {caseData.agent_findings.kyc?.verdict || "PASS"}
                   </span>
-                )}
+                </button>
+
+                {/* Billing */}
+                <button
+                  type="button"
+                  onClick={() => setSelectedCategory("claims")}
+                  className={`p-1.5 rounded flex flex-col items-center justify-center transition border ${
+                    selectedCategory === "claims"
+                      ? "bg-slate-800 border-blue-600/70"
+                      : "border-transparent hover:bg-slate-900"
+                  }`}
+                  title="View Billing & Financial Lines"
+                >
+                  <span className="text-[10px] text-slate-400 font-medium">Billing</span>
+                  <span className={`text-[10px] font-bold font-mono ${
+                    caseData.agent_findings.claims?.verdict === "PASS" ? "text-emerald-400" :
+                    caseData.agent_findings.claims?.verdict === "FAIL" ? "text-rose-400" : "text-amber-400"
+                  }`}>
+                    {caseData.agent_findings.claims?.line_items_sum_valid ? "Valid" : "Review"}
+                  </span>
+                </button>
+
+                {/* Coverage */}
+                <button
+                  type="button"
+                  onClick={() => setSelectedCategory("policy")}
+                  className={`p-1.5 rounded flex flex-col items-center justify-center transition border ${
+                    selectedCategory === "policy"
+                      ? "bg-slate-800 border-purple-600/70"
+                      : "border-transparent hover:bg-slate-900"
+                  }`}
+                  title="View Policy Coverage"
+                >
+                  <span className="text-[10px] text-slate-400 font-medium">Coverage</span>
+                  <span className="text-[10px] font-bold font-mono text-purple-300">
+                    {caseData.agent_findings.policy?.coverage_percentage ? `${caseData.agent_findings.policy.coverage_percentage}%` : "100%"}
+                  </span>
+                </button>
+
+                {/* Risk */}
+                <button
+                  type="button"
+                  onClick={() => setSelectedCategory("fraud")}
+                  className={`p-1.5 rounded flex flex-col items-center justify-center transition border ${
+                    selectedCategory === "fraud"
+                      ? "bg-slate-800 border-amber-600/70"
+                      : "border-transparent hover:bg-slate-900"
+                  }`}
+                  title="View Fraud & Anomaly Risk"
+                >
+                  <span className="text-[10px] text-slate-400 font-medium">Risk</span>
+                  <span className={`text-[10px] font-bold font-mono ${
+                    (caseData.agent_findings.fraud?.risk_level || "LOW") === "LOW" ? "text-emerald-400" :
+                    caseData.agent_findings.fraud?.risk_level === "HIGH" ? "text-rose-400" : "text-amber-400"
+                  }`}>
+                    {caseData.agent_findings.fraud?.risk_level || "LOW"}
+                  </span>
+                </button>
+
+                {/* Medical Necessity */}
+                <button
+                  type="button"
+                  onClick={() => setSelectedCategory("clinical")}
+                  className={`p-1.5 rounded flex flex-col items-center justify-center transition border ${
+                    selectedCategory === "clinical"
+                      ? "bg-emerald-950 border-emerald-600 font-bold"
+                      : "bg-emerald-950/20 border-emerald-900/40 hover:bg-emerald-950/40"
+                  }`}
+                  title="View Medical Necessity & Alignment"
+                >
+                  <span className="text-[10px] text-emerald-300 font-medium truncate max-w-full">Necessity</span>
+                  <span className="text-[10px] font-bold font-mono text-emerald-400">
+                    {caseData.agent_findings.clinical?.verdict || "Met"}
+                  </span>
+                </button>
               </div>
             )}
 
-            {/* AI Decision Analysis & Clinical Rationale */}
-            <div className="bg-slate-950/90 border border-indigo-900/70 rounded-xl overflow-hidden shadow-xl space-y-0">
-              <div className="bg-gradient-to-r from-indigo-950/90 via-slate-900 to-slate-950 px-3.5 py-2.5 border-b border-indigo-900/40 flex items-center justify-between flex-wrap gap-2">
-                <div className="flex items-center space-x-2">
-                  <Sparkles className="w-4 h-4 text-cyan-400 animate-pulse flex-shrink-0" />
-                  <span className="text-xs font-bold text-slate-100 uppercase tracking-wider flex items-center gap-1.5 flex-wrap">
-                    <span>AI Decision Analysis & Clinical Rationale</span>
-                    {caseData.rule_id_matched && (
-                      <span className="px-1.5 py-0.5 rounded text-[9px] font-medium bg-cyan-950 text-cyan-300 border border-cyan-800">
-                        {formatRuleLabel(caseData.rule_id_matched)}
-                      </span>
-                    )}
-                    <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-indigo-950 text-indigo-300 border border-indigo-800 flex items-center gap-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping inline-block" />
-                      <span>{(modelSource || (caseData.agent_findings?.explanation_model as string) || "LLM Clinical Synthesizer").replace(/\s*\/\s*ADR-\d+\s*Engine/gi, "")}</span>
-                    </span>
-                  </span>
-                </div>
-                <div className="flex items-center space-x-1.5">
-                  <button
-                    type="button"
-                    onClick={handleGenerateExplanation}
-                    disabled={explaining}
-                    className="flex items-center space-x-1 px-2 py-1 rounded bg-indigo-900/60 hover:bg-indigo-800 text-indigo-200 hover:text-white text-[10px] font-medium transition border border-indigo-700 disabled:opacity-50"
-                    title="Synthesize fresh clinical narrative via Groq LLM / Decision Engine"
-                  >
-                    <RefreshCw className={`w-3 h-3 ${explaining ? "animate-spin text-cyan-400" : "text-indigo-300"}`} />
-                    <span>{explaining ? "Synthesizing..." : "Refresh LLM"}</span>
-                  </button>
-                  {(caseData.detailed_explanation || caseData.justification) && (
-                    <button
-                      type="button"
-                      onClick={() => handleCopyExplanation(caseData.detailed_explanation || caseData.justification || "")}
-                      className="flex items-center space-x-1 px-2 py-1 rounded bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white text-[10px] font-mono transition border border-slate-700"
-                      title="Copy explanation markdown"
-                    >
-                      {copiedExplanation ? (
-                        <>
-                          <Check className="w-3 h-3 text-emerald-400" />
-                          <span className="text-emerald-400 font-sans">Copied</span>
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="w-3 h-3 text-slate-400" />
-                          <span className="font-sans">Copy</span>
-                        </>
-                      )}
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => setIsExplanationExpanded(!isExplanationExpanded)}
-                    className="p-1 rounded bg-slate-800/80 hover:bg-slate-700 text-slate-400 hover:text-white transition"
-                    title={isExplanationExpanded ? "Collapse section" : "Expand section"}
-                  >
-                    {isExplanationExpanded ? (
-                      <ChevronUp className="w-3.5 h-3.5" />
-                    ) : (
-                      <ChevronDown className="w-3.5 h-3.5" />
-                    )}
-                  </button>
-                </div>
+            {explainError && (
+              <div className="p-3 bg-rose-950/60 border border-rose-900/50 rounded-lg text-rose-300 text-xs flex items-center space-x-2">
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+                <span>{explainError}</span>
               </div>
+            )}
 
-              {explainError && (
-                <div className="px-3.5 py-2 bg-rose-950/60 border-b border-rose-900/50 text-rose-300 text-[11px] flex items-center space-x-2">
-                  <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-400" />
-                  <span>{explainError}</span>
-                </div>
-              )}
-
-              {isExplanationExpanded && (
-                <div className="p-3.5 bg-slate-950/70 border-t border-slate-900">
-                  {caseData.detailed_explanation || caseData.justification ? (
-                    <ClinicalExplanationViewer
-                      content={caseData.detailed_explanation || caseData.justification || ""}
-                      caseId={caseData.case_id}
-                      ruleIdMatched={caseData.rule_id_matched}
-                      decisionConfidence={caseData.decision_confidence}
-                      currentDecision={caseData.current_decision}
-                      modelSource={modelSource || (caseData.agent_findings?.explanation_model as string)}
-                      onRefresh={handleGenerateExplanation}
-                      isRefreshing={explaining}
-                    />
-                  ) : (
-                    <div className="p-4 bg-slate-900/80 border border-indigo-900/40 rounded-lg text-center space-y-2">
-                      <Sparkles className="w-5 h-5 text-cyan-400 mx-auto animate-bounce" />
-                      <div className="text-xs font-semibold text-white">No Clinical Explanation Generated Yet</div>
-                      <p className="text-[11px] text-slate-400 max-w-md mx-auto">
-                        Synthesize an authoritative, multi-agent clinical audit narrative grounded in policy clauses and line-item arithmetic using Groq LLM.
-                      </p>
-                      <button
-                        type="button"
-                        onClick={handleGenerateExplanation}
-                        disabled={explaining}
-                        className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition shadow-md disabled:opacity-50"
-                      >
-                        <Sparkles className="w-3.5 h-3.5" />
-                        <span>{explaining ? "Synthesizing with LLM..." : "Synthesize AI Explanation"}</span>
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* AI Specialist Findings & Diagnostics */}
-            {caseData.agent_findings && (
-              <div className="p-3.5 bg-slate-950/80 border border-slate-800 rounded-xl space-y-2.5">
-                <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
-                  <span className="text-[10px] font-bold text-slate-300 uppercase tracking-wider">Multi-Agent Diagnostics</span>
-                  <span className="text-[10px] text-cyan-400 font-mono">Clinical Adjudication Pipeline</span>
-                </div>
-                <div className="grid grid-cols-2 gap-2 text-[11px]">
-                  {/* KYC Card */}
-                  <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 space-y-1">
-                    <div className="flex items-center justify-between">
-                      <span className="font-semibold text-slate-300">KYC Identity</span>
-                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold ${
-                        caseData.agent_findings.kyc?.verdict === "PASS" ? "bg-emerald-950 text-emerald-400 border border-emerald-800" :
-                        caseData.agent_findings.kyc?.verdict === "FAIL" ? "bg-rose-950 text-rose-400 border border-rose-800" : "bg-amber-950 text-amber-400 border border-amber-800"
-                      }`}>
-                        {caseData.agent_findings.kyc?.verdict || "INDETERMINATE"}
-                      </span>
-                    </div>
-                    <div className="text-[10px] text-slate-400">
-                      Member DB: {caseData.agent_findings.kyc?.member_db_matched ? "Matched" : "Unmatched"}
-                    </div>
-                    {caseData.agent_findings.kyc?.tamper_score !== undefined && (
-                      <div className="text-[10px] text-slate-400">
-                        Tamper: {(caseData.agent_findings.kyc.tamper_score * 100).toFixed(0)}%
-                      </div>
-                    )}
-                    {caseData.agent_findings.kyc?.flags && caseData.agent_findings.kyc.flags.length > 0 && (
-                      <div className="pt-1 flex flex-wrap gap-1">
-                        {caseData.agent_findings.kyc.flags.map((f: string) => (
-                          <span key={f} className="px-1.5 py-0.5 bg-rose-950/80 text-rose-300 border border-rose-800/80 rounded text-[9px] font-mono">
-                            {f}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Claims Card */}
-                  <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 space-y-1">
-                    <div className="flex items-center justify-between">
-                      <span className="font-semibold text-slate-300">Claims Extraction</span>
-                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold ${
-                        caseData.agent_findings.claims?.verdict === "PASS" ? "bg-emerald-950 text-emerald-400 border border-emerald-800" :
-                        caseData.agent_findings.claims?.verdict === "FAIL" ? "bg-rose-950 text-rose-400 border border-rose-800" : "bg-amber-950 text-amber-400 border border-amber-800"
-                      }`}>
-                        {caseData.agent_findings.claims?.verdict || "INDETERMINATE"}
-                      </span>
-                    </div>
-                    <div className="text-[10px] text-slate-400">
-                      Line Math: {caseData.agent_findings.claims?.line_items_sum_valid ? "Valid" : "Incomplete"}
-                    </div>
-                    {caseData.agent_findings.claims?.claim_amount !== undefined && (
-                      <div className="text-[10px] text-slate-300 font-mono">
-                        Total: ${(caseData.agent_findings.claims.claim_amount?.value ?? caseData.agent_findings.claims.claim_amount ?? 0).toLocaleString()}
-                      </div>
-                    )}
-                    {caseData.agent_findings.claims?.validation_errors && caseData.agent_findings.claims.validation_errors.length > 0 && (
-                      <div className="pt-1 text-[9px] text-amber-400 font-mono truncate" title={caseData.agent_findings.claims.validation_errors[0]}>
-                        {caseData.agent_findings.claims.validation_errors[0]}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Policy Card */}
-                  <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 space-y-1">
-                    <div className="flex items-center justify-between">
-                      <span className="font-semibold text-slate-300">Policy Coverage</span>
-                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold ${
-                        caseData.agent_findings.policy?.verdict === "PASS" ? "bg-emerald-950 text-emerald-400 border border-emerald-800" :
-                        caseData.agent_findings.policy?.verdict === "FAIL" ? "bg-rose-950 text-rose-400 border border-rose-800" : "bg-amber-950 text-amber-400 border border-amber-800"
-                      }`}>
-                        {caseData.agent_findings.policy?.verdict || "INDETERMINATE"}
-                      </span>
-                    </div>
-                    <div className="text-[10px] text-slate-400">
-                      Coverage: {caseData.agent_findings.policy?.coverage_percentage ? `${caseData.agent_findings.policy.coverage_percentage}%` : "Pending"}
-                    </div>
-                  </div>
-
-                  {/* Fraud Card */}
-                  <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 space-y-1">
-                    <div className="flex items-center justify-between">
-                      <span className="font-semibold text-slate-300">Fraud Engine</span>
-                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold ${
-                        (caseData.agent_findings.fraud?.risk_level || "LOW") === "LOW" ? "bg-emerald-950 text-emerald-400 border border-emerald-800" :
-                        caseData.agent_findings.fraud?.risk_level === "HIGH" ? "bg-rose-950 text-rose-400 border border-rose-800" : "bg-amber-950 text-amber-400 border border-amber-800"
-                      }`}>
-                        {caseData.agent_findings.fraud?.risk_level || "LOW"}
-                      </span>
-                    </div>
-                    <div className="text-[10px] text-slate-400">
-                      Fraud Score: {(((caseData.agent_findings.fraud?.fraud_score ?? caseData.agent_findings.fraud?.score) || 0) * 100).toFixed(0)}%
-                    </div>
-                  </div>
-
-                  {/* Clinical Alignment Card */}
-                  <div className="col-span-2 p-2.5 rounded-lg bg-emerald-950/20 border border-emerald-900/60 space-y-1">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center space-x-1.5">
-                        <Stethoscope className="w-3.5 h-3.5 text-emerald-400" />
-                        <span className="font-semibold text-emerald-200">Clinical Alignment Specialist</span>
-                        <span className="px-1.5 py-0.2 rounded text-[8px] font-mono bg-emerald-900/60 text-emerald-300 border border-emerald-800">
-                          Medical Necessity
-                        </span>
-                      </div>
-                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold ${
-                        (caseData.agent_findings.clinical?.verdict || "PASS") === "PASS"
-                          ? "bg-emerald-950 text-emerald-400 border border-emerald-800"
-                          : caseData.agent_findings.clinical?.verdict === "FAIL"
-                          ? "bg-rose-950 text-rose-400 border border-rose-800"
-                          : "bg-amber-950 text-amber-400 border border-amber-800"
-                      }`}>
-                        {caseData.agent_findings.clinical?.verdict || "PASS"}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between text-[10px] text-slate-300 flex-wrap gap-1">
-                      <span>
-                        Lines Supported:{" "}
-                        <strong className="text-emerald-400 font-mono">
-                          {caseData.agent_findings.clinical?.lines_fully_supported_count ?? caseData.agent_findings.clinical?.lines_supported ?? 1}/
-                          {caseData.agent_findings.clinical?.total_lines_assessed ?? caseData.agent_findings.clinical?.lines_assessed ?? 1}
-                        </strong>
-                      </span>
-                      {caseData.agent_findings.clinical?.bed_day_reconciliation && (
-                        <span>
-                          Stay:{" "}
-                          <strong className="text-indigo-300 font-mono">
-                            {caseData.agent_findings.clinical.bed_day_reconciliation.billed_bed_days} bed day(s)
-                          </strong>
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </div>
+            {/* Clinical Narrative & Specialist Tabs */}
+            {caseData.detailed_explanation || caseData.justification ? (
+              <ClinicalExplanationViewer
+                content={caseData.detailed_explanation || caseData.justification || ""}
+                caseId={caseData.case_id}
+                ruleIdMatched={caseData.rule_id_matched}
+                decisionConfidence={caseData.decision_confidence}
+                currentDecision={caseData.current_decision}
+                modelSource={modelSource || (caseData.agent_findings?.explanation_model as string)}
+                onRefresh={handleGenerateExplanation}
+                isRefreshing={explaining}
+                selectedCategory={selectedCategory}
+                onCategoryChange={setSelectedCategory}
+              />
+            ) : (
+              <div className="p-6 bg-slate-950/80 border border-slate-800 rounded-xl text-center space-y-3">
+                <Sparkles className="w-6 h-6 text-cyan-400 mx-auto animate-bounce" />
+                <div className="text-xs font-semibold text-white">No Clinical Explanation Generated Yet</div>
+                <p className="text-[11px] text-slate-400 max-w-md mx-auto">
+                  Synthesize an authoritative clinical audit narrative grounded in policy clauses and line-item arithmetic using Groq LLM.
+                </p>
+                <button
+                  type="button"
+                  onClick={handleGenerateExplanation}
+                  disabled={explaining}
+                  className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition shadow-md disabled:opacity-50"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>{explaining ? "Synthesizing..." : "Synthesize AI Explanation"}</span>
+                </button>
               </div>
             )}
 
