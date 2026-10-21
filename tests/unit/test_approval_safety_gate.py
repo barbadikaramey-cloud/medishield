@@ -45,13 +45,15 @@ def _kyc_pass(confidence: float = 0.95) -> KYCAgentOutput:
     )
 
 
-def _fraud_pass(score: float = 0.05) -> FraudAgentOutput:
+def _fraud_pass(score: float = 0.0, review_required: bool = False) -> FraudAgentOutput:
     return FraudAgentOutput(
         agent_name="fraud_agent",
-        verdict=AgentVerdict.PASS,
+        verdict=AgentVerdict.INDETERMINATE if review_required else AgentVerdict.PASS,
         confidence=1.0,
-        fraud_score=score,
-        risk_level=RiskLevel.LOW,
+        fraud_score=1.0 if review_required else score,
+        fraud_review_required=review_required,
+        risk_level=RiskLevel.REVIEW_REQUIRED if review_required else RiskLevel.LOW,
+        anomalies=["A deterministic fraud factor was detected"] if review_required else [],
         latency_ms=10,
     )
 

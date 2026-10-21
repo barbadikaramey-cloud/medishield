@@ -11,12 +11,12 @@ MediShield is a prototype claims-intake and review platform. It turns a packet o
 | Multi-document upload, OCR, classification, and typed claim/KYC extraction. | Page/span provenance, policy citations, clinical findings, and cross-document checks. | Deterministic P1-P8 recommendation, explainable escalation, version-checked human actions, and audit history. |
 
 > [!IMPORTANT]
-> **Prototype and data boundary.** The checked-in benchmark is synthetic. MediShield does not execute payments and is not HIPAA-certified. Do not send real PHI to external model or tracing providers until the organization has completed privacy/security review, executed required BAAs, and verified provider configurations. Several controls described in design documents remain deployment responsibilities or known implementation gaps.
+> **Prototype and data boundary.** The checked-in benchmark is synthetic. MediShield does not execute payments and is not HIPAA-certified. Use synthetic documents until the organization has completed privacy/security review, executed required BAAs, and verified provider configurations. Production identity, storage, encryption, monitoring, retention, and incident-response controls are deployment responsibilities.
 
 ## Contents
 
 - [1. Overview](#1-overview)
-- [2. Implementation Status](#2-implementation-status)
+- [2. Product Scope](#2-product-scope)
 - [3. Key Capabilities](#3-key-capabilities)
 - [4. Technology Stack](#4-technology-stack)
 - [5. Architecture](#5-architecture)
@@ -26,19 +26,19 @@ MediShield is a prototype claims-intake and review platform. It turns a packet o
 - [9. Policy RAG and Governance](#9-policy-rag-and-governance)
 - [10. Decision Engine](#10-decision-engine)
 - [11. Security and Privacy](#11-security-and-privacy)
-- [12. Governance and Compliance Readiness](#12-governance-and-compliance-readiness)
+- [12. Governance and Compliance Model](#12-governance-and-compliance-model)
 - [13. Observability and Explainability](#13-observability-and-explainability)
 - [14. Data Architecture](#14-data-architecture)
 - [15. Evaluation and Quality Assurance](#15-evaluation-and-quality-assurance)
 - [16. Reliability and Performance](#16-reliability-and-performance)
 - [17. API and Integration Overview](#17-api-and-integration-overview)
 - [18. Setup and Development](#18-setup-and-development)
-- [19. Roadmap and Known Gaps](#19-roadmap-and-known-gaps)
+- [19. Roadmap and Planned Enhancements](#19-roadmap-and-planned-enhancements)
 - [20. Contribution and Release Readiness](#20-contribution-and-release-readiness)
 
 ## 1. Overview
 
-### The problem and the design choice
+### Use case and design choice
 
 Claim packets mix inconsistent scans, structured forms, policy language, and clinical evidence. A conventional OCR pipeline can extract text without establishing whether a fact is supported; an LLM-only adjudicator can produce fluent answers without reliable authority or provenance. MediShield separates those jobs: OCR and specialist agents propose structured interpretations, source spans and typed contracts constrain what can be used, and deterministic rules select the workflow outcome.
 
@@ -61,7 +61,7 @@ flowchart LR
     API --> SQL[(PostgreSQL / development SQLite)]
     Coordinator --> Objects[(Filesystem / in-memory objects)]
     Specialists -. optional interpretation .-> Models[External model providers]
-    Specialists -. policy retrieval integration incomplete .-> Index[(Qdrant)]
+    Specialists -. admin-published policy index .-> Index[(Qdrant)]
     Rules --> Audit[Decision snapshot and hash-linked audit events]
 ```
 
@@ -86,7 +86,7 @@ npm ci
 npm run dev
 ```
 
-Open `http://localhost:3000`. The login screen provides preset demo personas; these are static development accounts, not production identities. Development can fall back to SQLite and local filesystem storage. See [Setup and Development](#18-setup-and-development) for migrations, optional services, checks, and troubleshooting. Demo authentication is not suitable for real claims or deployment.
+Open `http://localhost:3000`. The login screen provides preset demo personas; these are static development accounts. Development can fall back to SQLite and local filesystem storage. See [Setup and Development](#18-setup-and-development).
 
 ### First-minute evidence
 
@@ -96,46 +96,35 @@ Open `http://localhost:3000`. The login screen provides preset demo personas; th
 | What runs today? | FastAPI, Next.js, OCR, a sequential Python coordinator, typed specialists, review actions, and decision/audit persistence. |
 | What do the saved full-workflow runs show? | Oct 21 artifact: 1 approved, 4 rejected, 25 escalated. Oct 20 artifact: 30 escalated. These are separate runs/configurations, not an accuracy score. |
 | What is not established? | Independent case-level truth, clinical validation, production security/compliance, and real-claim readiness. |
+| Usage context | Synthetic case labels; clinical, security, and deployment approvals are organization-specific. |
 
-## 2. Implementation Status
+## 2. Product Scope
 
-Labels below describe the inspected source tree. An accepted ADR or canonical contract is not, by itself, evidence that a feature is shipped.
+MediShield is a prototype for document intake, evidence extraction, claim validation, policy-context review, and deterministic recommendations. Runtime capabilities vary by configured data source and provider. The system does not execute payments or act as an authoritative enrollment, provider-network, clinical, or policy-administration system.
 
-| Status | Meaning |
+| Area | Current operating model |
 |---|---|
-| **Implemented** | Runtime code and relevant tests exist. This does not imply production readiness. |
-| **Partially implemented** | A working slice exists, but integration, authoritative data, completeness, security, or verification is missing. |
-| **Planned / specified** | Described in a canonical contract, ADR, SDD, or roadmap but not confirmed in executable code. |
-| **Known limitation** | A verified gap, conflicting contract, or unresolved decision is documented. |
-
-| Capability | Status | Evidence and boundary |
-|---|---|---|
-| Case API and operations console | **Implemented, prototype security** | FastAPI routers and Next.js UI exist. Authentication still includes static demo accounts and development bypasses. |
-| Raster OCR and provenance spans | **Implemented, accuracy varies** | RapidOCR, PDF text parsing, geometry, and optional VLM paths exist; no complete field-level gold transcription set is available. |
-| Document classification | **Partially implemented** | Heuristic classifier and optional fallback exist; audits report category confusion and composite-document limits. |
-| KYC and claims extraction | **Partially implemented** | OCR-backed fields, member lookup, code candidates, line extraction, and arithmetic exist; reference catalogs and production data sources are incomplete. |
-| Policy context and coverage | **Partially implemented** | Enrollment candidates, date barrier, policy evaluation, and admin publishing exist; runtime corpus is not fully wired to published Qdrant content. |
-| Fraud screening | **Implemented as deterministic screening; signals incomplete** | Seven binary feature detectors exist; any detected feature sets `fraud_review_required`. History/benchmark context is optional; the compatibility value is not a probability. |
-| Clinical alignment | **Partially implemented** | Per-line contracts, catalog checks, bed-day reconciliation, and constrained LLM proposals exist; guideline authority and competing ADR designs remain unresolved. |
-| Deterministic decisions | **Implemented; approval policy is configurable** | P1-P8 engine and tests exist. ADR-028 adds an opt-in/configurable clinical-discrepancy approval path, enabled by default in the current settings. |
-| Human review and overrides | **Implemented; recovery incomplete** | Locks, confirmation, override, request-info, and audit records exist. Supplementary document upload/resume is not complete end-to-end. |
-| Audit events | **Partially implemented** | SHA-256-linked event generation and verification exist; this is not WORM storage or a digital signature service. |
-| Evaluation | **Partially implemented** | Synthetic generators, a simulated harness, and a dataset diagnostic endpoint exist; no validated real-world decision accuracy is established. |
-| CI/CD | **Not present in inspected repository** | No `.github/workflows/` pipeline was found. |
+| Case operations | FastAPI and Next.js console with demo identities, review actions, and case/audit records. |
+| Document understanding | Local OCR, PDF text parsing, geometric spans, heuristic classification, and optional provider-backed interpretation. |
+| Specialist analysis | Typed KYC, claims, policy, fraud, and clinical findings; missing or uncertain evidence remains reviewable. |
+| Decision authority | Deterministic P1-P8 rules select approval, rejection, or escalation; model output is not the final decision. |
+| Human oversight | Reviewer locks, optimistic versions, confirmations, overrides, and information requests. |
+| Evaluation | Synthetic workflow artifacts and focused tests; independent real-world accuracy is not claimed. |
+| Deployment | Local SQLite/filesystem fallbacks plus optional PostgreSQL, Redis, Qdrant, and external providers. |
 
 ## 3. Key Capabilities
 
-| Capability | Current behavior | Important limitation |
+| Capability | Current behavior | Operating scope |
 |---|---|---|
-| Document intake | Multiple JPEG, PNG, PDF, and TIFF uploads; magic-byte validation, 25 MB per-file and 100 MB aggregate checks, selected PDF active-content token checks, SHA-256 checksum. | Static inspection is not antivirus scanning or PDF sandboxing. |
-| OCR and classification | Local RapidOCR spans/boxes; PDF text parsing; classifier maps claim, ID, discharge, prescription, policy amendment, unknown. | Full document splitting/segmentation and recognition accuracy are not guaranteed. |
-| KYC | Synthetic member/enrollment lookup, ID field extraction, expiry checks, JPEG ELA signal. | No production enrollment, dependent relationship, identity-provider, or government registry integration. |
-| Claims validation | Claims header, diagnosis/procedure candidates, service lines, units and amounts, total-vs-line arithmetic. | NPI is not checked against a provider registry; authoritative CPT/ICD releases and all billing invariants are not integrated. |
-| Policy evaluation | Candidate policy context, service-date matching helper, coverage/exclusion/authorization outputs, clause citations. | Runtime defaults to built-in in-memory chunks; admin-published index synchronization is incomplete. No patient cost-share accumulator. |
+| Document intake | Multiple JPEG, PNG, PDF, and TIFF uploads; magic-byte validation, 25 MB per-file and 100 MB aggregate checks, selected PDF active-content token checks, SHA-256 checksum. | Upload validation checks selected signatures and limits; deployments can add malware scanning/sandboxing. |
+| OCR and classification | Local RapidOCR spans/boxes; PDF text parsing; classifier maps claim, ID, discharge, prescription, policy amendment, unknown. | Quality varies with source scan and document layout. |
+| KYC | Synthetic member/enrollment lookup, ID field extraction, expiry checks, JPEG ELA signal. | External enrollment and identity sources are selected per deployment. |
+| Claims validation | Claims header, diagnosis/procedure candidates, service lines, units and amounts, total-vs-line arithmetic. | Provider registry and licensed code-set sources are deployment integrations. |
+| Policy evaluation | Candidate policy context, service-date matching helper, coverage/exclusion/authorization outputs, clause citations. | Runtime uses an in-memory corpus; admin-published indexing and member cost-share calculation are separate capabilities. |
 | Fraud analysis | Deterministic duplicate, tamper, velocity, provider outlier, date, arithmetic, and frequency feature functions; any detected factor requires human fraud review. | Historical claim counts/provider distributions are not always supplied; detectors are not calibrated fraud probabilities. |
-| Clinical alignment | Per-line performance, diagnosis relationship, necessity, authorization, repeat-service, and bed-day status. | Depends on available evidence and configured catalogs; LLM provider failure leaves uncertainty. |
-| Human review | Review locks, optimistic version checks, confirm/override/request-info, audit records. | Requesting information does not provide a complete supplementary upload/resume loop. |
-| Case reports and live events | PDF report endpoint and per-case WebSocket lifecycle events exist. | WebSocket replay is in-memory/process-local; event history is not a durable stream. |
+| Clinical alignment | Per-line performance, diagnosis relationship, necessity, authorization, repeat-service, and bed-day status. | Uses supplied evidence and configured catalogs; unavailable interpretation remains indeterminate for review. |
+| Human review | Review locks, optimistic version checks, confirm/override/request-info, audit records. | Supplementary upload/resume is a planned workflow extension. |
+| Case reports and live events | PDF report endpoint and per-case WebSocket lifecycle events exist. | Event replay is process-local; deployments can connect a durable event service. |
 | Multilingual support | Devanagari/Spanish helpers, locale-aware date/currency parsing, and optional VLM transcription. | Coverage is partial; external VLM use requires data-governance approval. |
 
 ## 4. Technology Stack
@@ -158,7 +147,7 @@ Labels below describe the inspected source tree. An accepted ADR or canonical co
 
 ### Current layered architecture
 
-The architecture snapshot above is the current runtime path. Its separation of interpretation, evidence, and authority is intentional; its dispatch and retrieval integrations remain prototype-grade.
+The architecture snapshot above shows the current runtime path. Interpretation, evidence, and decision authority are separated; local dispatch and policy retrieval use the adapters configured for this prototype.
 
 | Boundary | Responsibility | Current implementation note |
 |---|---|---|
@@ -166,9 +155,9 @@ The architecture snapshot above is the current runtime path. Its separation of i
 | API | Validate requests/uploads, enforce route dependencies, persist case metadata, return status/report/audit data. | FastAPI; demo auth and development bypasses are not deployment controls. |
 | Dispatch | Move case processing off the request path. | Celery/Redis when available; in-process `BackgroundTasks` fallback is not durable. |
 | Workflow | OCR/classify, completeness, run typed specialists, combine findings. | `CaseWorkflowCoordinator` is sequential Python, not compiled LangGraph. |
-| Decision | Apply P1-P8 to typed outputs and route to completion or human review. | Deterministic application logic owns the final business decision; rule/spec conflicts remain. |
+| Decision | Apply P1-P8 to typed outputs and route to completion or human review. | Deterministic application logic owns the final business decision; precedence and denial semantics are recorded in the canonical specs and ADRs. |
 | Persistence | Store relational case/claim/review/audit records and document objects. | PostgreSQL or dev SQLite; local filesystem/in-memory object backends. |
-| Policy retrieval | Retrieve clauses and return citation-bearing coverage findings. | Admin publication can write SQL/Qdrant, but default runtime corpus synchronization is incomplete. |
+| Policy retrieval | Retrieve clauses and return citation-bearing coverage findings. | Admin publication writes SQL/Qdrant; runtime coverage uses the configured in-memory corpus. |
 
 ### Data and trust boundaries
 
@@ -251,7 +240,7 @@ The diagram shows data dependencies; runtime currently executes the steps sequen
 | KYC | ID/claim spans, member repository, optional raw image | Member/DOB/expiry/tamper findings | Member lookup and expiry checks; repository data is synthetic in this repository. |
 | Claims | Claim spans and code catalog | Claim amount/date/NPI, code candidates, lines, totals | Deterministic parsing/math with optional LLM/VLM fallback; fields require source/provenance checks. |
 | Policy context | Member ID and enrollment source | Candidate policy/version/date ranges | Service-date selection helper; SQL/no-enrollment semantics need source review. |
-| Policy coverage | Policy ID/version, codes, retrieved chunks | Coverage, exclusions, citations, auth fields | Default corpus is in memory; published policy runtime wiring is incomplete. |
+| Policy coverage | Policy ID/version, codes, retrieved chunks | Coverage, exclusions, citations, auth fields | Runtime reads the configured in-memory corpus; admin-published Qdrant content is maintained separately. |
 | Fraud | Claims, KYC tamper, optional history/benchmarks | Binary feature flags, `fraud_review_required`, compatibility 0/1 value | Deterministic feature calculations; historical data context may be absent. |
 | Clinical alignment | Claim lines, clinical spans, diagnosis candidates, catalogs | Per-line evidence and bed-day output | Relationship and necessity LLM proposals are schema/span-checked; deterministic code maps results. |
 | Decision engine | Typed findings, consistency report | Decision, P-rule ID, confidence, justification | Deterministic rule order; the LLM has no final-decision authority. |
@@ -278,9 +267,9 @@ flowchart LR
 
 Implemented evidence structures include `FieldProvenance`, `LineClinicalEvidence`, `ClinicalAlignmentOutput`, reason codes, and `BedDayReconciliation`. Clinical relationship proposals are restricted to supplied diagnoses/services/evidence IDs; necessity determinations accept only supported outputs with supplied evidence IDs. Performance status, code validation, guideline rows, prior authorization, bed days, and final decision remain application responsibilities.
 
-**Known clinical design conflict:** ADR-031 describes LLM assistance for previously unassessed guideline criteria. ADR-032 (accepted) proposes replacing catalog-driven necessity with one evidence-only determination per case, then records a resolution to retain the tables but stop using them for necessity. Current `clinical_alignment_node` calls both the relationship interpreter and `ClinicalDeterminationEngine`; `NecessityCriterionInterpreter` remains in source but is not called by that path. The node still reads guidelines for prior-authorization requirements. Clinical governance must ratify this final boundary.
+**Clinical interpretation model:** ADR-031 describes LLM assistance for previously unassessed guideline criteria. ADR-032 defines an evidence-only necessity determination and records that guideline tables remain available for other checks. Current `clinical_alignment_node` calls the relationship interpreter and `ClinicalDeterminationEngine`; `NecessityCriterionInterpreter` remains in source but is not called by that path. The node also reads guideline data for prior-authorization requirements. Clinical governance owns approval of this interpretation boundary.
 
-**Approval caveat:** `CLINICAL_UNCERTAINTY_APPROVAL_ENABLED` defaults to `true`. With the reason-code allowlist, valid schema/OCR, no failed/contradicted/unavailable lines, and no bed-day conflict, a clinical `INDETERMINATE` can satisfy P6 even when no lines are fully supported. The approval justification displays a discrepancy notice and explicitly does not claim performance was verified. This behavior is controlled by [ADR-028](docs/adr/ADR-028_CLINICAL_UNCERTAINTY_APPROVAL_WITH_CONTRADICTION_ESCALATION.md); validate the setting with clinical/legal owners before operational use.
+**Clinical approval configuration:** `CLINICAL_UNCERTAINTY_APPROVAL_ENABLED` defaults to `true`. With the reason-code allowlist, valid schema/OCR, no failed/contradicted/unavailable lines, and no bed-day conflict, a clinical `INDETERMINATE` can satisfy P6 even when no lines are fully supported. The approval justification displays a discrepancy notice and does not claim performance was verified. This behavior is controlled by [ADR-028](docs/adr/ADR-028_CLINICAL_UNCERTAINTY_APPROVAL_WITH_CONTRADICTION_ESCALATION.md); configure it with clinical/legal governance.
 
 ## 9. Policy RAG and Governance
 
@@ -309,7 +298,7 @@ flowchart TD
     Qdrant -. not fully synchronized to runtime .-> DefaultCorpus
 ```
 
-Policy publishing is role-gated and separate from customer uploads. The admin route parses PDFs into paragraph chunks and stores them in SQL/Qdrant. The runtime coverage agent by default uses a separate in-memory corpus with exact-code and token-overlap scoring; it does not demonstrate a complete dense+BM25 hybrid path to the published index. Citation verification proves that text exists in the corpus; it does not by itself prove legal/clinical applicability to every billed line. No financial accumulator calculates remaining deductible or patient responsibility. Riders and patient rider applications are stored, but waiting-period adjudication is not implemented.
+Policy publishing is role-gated and separate from customer uploads. The admin route parses PDFs into paragraph chunks and stores them in SQL/Qdrant. The runtime coverage agent by default uses a separate in-memory corpus with exact-code and token-overlap scoring. Citation verification proves that text exists in the corpus; applicability to each billed line remains a policy-owner decision. Current coverage results expose policy deductible/copay terms; calculating remaining deductible or patient responsibility and adjudicating rider waiting periods are planned financial-policy capabilities.
 
 ## 10. Decision Engine
 
@@ -334,12 +323,12 @@ flowchart TD
     P7 -- No --> P8[ESCALATE / HUMAN_REVIEW]
 ```
 
-**Runtime/spec discrepancy:** P4 now precedes P3 in both the runtime engine and Canonical Spec 02 so a detected fraud factor is not masked by a separate ambiguity. P5 runtime performs `REJECT` for confirmed hard failures, while ADR-010/Spec 02 table describe `ESCALATE(RECOMMEND_DENIAL)`; ADR-002 describes `REJECT`. This remains unresolved and requires legal/product alignment.
+**Decision policy governance:** P4 precedes P3 in both runtime and Canonical Spec 02 so a detected fraud factor routes to fraud review. P5 performs `REJECT` for confirmed hard failures; product and legal owners define the applicable recommendation and denial policy for each deployment.
 
 | Priority | Runtime role |
 |---|---|
 | P1 | Prompt injection, severe tamper, or unavailable specialist -> security/technical escalation. |
-| P2 | Required claim form/ID incomplete -> `ESCALATE(MISSING_INFORMATION)` / `AWAITING_INFO`. |
+| P2 | Required claim form/ID missing -> `ESCALATE(MISSING_INFORMATION)` / `AWAITING_INFO`. |
 | P3 | Material conflict or non-exempt indeterminate evidence -> `ESCALATE(AMBIGUITY/HUMAN_REVIEW)`. |
 | P4 | Fraud review required -> `ESCALATE(FRAUD_REVIEW)`. |
 | P5 | Confirmed hard failure -> current runtime `REJECT` / `COMPLETED`, with recommendation tag. |
@@ -359,14 +348,14 @@ Fraud semantics are governed by [ADR-033](docs/adr/ADR-033_BINARY_FRAUD_INDICATO
 - Logfire and LangSmith are optional; LangSmith tracing is disabled by default. A narrow recursive sanitizer masks selected PHI keys and SSN-like values.
 - Audit chain uses canonical JSON and SHA-256 over event ID, prior hash, payload, and timestamp.
 
-### Known limitations and deployment responsibilities
+### Deployment-specific security controls
 
-- Login identities/passwords are static demo values in source; development/test can accept `X-User-Role` and default to a reviewer when auth is absent. JWT persistence in the browser is not a managed identity system.
-- `allow_origins=["*"]` is configured with credentials. Production origins must be explicitly restricted.
-- No external IDP, secrets manager, key rotation, anti-malware service, production TLS/reverse proxy, encryption-at-rest setup, network segmentation, backup/restore policy, or verified BAA configuration was found.
-- Local object storage is not S3/MinIO; MinIO is in Compose but no concrete S3 storage class was found.
-- PHI scrubbers are narrow and do not prove all text/log/trace paths are safe. A security audit records unresolved LangSmith validation/wire-payload tasks.
-- Hash chaining is not WORM storage, digital signing, or protection against an administrator who can rewrite the database.
+- Demo identities and development role shortcuts support local evaluation; deployments connect a managed identity provider and configure browser session handling.
+- Configure explicit allowed origins for each deployment; the development CORS policy is permissive.
+- Production profiles define secret management, key rotation, malware scanning, TLS termination, encryption at rest, network boundaries, backups, and provider BAAs.
+- The current API defaults to local filesystem storage; deployments select and configure durable object storage.
+- PHI scrubbing covers selected keys and SSN-like values; validate log and trace payloads for the deployment's data categories.
+- Hash-linked audit events support integrity checks; WORM retention and digital signatures are separate compliance controls.
 
 ### Trust boundaries
 
@@ -405,16 +394,16 @@ flowchart LR
 
 This diagram describes current components and boundaries; it does not imply that deployment encryption, hosted-provider compliance, or real-PHI approval has been completed.
 
-## 12. Governance and Compliance Readiness
+## 12. Governance and Compliance Model
 
-| Area | Repository evidence | Remaining decision/work |
+| Area | Current model | Governance owner |
 |---|---|---|
-| Requirements and ownership | 12 canonical specs, source BRD/SOP/TTD, 32 ADRs, SDD features/audits. | Some documents conflict or describe target architecture; code remains authoritative for shipped behavior. |
-| Policy publication | Admin-only policy upload/publish route, version and actor fields, separate customer evidence. | Runtime index link, clinical approval workflow, effective-date/version semantics, rider applicability, and source verification need end-to-end validation. |
-| Human actions | `HumanReview`, locks, reason codes, remarks, version checks, decision history. | Human authorization, retention, appeal handling, and deployment identity are organizational requirements. |
-| Audit | Decision snapshots and SHA-256-linked audit events; audit route verifies chain. | No WORM/retention/legal-hold capability or external audit control is established. |
-| Model governance | Provider/model configuration, typed contracts, prompt versions for some clinical paths, synthetic tests. | No comprehensive model registry, clinical signoff, continuous drift review, or production dataset approval. |
-| Privacy/compliance | HIPAA-oriented design language and some scrubbing/boundary code. | No certification or end-to-end evidence of compliance. Requires organization/vendor review, BAAs, workforce procedures, retention, key control, and infrastructure safeguards. |
+| Requirements and ownership | Canonical specs, source BRD/SOP/TTD, ADRs, and SDD records. | Product and engineering maintain the decision log and release scope. |
+| Policy publication | Admin-only policy upload/publish route, version and actor fields, separate customer evidence. | Policy, legal, and actuarial owners approve source, version, dates, and applicability. |
+| Human actions | `HumanReview`, locks, reason codes, remarks, version checks, decision history. | Operations owners define reviewer authority, retention, and appeal handling. |
+| Audit | Decision snapshots and SHA-256-linked audit events; audit route verifies chain. | Compliance owners define retention, legal hold, and archival controls. |
+| Model governance | Provider/model configuration, typed contracts, prompt versions for some clinical paths, synthetic tests. | Clinical, privacy, security, and model owners approve use, monitoring, and evaluation cohorts. |
+| Privacy/compliance | HIPAA-oriented design language and selected scrubbing/boundary code. | Organizational review, BAAs, workforce procedures, retention, key control, and infrastructure safeguards determine compliance. |
 
 ### Human review and override lifecycle
 
@@ -425,30 +414,47 @@ sequenceDiagram
     participant API as Review API
     participant DB as SQL database
     participant Audit as Audit chain
-    participant Worker as Resume worker
+    participant Events as WebSocket broadcaster
+    participant Queue as Celery queue
 
     Reviewer->>UI: Open escalated case
     UI->>API: POST /review/lock
-    API->>DB: Create or refresh review lock
+    API->>DB: Create or refresh 15-minute lock
     API-->>UI: Lock owner and expiry
-    Reviewer->>UI: Confirm, override, or request information
-    UI->>API: Submit reason, remarks, expected_case_version
+    Reviewer->>UI: Choose confirm, override, or request information
+    UI->>API: Submit action, reason, remarks, expected_case_version
     API->>API: Check version; reject stale request with 409
-    API->>DB: Append HumanReview and decision/state update
-    API->>Audit: Append hash-linked event
-    opt Override resume dispatch
-        API->>Worker: Resume task when broker is available
+    alt Override
+        API->>DB: Append HumanReview and human Decision
+        API->>DB: Set COMPLETED, increment version, release lock
+        API->>Audit: Append hash-linked event
+        API->>DB: Commit
+        API->>Events: Broadcast override event
+        API->>Queue: Attempt override/resumption task dispatch
+    else Confirm
+        API->>DB: Append HumanReview and human Decision
+        API->>DB: Set COMPLETED, increment version, release lock
+        API->>Audit: Append hash-linked event
+        API->>DB: Commit
+        API->>Events: Broadcast confirmation event
+    else Request information
+        API->>DB: Append HumanReview; set AWAITING_INFO and requested document types
+        API->>DB: Increment version, release lock, commit
     end
     API-->>UI: Updated workflow state and version
+    opt Reviewer leaves without action
+        UI->>API: DELETE /review/lock
+        API->>DB: Release review lock
+    end
 ```
 
-The request-information action records `AWAITING_INFO`; a complete supplementary-document upload endpoint is not present in the current OpenAPI surface.
+The request-information action records `AWAITING_INFO` and requested document types; it does not append the hash-linked audit event used by confirm/override. Supplementary upload and workflow resumption are planned extensions. Override dispatch is an attempt and depends on the configured Celery broker.
 
 ## 13. Observability and Explainability
 
 - Workflow state carries `trace_id` and `run_id`; case-event sequences are scoped by case/run. LangSmith tracing is optional and disabled by default. Its root trace ID is ephemeral by default; a keyed HMAC case pseudonym is opt-in and is not legal de-identification.
-- `trace_span` wraps workflow nodes, OCR, LLM calls, storage, and selected repository operations. Inputs are frequently empty and summaries are constrained, but an audit found allowlist and end-to-end wire-capture gaps.
-- LLM telemetry tracks call/provider attempts, failures, stage latency percentiles, and token totals in process-local counters since startup. Token totals remain null/incomplete when providers do not report usage; these counters are not a durable distributed metrics backend.
+- `trace_span` wraps workflow nodes, OCR, LLM calls, storage, and selected repository operations. Inputs are minimized and summaries are constrained; deployment owners validate captured payloads and allowed fields.
+- LLM telemetry tracks call/provider attempts, failures, stage latency percentiles, and token totals in process-local counters since startup. Token totals include provider-reported usage; the completeness flag indicates whether usage was returned for every successful response. Export to a durable metrics backend is a deployment choice.
 - The event broadcaster is process-local and replay is bounded/in-memory.
 - Decision explanations are deterministic from specialist outputs and the decision justification (`ADR-024` supersedes LLM-authored reviewer explanations in ADR-011).
 - Operational and calibration endpoints exist; calibration calculations over the simulated harness are not equivalent to validated production calibration.
@@ -471,7 +477,7 @@ The request-information action records `AWAITING_INFO`; a complete supplementary
 
 Cases own documents, extracted claims/lines, specialist runs, decisions, human reviews, and audit events. Policies own versions and chunks; enrollments bind members to policy versions; rider applications connect enrollments to configured riders. `DiagnosisIndication.service_code` is a catalog key, not a declared relational foreign key to `MedicalCode`.
 
-The schema includes normalized Claim/ClaimLine models, but audit evidence found persistence gaps in some workflow revisions; the current coordinator contains a persistence method. Validate actual database rows for the workflow under test. Member and enrollment rows are synthetic/read-only adapters. OCR payloads and originals are stored separately by URI/object key. Qdrant is a separate index and SQL policy chunks are also retained.
+The schema includes normalized Claim/ClaimLine models and the coordinator contains a persistence method. Verify database rows for the workflow under test. Member and enrollment rows are synthetic/read-only adapters. OCR payloads and originals are stored separately by URI/object key. Qdrant is a separate index and SQL policy chunks are also retained.
 
 ### Migrations
 
@@ -493,18 +499,52 @@ The current migration directory includes revisions `001` through `007`: initial 
 
 ### Token economics
 
-The saved 30-case evaluation artifacts contain **no per-case token fields**, so this repository cannot currently substantiate tokens-per-case or dollars-per-case for either run.
+Token usage varies with packet size, evidence length, model routing, and retries. Deterministic checks and local OCR do not incur hosted text-token charges, though they still use compute and storage.
 
-One local `/api/v1/metrics/operational` snapshot on **2026-10-21** reported 4 successful logical LLM spans, 5,961 prompt tokens, and 1,710 completion tokens (7,671 total); usage was complete for those 4 spans. This telemetry has `scope=process_since_start`: it is process-local, may include tests or other requests, is not associated with a case/execution ID, and is **not** a 30-case or per-case measurement.
+| Processing stage | Typical model usage | Main cost driver |
+|---|---|---|
+| Intake and local OCR | None for local parsing/OCR | CPU/GPU time, pages, and storage; optional VLM calls add image-input charges. |
+| Classification | Heuristics first; optional call for ambiguous documents | OCR text input and one structured response per fallback. |
+| KYC/eligibility | Primarily deterministic | Database lookup and local image forensics; no routine LLM call. |
+| Claims extraction | Deterministic geometry first; optional text/VLM fallback | Claim text, page/image inputs, and retry count. |
+| Policy retrieval | Local retrieval; optional rationale synthesis | Retrieved clause text and any hosted embedding/query or summary calls. |
+| Fraud analysis | Deterministic factor checks | Database/history access and local computation; no routine LLM call. |
+| Clinical alignment | Up to two structured calls when evidence/candidates are available | Number of claim lines, diagnosis candidates, and supplied clinical spans. |
+| Final explanation | Optional call after deterministic P1-P8 decision | Evidence snapshot input and generated explanation output (configured maximum: 3,500 tokens). |
+| Fallback/retry | Only when selected paths fail or are ambiguous | Repeated input/output plus provider- or image-specific pricing. |
 
-Use provider-reported usage and the applicable provider/model rate card to calculate cost:
+**Planning estimate, not measured usage:** use **6,000–10,000 text tokens** for a typical model-assisted case (roughly 3–5 calls at 1,500–2,000 tokens each), and **10,000–20,000+ text tokens** for a complex/retried case with longer clinical evidence, extraction fallback, or expanded explanation. A local-only case may use zero hosted text tokens. VLM image charges are separate and provider-specific.
+
+For budgeting headroom, the following illustrative allocation uses a larger standard-case envelope of 25,000 input and 3,500 output tokens. These are logical stages, not necessarily separate calls; deterministic checks consume no model tokens.
+
+| Logical stage | Input tokens | Output tokens | Main driver |
+|---|---:|---:|---|
+| Document extraction / normalization | 3,000 | 300 | OCR text and optional extraction fallback |
+| Policy RAG and coverage analysis | 6,000 | 500 | Retrieved policy text and rationale |
+| Claims and eligibility validation | 4,000 | 500 | Claim lines, diagnosis codes, and optional extraction |
+| Anomaly / fraud analysis | 5,000 | 700 | Optional narrative analysis; deterministic fraud checks are local |
+| Orchestration and decision synthesis | 4,000 | 1,000 | Evidence snapshot and explanation |
+| Retry / fallback allowance | 3,000 | 500 | Repeated calls or provider fallback |
+| **Total** | **25,000** | **3,500** | |
+
+These ranges are extrapolated from a small process-level sample, not a per-case benchmark. One local `/api/v1/metrics/operational` snapshot on **2026-10-21** reported 4 successful logical LLM spans, 5,961 prompt tokens, and 1,710 completion tokens (7,671 total), averaging about 1,918 tokens per span. It had complete usage for those 4 spans, but `scope=process_since_start`: calls may belong to tests or other requests and are not associated with a case ID. The saved 30-case evaluation artifacts contain **no per-case token fields**, so the ranges above are capacity-planning assumptions, not measured averages.
+
+Calculate text-model cost with provider-reported usage and the applicable model rate card:
 
 ```text
 cost = prompt_tokens / 1,000,000 * input_rate_per_million
     + completion_tokens / 1,000,000 * output_rate_per_million
 ```
 
-Rates vary by provider, model, region, modality, and pricing date; no rate card is configured in this repository. A defensible per-case figure requires usage records keyed to a non-PHI execution ID, all text and vision calls, retries/fallbacks, and a recorded rate-card version. Until then, per-case token economics are **unmeasured**, not zero.
+For a **hypothetical** rate card of $0.05 per million input tokens and $0.25 per million output tokens:
+
+| Scenario | Input / output tokens | Illustrative text-token cost |
+|---|---:|---:|
+| Standard budget case | 25,000 / 3,500 | **$0.002125** (about **₹0.19** at assumed ₹88/USD) |
+| Complex / escalated budget case | 60,000 / 8,000 | **$0.005000** |
+| 1,000 standard cases | 25M / 3.5M | **$2.125** |
+
+These prices are editable examples, not the current rate card for MediShield's configured providers. Actual cost varies by provider, model, region, modality, and pricing date; no rate card is configured in this repository. A defensible per-case cost requires provider usage keyed to a non-PHI execution ID, all text and vision calls, retries/fallbacks, and a recorded rate-card version. Report infrastructure, OCR, embeddings, storage, and telemetry separately from text-token cost. Until then, per-case token economics are **unmeasured**, not zero.
 
 ### Canonical assignment rubric (targets, not results)
 
@@ -585,11 +625,11 @@ Do not publish a single accuracy score until gold truth is reviewed. Track separ
 - LLM clients apply configured timeouts, key/model/provider fallback, and deterministic explanation behavior. Failure in clinical interpretation yields indeterminate output, not a clinical pass.
 - OCR VLM fallback is bounded by feature flags/provider availability; normal raster OCR uses RapidOCR locally.
 
-### Not verified or not implemented
+### Deployment profile
 
-- No measured production latency/SLO, throughput/load test, autoscaling configuration, circuit breaker, durable event log, or queue recovery guarantee is established.
+- Production latency/SLO, throughput/load behavior, autoscaling, circuit breakers, durable event history, and queue recovery are configured and measured per deployment.
 - SQLite has different locking and concurrency properties than PostgreSQL.
-- The project includes no CI workflow. Local tests/lint do not establish a production release gate.
+- Local tests/lint are available; release pipelines and gates are configured by the deployment owner.
 - Qdrant Cloud, embeddings, hosted model rates, credentials, and provider privacy terms require environment-specific setup.
 
 ### Reliability work to evaluate
@@ -630,7 +670,7 @@ Current OpenAPI route inventory was obtained from the application at `/api/opena
 | `GET` | `/api/v1/metrics/calibration` | Simulated calibration metrics. |
 | `GET` | `/api/v1/health`, `/health` | Liveness endpoints. |
 
-There is **no** `POST /api/v1/cases/{case_id}/documents` supplementary-upload route in the current OpenAPI inventory, despite the canonical specification. The request-info state exists, but the evidence-recovery loop is incomplete.
+The current OpenAPI includes a request-info action that records `AWAITING_INFO`. Supplementary document upload and resume are included in the evidence-recovery roadmap.
 
 ## 18. Setup and Development
 
@@ -735,44 +775,26 @@ No CI workflow was found under `.github/workflows/`; these are local checks, not
 |---|---|
 | Frontend queue cannot load | Ensure API listens on port 8000 or configure `NEXT_PUBLIC_API_URL`. |
 | PostgreSQL connection refused | For development, inspect SQLite fallback and `SQLITE_DB_PATH`; for migrations, start PostgreSQL and verify `DATABASE_SYNC_URL`. |
-| Workflow remains queued | Check Redis reachability and Celery worker; local fallback is in-process and not durable. |
-| Uploaded policy is not reflected in coverage | Confirm publish succeeded; runtime corpus synchronization is a known integration gap. |
+| Workflow remains queued | Check Redis reachability and Celery worker; local fallback runs in-process. |
+| Uploaded policy is not reflected in coverage | Confirm the policy was published; runtime retrieval currently uses its configured in-memory corpus. |
 | Clinical/OCR result is indeterminate | Inspect OCR span provenance and specialist reason codes; hosted models are optional and cannot replace missing source evidence. |
 
-## 19. Roadmap and Known Gaps
+## 19. Roadmap and Planned Enhancements
 
-### Prioritized gaps
-
-| Priority | Gap | Why it matters / next work |
+| Workstream | Planned capability | Next milestone |
 |---|---|---|
-| **Critical safety** | Policy runtime corpus is not the admin-published index; quote authenticity is not sufficient semantic applicability for each billed line. | Connect a single authoritative published policy/version path and require code/setting-scoped positive coverage. |
-| **Critical governance** | P5 autonomous `REJECT` conflicts with ADR-010/Spec 02 table `ESCALATE(RECOMMEND_DENIAL)`; PostgreSQL enum/migration compatibility needs verification. | Obtain legal/product decision and test on PostgreSQL before adverse-decision deployment. |
-| **Critical clinical governance** | Clinical uncertainty approval defaults enabled and can allow zero fully supported lines when only allowlisted uncertainty remains. | Validate ADR-028 with legal/clinical owners and reviewed holdout outcomes; consider disabling until accepted. |
-| **High** | Synthetic member/code/guideline catalogs are not production enrollment, provider, licensed code, network, or benefit systems. | Define authoritative sources, data ownership, versioning, update cadence, and outage semantics. |
-| **High** | No independently reviewed case-level truth across the 30 clusters; metadata fraud labels are not decision labels and some conflict with source docs. | Create an evaluator-owned adjudication register and field-level gold evidence. |
-| **High** | Supplementary-document upload/resume is incomplete; queue fallback is not durable. | Implement and test `AWAITING_INFO -> upload -> resume -> adjudication` with audit/version handling. |
-| **High** | Demo authentication, development role bypass, wildcard CORS, local token storage, and incomplete PHI wire audits. | Add managed identity, per-case authorization, restricted origins, secret management, and independent privacy/security validation. |
-| **High** | No allowed-amount, deductible accumulator, OOP maximum, network, or member/insurer payment calculation. | Define financial sources and ordering/rounding rules before implementing cost share. |
-| **Medium** | Sequential Python coordinator differs from canonical LangGraph parallel DAG; split/group is not full composite-page segmentation. | Align implementation/specification through ADR-governed changes and test routing/recovery. |
-| **Medium** | Fraud history/statistical context is optional; provider outlier features may have no benchmark data. | Wire approved claims history/reference distributions and evaluate on reviewed data. |
-| **Medium** | No CI/CD pipeline, production deployment/backup/retention plan, or measured load/performance SLO. | Build release automation and operational validation, without copying target numbers into measured claims. |
+| Policy knowledge | Connect administrator-published policy versions to runtime retrieval. | Exercise version selection, code-scoped coverage, and citation validation end to end. |
+| Decision governance | Ratify the P5 recommendation/denial behavior and clinical uncertainty settings. | Record product, legal, and clinical decisions in ADRs and regression tests. |
+| Evaluation | Establish reviewer-owned case outcomes and field/span-level evidence labels. | Separate training/tuning cases from held-out evaluation; report accuracy only on reviewed labels. |
+| Evidence recovery | Complete `AWAITING_INFO -> supplementary upload -> resume -> adjudication`. | Add versioned upload, storage, event, and audit contracts with integration tests. |
+| Identity and privacy | Connect managed identity and deployment-specific access, secrets, and provider policies. | Validate per-case authorization, allowed origins, payload handling, retention, and provider agreements. |
+| Financial processing | Add allowed amounts, deductible/OOP accumulators, network status, and member/plan responsibility when governed data is available. | Define source systems, ordering, currency, and rounding rules first. |
+| Workflow throughput | Evaluate graph-based concurrency and composite-page segmentation. | Approve architecture changes through ADRs and compare measured latency on fixed workloads. |
+| Fraud context | Connect governed claims history and provider reference distributions. | Record source provenance and evaluate binary factor detections against reviewed outcomes. |
+| Operations | Add durable events, recovery guarantees, CI/release automation, backup/retention, and load validation. | Define SLOs and release gates from measured deployments rather than target assumptions. |
+| Clinical governance | Finalize the relationship/necessity model boundary and reviewer evidence presentation. | Approve the prompt, evidence policy, and clinical validation cohort with clinical owners. |
 
-### Feature roadmap and current status
-
-| Feature | Status | Evidence / next step |
-|---|---|---|
-| Real-time case progress | **Partially implemented** | WebSocket lifecycle events exist; replay is process-local and not a durable event stream. |
-| Clinical confidence calibration | **Planned** | Brier/ECE utilities exist, but there is no independently reviewed held-out cohort to calibrate against. |
-| Multilingual documents | **Partially implemented** | Locale/date/currency helpers and optional VLM paths exist; language-specific OCR quality is not benchmarked. |
-| Tamper analysis | **Partially implemented** | ELA and deterministic tamper indicators exist; signals are not a validated fraud probability and history context is incomplete. |
-| Reviewer evidence overlays | **Partially implemented** | OCR spans/boxes and document viewing exist; comprehensive discrepancy-to-source overlays and blocking workflows remain incomplete. |
-| Downloadable case reports | **Implemented, prototype** | PDF report endpoint exists; validate content/privacy and retention before deployment. |
-| Supplementary upload and recovery | **Planned / incomplete** | `AWAITING_INFO` and request-info action exist; the upload/resume API loop is absent. |
-| Policy publication-to-runtime synchronization | **Partially implemented** | Admin publication and indexing exist; connect one authoritative, versioned corpus to runtime coverage evaluation. |
-| Durable queue recovery and safe degraded mode | **Partially implemented** | Celery retries and in-process fallback exist; outbox, durable event history, and recovery guarantees do not. |
-| Production identity, provider data, and cost share | **Planned** | Requires authoritative integrations, payer policy decisions, privacy/security controls, and financial rule definitions. |
-
-Historical reports under [`docs/sdd/audits/`](docs/sdd/audits/) and [`docs/sdd/reviews/`](docs/sdd/reviews/) are useful evidence, but their timestamps and evaluation paths differ. Use source code and current tests to decide implementation status; do not treat older benchmark narratives as current measured truth.
+Historical reports under [`docs/sdd/audits/`](docs/sdd/audits/) and [`docs/sdd/reviews/`](docs/sdd/reviews/) provide context for these roadmap items. Their timestamps and evaluation paths differ; use the current source and dated artifacts when reporting status.
 
 ## 20. Contribution and Release Readiness
 
@@ -780,7 +802,7 @@ Follow [`agents.md`](agents.md): canonical requirements and ADRs govern architec
 
 ### Change checklist
 
-- [ ] Identify the source requirement and label behavior as implemented, partial, planned, or a known limitation.
+- [ ] Identify the source requirement and label behavior as implemented, prototype scope, or planned capability.
 - [ ] Add focused unit and integration tests for both expected and failure paths.
 - [ ] Update API contracts when routes or response schemas change.
 - [ ] Add an Alembic migration for relational changes; test against PostgreSQL and supported SQLite fallback.
@@ -790,9 +812,9 @@ Follow [`agents.md`](agents.md): canonical requirements and ADRs govern architec
 - [ ] Run Python tests, Ruff, mypy, and frontend checks; record evaluation dataset/label provenance.
 - [ ] Obtain clinical, payer/legal, security/privacy, and operational approvals before real-PHI or adverse-decision deployment.
 
-### Release readiness
+### Current operating profile
 
-**Not ready for real-claim production based on repository evidence.** The project contains substantial prototype functionality, but policy corpus integration, authoritative external data, supplementary evidence recovery, production identity/security, evaluation truth, and compliance operations are incomplete or unresolved. No compliance certification, model accuracy, fraud accuracy, SLA, or real-world performance figure is claimed here.
+MediShield is intended for development and evaluation with synthetic documents. Production use requires deployment-specific identity, policy/data integrations, evidence recovery, security/privacy controls, reviewed evaluation data, and operational approvals. The software is not HIPAA-certified; no model accuracy, fraud accuracy, service-level target, or real-world performance figure is claimed here.
 
 ### Target CI/CD and release validation (planned)
 
