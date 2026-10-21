@@ -61,11 +61,11 @@ flowchart LR
     API --> SQL[(PostgreSQL / development SQLite)]
     Coordinator --> Objects[(Filesystem / in-memory objects)]
     Specialists -. optional interpretation .-> Models[External model providers]
-    Specialists -. admin-published policy index .-> Index[(Qdrant)]
+    Specialists -- admin-published policy index --> Index[(Qdrant)]
     Rules --> Audit[Decision snapshot and hash-linked audit events]
 ```
 
-The diagram describes current code, not a production deployment topology. The coordinator is sequential; Redis/Celery is optional, and the policy publishing/index path is not fully connected to the default coverage corpus.
+The diagram describes current code, not a production deployment topology. The coordinator is sequential, and Redis/Celery is optional.
 
 ### Run the demo
 
@@ -119,7 +119,7 @@ MediShield is a prototype for document intake, evidence extraction, claim valida
 | OCR and classification | Local RapidOCR spans/boxes; PDF text parsing; classifier maps claim, ID, discharge, prescription, policy amendment, unknown. | Quality varies with source scan and document layout. |
 | KYC | Synthetic member/enrollment lookup, ID field extraction, expiry checks, JPEG ELA signal. | External enrollment and identity sources are selected per deployment. |
 | Claims validation | Claims header, diagnosis/procedure candidates, service lines, units and amounts, total-vs-line arithmetic. | Provider registry and licensed code-set sources are deployment integrations. |
-| Policy evaluation | Candidate policy context, service-date matching helper, coverage/exclusion/authorization outputs, clause citations. | Runtime uses an in-memory corpus; admin-published indexing and member cost-share calculation are separate capabilities. |
+| Policy evaluation | Candidate policy context, service-date matching helper, coverage/exclusion/authorization outputs, clause citations. | Runtime retrieves from the admin-published Qdrant index; member cost-share calculation is a separate capability. |
 | Fraud analysis | Deterministic duplicate, tamper, velocity, provider outlier, date, arithmetic, and frequency feature functions; any detected factor requires human fraud review. | Historical claim counts/provider distributions are not always supplied; detectors are not calibrated fraud probabilities. |
 | Clinical alignment | Per-line performance, diagnosis relationship, necessity, authorization, repeat-service, and bed-day status. | Uses supplied evidence and configured catalogs; unavailable interpretation remains indeterminate for review. |
 | Human review | Review locks, optimistic version checks, confirm/override/request-info, audit records. | Supplementary upload/resume is a planned workflow extension. |
@@ -156,7 +156,7 @@ The architecture snapshot above shows the current runtime path. Interpretation, 
 | Workflow | OCR/classify, completeness, run typed specialists, combine findings. | `CaseWorkflowCoordinator` is sequential Python, not compiled LangGraph. |
 | Decision | Apply P1-P8 to typed outputs and route to completion or human review. | Deterministic application logic owns the final business decision; precedence and denial semantics are recorded in the canonical specs and ADRs. |
 | Persistence | Store relational case/claim/review/audit records and document objects. | PostgreSQL or dev SQLite; local filesystem/in-memory object backends. |
-| Policy retrieval | Retrieve clauses and return citation-bearing coverage findings. | Admin publication writes SQL/Qdrant; runtime coverage uses the configured in-memory corpus. |
+| Policy retrieval | Retrieve clauses and return citation-bearing coverage findings. | Admin publication writes SQL/Qdrant; runtime coverage retrieves from the published Qdrant index. |
 
 ### Data and trust boundaries
 
@@ -239,7 +239,7 @@ The diagram shows data dependencies; runtime currently executes the steps sequen
 | KYC | ID/claim spans, member repository, optional raw image | Member/DOB/expiry/tamper findings | Member lookup and expiry checks; repository data is synthetic in this repository. |
 | Claims | Claim spans and code catalog | Claim amount/date/NPI, code candidates, lines, totals | Deterministic parsing/math with optional LLM/VLM fallback; fields require source/provenance checks. |
 | Policy context | Member ID and enrollment source | Candidate policy/version/date ranges | Service-date selection helper; SQL/no-enrollment semantics need source review. |
-| Policy coverage | Policy ID/version, codes, retrieved chunks | Coverage, exclusions, citations, auth fields | Runtime reads the configured in-memory corpus; admin-published Qdrant content is maintained separately. |
+| Policy coverage | Policy ID/version, codes, retrieved chunks | Coverage, exclusions, citations, auth fields | Runtime retrieves clauses from the admin-published Qdrant index. |
 | Fraud | Claims, KYC tamper, optional history/benchmarks | Binary feature flags, `fraud_review_required`, compatibility 0/1 value | Deterministic feature calculations; historical data context may be absent. |
 | Clinical alignment | Claim lines, clinical spans, diagnosis candidates, catalogs | Per-line evidence and bed-day output | Relationship and necessity LLM proposals are schema/span-checked; deterministic code maps results. |
 | Decision engine | Typed findings, consistency report | Decision, P-rule ID, confidence, justification | Deterministic rule order; the LLM has no final-decision authority. |
@@ -279,9 +279,9 @@ flowchart TD
         Evidence -. prohibited .-> NoPublish[No authoritative corpus write]
     end
     subgraph Admin[Administrator publishing boundary]
-        AdminUser[ADMINISTRATOR] --> Draft[POST /api/v1/policies]
+        AdminUser[ADMINISTRATOR] --> Draft["POST /api/v1/policies"]
         Draft --> StorePDF[Store policy PDF and version]
-        StorePDF --> Publish[POST /api/v1/policies/{policy_id}/publish]
+        StorePDF --> Publish["POST /api/v1/policies/{policy_id}/publish"]
         Publish --> Parse[PyPDF section/paragraph extraction]
         Parse --> Qdrant[(Qdrant local/cloud index)]
         Parse --> SQLChunks[(policy_chunks table)]
@@ -290,14 +290,14 @@ flowchart TD
         Member[Member/enrollment] --> Context[Candidate policy context]
         ClaimDate[Claim service date] --> Barrier[Date window resolver]
         Context --> Barrier
-        Codes[Claim CPT/revenue codes] --> DefaultCorpus[Default in-memory corpus]
-        Barrier --> DefaultCorpus
-        DefaultCorpus --> Output[Coverage/citation output]
+        Codes[Claim CPT/revenue codes] --> Retrieval[Policy retrieval and clause scoring]
+        Barrier --> Retrieval
+        Retrieval --> Output[Coverage/citation output]
     end
-    Qdrant -. not fully synchronized to runtime .-> DefaultCorpus
+    Qdrant --> Retrieval
 ```
 
-Policy publishing is role-gated and separate from customer uploads. The admin route parses PDFs into paragraph chunks and stores them in SQL/Qdrant. The runtime coverage agent by default uses a separate in-memory corpus with exact-code and token-overlap scoring. Citation verification proves that text exists in the corpus; applicability to each billed line remains a policy-owner decision. Current coverage results expose policy deductible/copay terms; calculating remaining deductible or patient responsibility and adjudicating rider waiting periods are planned financial-policy capabilities.
+Policy publishing is role-gated and separate from customer uploads. The admin route parses PDFs into paragraph chunks and stores them in SQL/Qdrant. The runtime coverage agent retrieves clauses from the same published Qdrant index, so coverage results follow the published policy versions. Citation verification proves that the cited text exists in the retrieved policy; applicability to each billed line remains a policy-owner decision. Current coverage results expose policy deductible/copay terms; calculating remaining deductible or patient responsibility and adjudicating rider waiting periods are planned financial-policy capabilities.
 
 ## 10. Decision Engine
 
@@ -422,7 +422,7 @@ sequenceDiagram
     API-->>UI: Lock owner and expiry
     Reviewer->>UI: Choose confirm, override, or request information
     UI->>API: Submit action, reason, remarks, expected_case_version
-    API->>API: Check version; reject stale request with 409
+    API->>API: Check version, reject stale request with 409
     alt Override
         API->>DB: Append HumanReview and human Decision
         API->>DB: Set COMPLETED, increment version, release lock
@@ -437,7 +437,7 @@ sequenceDiagram
         API->>DB: Commit
         API->>Events: Broadcast confirmation event
     else Request information
-        API->>DB: Append HumanReview; set AWAITING_INFO and requested document types
+        API->>DB: Append HumanReview, set AWAITING_INFO and requested document types
         API->>DB: Increment version, release lock, commit
     end
     API-->>UI: Updated workflow state and version
@@ -535,13 +535,13 @@ cost = prompt_tokens / 1,000,000 * input_rate_per_million
     + completion_tokens / 1,000,000 * output_rate_per_million
 ```
 
-For a **hypothetical** rate card of $0.05 per million input tokens and $0.25 per million output tokens:
+For a **hypothetical** rate card of \$0.05 per million input tokens and \$0.25 per million output tokens:
 
 | Scenario | Input / output tokens | Illustrative text-token cost |
 |---|---:|---:|
-| Standard budget case | 25,000 / 3,500 | **$0.002125** (about **₹0.19** at assumed ₹88/USD) |
-| Complex / escalated budget case | 60,000 / 8,000 | **$0.005000** |
-| 1,000 standard cases | 25M / 3.5M | **$2.125** |
+| Standard budget case | 25,000 / 3,500 | **\$0.002125** (about **₹0.19** at assumed ₹88/USD) |
+| Complex / escalated budget case | 60,000 / 8,000 | **\$0.005000** |
+| 1,000 standard cases | 25M / 3.5M | **\$2.125** |
 
 These prices are editable examples, not the current rate card for MediShield's configured providers. Actual cost varies by provider, model, region, modality, and pricing date. A defensible per-case cost requires provider usage keyed to a non-PHI execution ID, all text and vision calls, retries/fallbacks, and a recorded rate-card version. Report infrastructure, OCR, embeddings, storage, and telemetry separately from text-token cost.
 
@@ -670,7 +670,7 @@ python -m pip install -e ".[dev]"
 cp .env.example .env
 ```
 
-On Windows, activate with `.venv\\Scripts\\activate`. `pyproject.toml` uses setuptools; `uv.lock` is present, but the commands above avoid assuming `uv` is installed.
+On Windows, activate with `.venv\Scripts\activate`. `pyproject.toml` uses setuptools; `uv.lock` is present, but the commands above avoid assuming `uv` is installed.
 
 ### Local services and database
 
@@ -753,14 +753,14 @@ No CI workflow was found under `.github/workflows/`; these are local checks, not
 | Frontend queue cannot load | Ensure API listens on port 8000 or configure `NEXT_PUBLIC_API_URL`. |
 | PostgreSQL connection refused | For development, inspect SQLite fallback and `SQLITE_DB_PATH`; for migrations, start PostgreSQL and verify `DATABASE_SYNC_URL`. |
 | Workflow remains queued | Check Redis reachability and Celery worker; local fallback runs in-process. |
-| Uploaded policy is not reflected in coverage | Confirm the policy was published; runtime retrieval currently uses its configured in-memory corpus. |
+| Uploaded policy is not reflected in coverage | Confirm the policy was published and indexed in Qdrant; runtime retrieval reads the published index. |
 | Clinical/OCR result is indeterminate | Inspect OCR span provenance and specialist reason codes; hosted models are optional and cannot replace missing source evidence. |
 
 ## 19. Roadmap and Planned Enhancements
 
 | Workstream | Planned capability | Next milestone |
 |---|---|---|
-| Policy knowledge | Connect administrator-published policy versions to runtime retrieval. | Exercise version selection, code-scoped coverage, and citation validation end to end. |
+| Policy knowledge | Harden version selection for administrator-published policies in runtime retrieval. | Exercise version selection, code-scoped coverage, and citation validation end to end. |
 | Decision governance | Ratify the P5 recommendation/denial behavior and clinical uncertainty settings. | Record product, legal, and clinical decisions in ADRs and regression tests. |
 | Evaluation | Establish reviewer-owned case outcomes and field/span-level evidence labels. | Separate training/tuning cases from held-out evaluation; report accuracy only on reviewed labels. |
 | Evidence recovery | Complete `AWAITING_INFO -> supplementary upload -> resume -> adjudication`. | Add versioned upload, storage, event, and audit contracts with integration tests. |
@@ -809,4 +809,3 @@ No root `LICENSE` file was found. Do not assume reuse rights; add and review a l
 - SDD feature specifications, audits, and reviews: [`docs/sdd/`](docs/sdd/)
 - Engineering rules: [`agents.md`](agents.md)
 - [Binary fraud review decision](docs/adr/ADR-033_BINARY_FRAUD_INDICATORS_AND_ANY_FACTOR_REVIEW.md)
-*** End Patch
