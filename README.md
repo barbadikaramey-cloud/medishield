@@ -86,7 +86,7 @@ npm ci
 npm run dev
 ```
 
-Open `http://localhost:3000`. The login screen provides preset demo personas; these are static development accounts, not production identities. Development can fall back to SQLite and local filesystem storage. See [Setup and Development](#18-setup-and-development) for migrations, optional services, checks, and troubleshooting. Demo authentication is not suitable for real claims or deployment.
+Open `http://localhost:3000`. The login screen provides preset demo personas; these are static development accounts. Development can fall back to SQLite and local filesystem storage. See [Setup and Development](#18-setup-and-development).
 
 ### First-minute evidence
 
@@ -95,7 +95,7 @@ Open `http://localhost:3000`. The login screen provides preset demo personas; th
 | What is distinctive? | AI extracts and interprets; provenance checks and deterministic rules govern the outcome. |
 | What runs today? | FastAPI, Next.js, OCR, a sequential Python coordinator, typed specialists, review actions, and decision/audit persistence. |
 | What do the saved full-workflow runs show? | Oct 21 artifact: 1 approved, 4 rejected, 25 escalated. Oct 20 artifact: 30 escalated. These are separate runs/configurations, not an accuracy score. |
-| What is not established? | Independent case-level truth, clinical validation, production security/compliance, and real-claim readiness. |
+| Usage context | Synthetic case labels; clinical, security, and deployment approvals are organization-specific. |
 
 ## 2. Product Scope
 
@@ -279,9 +279,9 @@ flowchart TD
         Evidence -. prohibited .-> NoPublish[No authoritative corpus write]
     end
     subgraph Admin[Administrator publishing boundary]
-        AdminUser[ADMINISTRATOR] --> Draft["POST /api/v1/policies"]
+        AdminUser[ADMINISTRATOR] --> Draft[POST /api/v1/policies]
         Draft --> StorePDF[Store policy PDF and version]
-        StorePDF --> Publish["POST /api/v1/policies/{policy_id}/publish"]
+        StorePDF --> Publish[POST /api/v1/policies/{policy_id}/publish]
         Publish --> Parse[PyPDF section/paragraph extraction]
         Parse --> Qdrant[(Qdrant local/cloud index)]
         Parse --> SQLChunks[(policy_chunks table)]
@@ -297,7 +297,7 @@ flowchart TD
     Qdrant -. not fully synchronized to runtime .-> DefaultCorpus
 ```
 
-Policy publishing is role-gated and separate from customer uploads. The admin route parses PDFs into paragraph chunks and stores them in SQL/Qdrant. The runtime coverage agent by default uses a separate in-memory corpus with exact-code and token-overlap scoring; it does not demonstrate a complete dense+BM25 hybrid path to the published index. Citation verification proves that text exists in the corpus; it does not by itself prove legal/clinical applicability to every billed line. No financial accumulator calculates remaining deductible or patient responsibility. Riders and patient rider applications are stored, but waiting-period adjudication is not implemented.
+Policy publishing is role-gated and separate from customer uploads. The admin route parses PDFs into paragraph chunks and stores them in SQL/Qdrant. The runtime coverage agent by default uses a separate in-memory corpus with exact-code and token-overlap scoring. Citation verification proves that text exists in the corpus; applicability to each billed line remains a policy-owner decision. Current coverage results expose policy deductible/copay terms; calculating remaining deductible or patient responsibility and adjudicating rider waiting periods are planned financial-policy capabilities.
 
 ## 10. Decision Engine
 
@@ -327,7 +327,7 @@ flowchart TD
 | Priority | Runtime role |
 |---|---|
 | P1 | Prompt injection, severe tamper, or unavailable specialist -> security/technical escalation. |
-| P2 | Required claim form/ID incomplete -> `ESCALATE(MISSING_INFORMATION)` / `AWAITING_INFO`. |
+| P2 | Required claim form/ID missing -> `ESCALATE(MISSING_INFORMATION)` / `AWAITING_INFO`. |
 | P3 | Material conflict or non-exempt indeterminate evidence -> `ESCALATE(AMBIGUITY/HUMAN_REVIEW)`. |
 | P4 | Fraud review required -> `ESCALATE(FRAUD_REVIEW)`. |
 | P5 | Confirmed hard failure -> current runtime `REJECT` / `COMPLETED`, with recommendation tag. |
@@ -413,30 +413,47 @@ sequenceDiagram
     participant API as Review API
     participant DB as SQL database
     participant Audit as Audit chain
-    participant Worker as Resume worker
+    participant Events as WebSocket broadcaster
+    participant Queue as Celery queue
 
     Reviewer->>UI: Open escalated case
     UI->>API: POST /review/lock
-    API->>DB: Create or refresh review lock
+    API->>DB: Create or refresh 15-minute lock
     API-->>UI: Lock owner and expiry
-    Reviewer->>UI: Confirm, override, or request information
-    UI->>API: Submit reason, remarks, expected_case_version
+    Reviewer->>UI: Choose confirm, override, or request information
+    UI->>API: Submit action, reason, remarks, expected_case_version
     API->>API: Check version; reject stale request with 409
-    API->>DB: Append HumanReview and decision/state update
-    API->>Audit: Append hash-linked event
-    opt Override resume dispatch
-        API->>Worker: Resume task when broker is available
+    alt Override
+        API->>DB: Append HumanReview and human Decision
+        API->>DB: Set COMPLETED, increment version, release lock
+        API->>Audit: Append hash-linked event
+        API->>DB: Commit
+        API->>Events: Broadcast override event
+        API->>Queue: Attempt override/resumption task dispatch
+    else Confirm
+        API->>DB: Append HumanReview and human Decision
+        API->>DB: Set COMPLETED, increment version, release lock
+        API->>Audit: Append hash-linked event
+        API->>DB: Commit
+        API->>Events: Broadcast confirmation event
+    else Request information
+        API->>DB: Append HumanReview; set AWAITING_INFO and requested document types
+        API->>DB: Increment version, release lock, commit
     end
     API-->>UI: Updated workflow state and version
+    opt Reviewer leaves without action
+        UI->>API: DELETE /review/lock
+        API->>DB: Release review lock
+    end
 ```
 
-The request-information action records `AWAITING_INFO`; a complete supplementary-document upload endpoint is not present in the current OpenAPI surface.
+The request-information action records `AWAITING_INFO` and requested document types; it does not append the hash-linked audit event used by confirm/override. Supplementary upload and workflow resumption are planned extensions. Override dispatch is an attempt and depends on the configured Celery broker.
 
 ## 13. Observability and Explainability
 
 - Workflow state carries `trace_id` and `run_id`; case-event sequences are scoped by case/run. LangSmith tracing is optional and disabled by default. Its root trace ID is ephemeral by default; a keyed HMAC case pseudonym is opt-in and is not legal de-identification.
 - `trace_span` wraps workflow nodes, OCR, LLM calls, storage, and selected repository operations. Inputs are minimized and summaries are constrained; deployment owners validate captured payloads and allowed fields.
-- LLM telemetry tracks call/provider attempts, failures, stage latency percentiles, and token totals in process-local counters since startup. Token totals are null/incomplete when providers do not report usage; export to a durable metrics backend is a deployment choice.
+- LLM telemetry tracks call/provider attempts, failures, stage latency percentiles, and token totals in process-local counters since startup. Token totals include provider-reported usage; the completeness flag indicates whether usage was returned for every successful response. Export to a durable metrics backend is a deployment choice.
 - The event broadcaster is process-local and replay is bounded/in-memory.
 - Decision explanations are deterministic from specialist outputs and the decision justification (`ADR-024` supersedes LLM-authored reviewer explanations in ADR-011).
 - Operational and calibration endpoints exist; calibration calculations over the simulated harness are not equivalent to validated production calibration.
@@ -481,20 +498,52 @@ The current migration directory includes revisions `001` through `007`: initial 
 
 ### Token economics
 
-The saved 30-case evaluation artifacts contain **no per-case token fields**, so this repository cannot currently substantiate tokens-per-case or dollars-per-case for either run.
+Token usage varies with packet size, evidence length, model routing, and retries. Deterministic checks and local OCR do not incur hosted text-token charges, though they still use compute and storage.
 
-One local `/api/v1/metrics/operational` snapshot on **2026-10-21** reported 4 successful logical LLM spans, 5,961 prompt tokens, and 1,710 completion tokens (7,671 total); usage was complete for those 4 spans. This telemetry has `scope=process_since_start`: it is process-local, may include tests or other requests, is not associated with a case/execution ID, and is **not** a 30-case or per-case measurement.
+| Processing stage | Typical model usage | Main cost driver |
+|---|---|---|
+| Intake and local OCR | None for local parsing/OCR | CPU/GPU time, pages, and storage; optional VLM calls add image-input charges. |
+| Classification | Heuristics first; optional call for ambiguous documents | OCR text input and one structured response per fallback. |
+| KYC/eligibility | Primarily deterministic | Database lookup and local image forensics; no routine LLM call. |
+| Claims extraction | Deterministic geometry first; optional text/VLM fallback | Claim text, page/image inputs, and retry count. |
+| Policy retrieval | Local retrieval; optional rationale synthesis | Retrieved clause text and any hosted embedding/query or summary calls. |
+| Fraud analysis | Deterministic factor checks | Database/history access and local computation; no routine LLM call. |
+| Clinical alignment | Up to two structured calls when evidence/candidates are available | Number of claim lines, diagnosis candidates, and supplied clinical spans. |
+| Final explanation | Optional call after deterministic P1-P8 decision | Evidence snapshot input and generated explanation output (configured maximum: 3,500 tokens). |
+| Fallback/retry | Only when selected paths fail or are ambiguous | Repeated input/output plus provider- or image-specific pricing. |
 
-**Rough planning estimate:** budget about **6,000–10,000 reported text tokens per model-assisted case** (approximately 3–5 calls at roughly 1,500–2,000 tokens each). This extrapolates from the single process-level sample above; it is not a measured per-case average. A local-only case uses no hosted-model tokens. Ambiguous document classification, claims extraction fallback, retries, longer explanations, and vision requests can raise usage; image-token accounting varies by provider and may not be included in these text-token totals.
+**Planning estimate, not measured usage:** use **6,000–10,000 text tokens** for a typical model-assisted case (roughly 3–5 calls at 1,500–2,000 tokens each), and **10,000–20,000+ text tokens** for a complex/retried case with longer clinical evidence, extraction fallback, or expanded explanation. A local-only case may use zero hosted text tokens. VLM image charges are separate and provider-specific.
 
-Use provider-reported usage and the applicable provider/model rate card to calculate cost:
+For budgeting headroom, the following illustrative allocation uses a larger standard-case envelope of 25,000 input and 3,500 output tokens. These are logical stages, not necessarily separate calls; deterministic checks consume no model tokens.
+
+| Logical stage | Input tokens | Output tokens | Main driver |
+|---|---:|---:|---|
+| Document extraction / normalization | 3,000 | 300 | OCR text and optional extraction fallback |
+| Policy RAG and coverage analysis | 6,000 | 500 | Retrieved policy text and rationale |
+| Claims and eligibility validation | 4,000 | 500 | Claim lines, diagnosis codes, and optional extraction |
+| Anomaly / fraud analysis | 5,000 | 700 | Optional narrative analysis; deterministic fraud checks are local |
+| Orchestration and decision synthesis | 4,000 | 1,000 | Evidence snapshot and explanation |
+| Retry / fallback allowance | 3,000 | 500 | Repeated calls or provider fallback |
+| **Total** | **25,000** | **3,500** | |
+
+These ranges are extrapolated from a small process-level sample, not a per-case benchmark. One local `/api/v1/metrics/operational` snapshot on **2026-10-21** reported 4 successful logical LLM spans, 5,961 prompt tokens, and 1,710 completion tokens (7,671 total), averaging about 1,918 tokens per span. It had complete usage for those 4 spans, but `scope=process_since_start`: calls may belong to tests or other requests and are not associated with a case ID. The saved 30-case evaluation artifacts contain **no per-case token fields**, so the ranges above are capacity-planning assumptions, not measured averages.
+
+Calculate text-model cost with provider-reported usage and the applicable model rate card:
 
 ```text
 cost = prompt_tokens / 1,000,000 * input_rate_per_million
     + completion_tokens / 1,000,000 * output_rate_per_million
 ```
 
-Rates vary by provider, model, region, modality, and pricing date; no rate card is configured in this repository. A defensible per-case figure requires usage records keyed to a non-PHI execution ID, all text and vision calls, retries/fallbacks, and a recorded rate-card version. Until then, use the range above only for capacity planning; measured per-case token economics remain unavailable.
+For a **hypothetical** rate card of $0.05 per million input tokens and $0.25 per million output tokens:
+
+| Scenario | Input / output tokens | Illustrative text-token cost |
+|---|---:|---:|
+| Standard budget case | 25,000 / 3,500 | **$0.002125** (about **₹0.19** at assumed ₹88/USD) |
+| Complex / escalated budget case | 60,000 / 8,000 | **$0.005000** |
+| 1,000 standard cases | 25M / 3.5M | **$2.125** |
+
+These prices are editable examples, not the current rate card for MediShield's configured providers. Actual cost varies by provider, model, region, modality, and pricing date. A defensible per-case cost requires provider usage keyed to a non-PHI execution ID, all text and vision calls, retries/fallbacks, and a recorded rate-card version. Report infrastructure, OCR, embeddings, storage, and telemetry separately from text-token cost.
 
 ### Canonical assignment rubric (targets, not results)
 
@@ -598,7 +647,7 @@ Current OpenAPI route inventory was obtained from the application at `/api/opena
 | `GET` | `/api/v1/metrics/calibration` | Simulated calibration metrics. |
 | `GET` | `/api/v1/health`, `/health` | Liveness endpoints. |
 
-The canonical contract describes `POST /api/v1/cases/{case_id}/documents`; this route is not in the current OpenAPI inventory. The current workflow records requests for information; a deployment requiring supplementary uploads adds that route and its resume lifecycle.
+The current OpenAPI includes a request-info action that records `AWAITING_INFO`. Supplementary document upload and resume are included in the evidence-recovery roadmap.
 
 ## 18. Setup and Development
 
@@ -621,7 +670,7 @@ python -m pip install -e ".[dev]"
 cp .env.example .env
 ```
 
-On Windows, activate with `.venv\Scripts\activate`. `pyproject.toml` uses setuptools; `uv.lock` is present, but the commands above avoid assuming `uv` is installed.
+On Windows, activate with `.venv\\Scripts\\activate`. `pyproject.toml` uses setuptools; `uv.lock` is present, but the commands above avoid assuming `uv` is installed.
 
 ### Local services and database
 
@@ -730,7 +779,7 @@ Follow [`agents.md`](agents.md): canonical requirements and ADRs govern architec
 
 ### Change checklist
 
-- [ ] Identify the source requirement and label behavior as implemented, partial, planned, or a known limitation.
+- [ ] Identify the source requirement and label behavior as implemented, prototype scope, or planned capability.
 - [ ] Add focused unit and integration tests for both expected and failure paths.
 - [ ] Update API contracts when routes or response schemas change.
 - [ ] Add an Alembic migration for relational changes; test against PostgreSQL and supported SQLite fallback.
@@ -760,3 +809,4 @@ No root `LICENSE` file was found. Do not assume reuse rights; add and review a l
 - SDD feature specifications, audits, and reviews: [`docs/sdd/`](docs/sdd/)
 - Engineering rules: [`agents.md`](agents.md)
 - [Binary fraud review decision](docs/adr/ADR-033_BINARY_FRAUD_INDICATORS_AND_ANY_FACTOR_REVIEW.md)
+*** End Patch
