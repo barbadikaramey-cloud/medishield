@@ -2,7 +2,7 @@
 
 **From scattered claim documents to traceable review decisions.**
 
-FOR DEMO VEDIO :- https://lnkd.in/p/dysczYMX
+FOR DEMO VIDEO :- https://lnkd.in/p/dysczYMX
 
 MediShield is a prototype claims-intake and review platform. It turns a packet of forms, identity documents, bills, and clinical records into extracted evidence, specialist findings, and an auditable `APPROVE`, `REJECT`, or `ESCALATE` recommendation for an operations reviewer.
 
