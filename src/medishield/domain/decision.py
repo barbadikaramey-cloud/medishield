@@ -226,6 +226,7 @@ def is_clinical_support_exempt(context: DecisionInputContext) -> bool:
             IndeterminateReason.DIAGNOSIS_VALIDATION_UNAVAILABLE,
             IndeterminateReason.GUIDELINE_UNAVAILABLE,
             IndeterminateReason.MISSING_EVIDENCE_SPANS,
+            IndeterminateReason.CLINICAL_DETERMINATION_UNCERTAIN,
         }
         return bool(clinical.reason_codes) and set(clinical.reason_codes).issubset(approvable_reasons)
     return (

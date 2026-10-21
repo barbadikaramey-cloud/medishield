@@ -329,7 +329,7 @@ def generate_case_report_pdf(case: Any, audit_events: list[Any] | None = None) -
             Paragraph("<strong>Fraud Engine</strong><br/><font size=7 color='#64748b'>Spec 09 § 1</font>", body_style),
             Paragraph(
                 f"<strong>{_esc(fraud_info.get('verdict', 'PASS'))}</strong><br/>"
-                f"Review Required: {'Yes' if fraud_info.get('fraud_review_required', bool(fraud_info.get('anomalies'))) else 'No'}",
+                f"Review Required: {'Yes' if (fraud_info.get('fraud_review_required') or fraud_info.get('duplicate_claim_detected') or fraud_info.get('duplicate_detected') or fraud_info.get('anomalies')) else 'No'}",
                 body_style,
             ),
             Paragraph(

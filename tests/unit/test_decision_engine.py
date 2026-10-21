@@ -267,6 +267,27 @@ class TestDeterministicDecisionEngine:
         assert output.rule_id_matched == RULE_P4_HIGH_FRAUD
         assert "one deterministic fraud factor" in output.justification.lower()
 
+    def test_rule_p4_routes_positive_legacy_score_to_review(
+        self, engine: DeterministicDecisionEngine
+    ) -> None:
+        context = DecisionInputContext(
+            case_id="CASE-P4-LEGACY-SCORE",
+            execution_id="EXEC-P4-LEGACY-SCORE",
+            present_document_types=[DocumentType.CLAIM_FORM, DocumentType.ID_DOCUMENT],
+            fraud_output=FraudAgentOutput(
+                verdict=AgentVerdict.PASS,
+                confidence=1.0,
+                fraud_score=0.05,
+                risk_level=RiskLevel.LOW,
+                anomalies=["Legacy factor detector reported an anomaly"],
+                latency_ms=1,
+            ),
+        )
+        output = engine.evaluate(context)
+        assert output.decision == BusinessDecision.ESCALATE
+        assert output.escalation_sub_reason == EscalationSubReason.FRAUD_REVIEW
+        assert output.rule_id_matched == RULE_P4_HIGH_FRAUD
+
     def test_rule_p5_hard_reject(self, engine: DeterministicDecisionEngine) -> None:
         context = DecisionInputContext(
             case_id="CASE-P5",

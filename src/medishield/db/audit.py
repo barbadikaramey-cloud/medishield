@@ -1,6 +1,6 @@
 import hashlib
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -25,7 +25,12 @@ def compute_audit_hash(
     """
     event_id_str = str(event_id)
     payload_str = canonical_json_dump(payload)
-    created_at_str = created_at.isoformat()
+    normalized_created_at = (
+        created_at.replace(tzinfo=UTC)
+        if created_at.tzinfo is None
+        else created_at.astimezone(UTC)
+    )
+    created_at_str = normalized_created_at.isoformat()
 
     hasher = hashlib.sha256()
     hasher.update(event_id_str.encode("utf-8"))

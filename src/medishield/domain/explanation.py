@@ -283,7 +283,12 @@ def generate_deterministic_explanation(
         fr = context.fraud_output
         risk_level = _safe_get(fr, "risk_level")
         r_str = risk_level.value if hasattr(risk_level, "value") else str(risk_level or "LOW")
-        review_required = bool(_safe_get(fr, "fraud_review_required", False))
+        anomalies = _safe_get(fr, "anomalies", [])
+        review_required = bool(
+            _safe_get(fr, "fraud_review_required", False)
+            or _safe_get(fr, "duplicate_claim_detected", False)
+            or anomalies
+        )
         lines.append(
             f"- **Fraud Review Required:** `{'YES' if review_required else 'NO'}` "
             f"| **Status:** `{r_str}`"
@@ -292,7 +297,6 @@ def generate_deterministic_explanation(
         fr_v_str = fr_verdict.value if hasattr(fr_verdict, "value") else str(fr_verdict or "PASS")
         fr_conf = float(_safe_get(fr, "confidence", 1.0) or 1.0)
         lines.append(f"- **Fraud Verdict:** `{fr_v_str}` (Confidence: {fr_conf * 100:.1f}%)")
-        anomalies = _safe_get(fr, "anomalies", [])
         if anomalies:
             lines.append(f"- **Detected Anomalies:** {', '.join(anomalies)}")
         else:
@@ -301,9 +305,9 @@ def generate_deterministic_explanation(
         features = _safe_get(fr, "features")
         if features:
             detected_features = [
-                f.feature_name
+                _safe_get(f, "feature_name")
                 for f in features
-                if getattr(f, "detected", False) and hasattr(f, "feature_name")
+                if _safe_get(f, "detected", False) and _safe_get(f, "feature_name")
             ]
         if detected_features:
             lines.append(f"- **Detected Factors:** {', '.join(detected_features)}")

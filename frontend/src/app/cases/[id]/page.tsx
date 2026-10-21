@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import {
@@ -67,6 +67,7 @@ export default function CaseDetailPage() {
   const { user, loading: authLoading } = useAuth();
 
   const [caseData, setCaseData] = useState<CaseDetailResponse | null>(null);
+  const caseVersionRef = useRef<number | undefined>(undefined);
   const [auditData, setAuditData] = useState<AuditVerifyResponse | null>(null);
   const [lockData, setLockData] = useState<ReviewLockResponse | null>(null);
   const [selectedDocIndex, setSelectedDocIndex] = useState(0);
@@ -163,6 +164,7 @@ export default function CaseDetailPage() {
         getCaseDetail(caseId),
         getAuditVerification(caseId).catch(() => null),
       ]);
+      caseVersionRef.current = detail.version;
       setCaseData(detail);
       setAuditData(audit);
     } catch (err: unknown) {
@@ -172,16 +174,87 @@ export default function CaseDetailPage() {
     }
   }, [caseId]);
 
-  const handlePipelineComplete = useCallback(() => {
-    void loadData();
+  const handlePipelineComplete = useCallback(async () => {
+    const startingVersion = caseVersionRef.current;
+    let latestCase: CaseDetailResponse | null = null;
+
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      try {
+        latestCase = await getCaseDetail(caseId);
+        const terminalState = ["COMPLETED", "FAILED"].includes(latestCase.workflow_state);
+        if (
+          startingVersion === undefined ||
+          latestCase.version > startingVersion ||
+          (!rerunning && terminalState) ||
+          attempt === 11
+        ) {
+          break;
+        }
+      } catch {
+        if (attempt === 11) break;
+      }
+
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 250));
+    }
+
+    if (latestCase) {
+      setCaseData(latestCase);
+      setAuditData(await getAuditVerification(caseId).catch(() => null));
+    } else {
+      await loadData();
+    }
+
     if (rerunning) {
+      setRerunning(false);
       setPipelineAwaitingReveal(true);
     }
-  }, [loadData, rerunning]);
+  }, [caseId, loadData, rerunning]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    if (!caseData) return;
+
+    const workflowInProgress = ["RECEIVED", "SCANNING", "SPLIT", "CLASSIFYING", "ANALYZING"].includes(
+      caseData.workflow_state,
+    );
+    if (!rerunning && !workflowInProgress) return;
+
+    const startingVersion = caseData.version;
+    let isCurrent = true;
+    let requestPending = false;
+    const intervalId = window.setInterval(async () => {
+      if (requestPending) return;
+      requestPending = true;
+      try {
+        const latestCase = await getCaseDetail(caseId);
+        const workflowSettled = ["AWAITING_INFO", "AWAITING_HUMAN", "COMPLETED", "FAILED"].includes(
+          latestCase.workflow_state,
+        );
+        if (isCurrent && latestCase.version > startingVersion && workflowSettled) {
+          caseVersionRef.current = latestCase.version;
+          setCaseData(latestCase);
+          setAuditData(await getAuditVerification(caseId).catch(() => null));
+          if (rerunning) {
+            setRerunning(false);
+            setPipelineAwaitingReveal(true);
+          }
+          window.clearInterval(intervalId);
+        }
+      } catch {
+        // Keep polling while the active workflow is temporarily unavailable.
+      } finally {
+        requestPending = false;
+      }
+    }, 1500);
+
+    return () => {
+      isCurrent = false;
+      window.clearInterval(intervalId);
+    };
+  }, [caseData, caseId, rerunning]);
 
   const selectedDocId = caseData?.documents?.[selectedDocIndex]?.document_id;
 
@@ -290,8 +363,32 @@ export default function CaseDetailPage() {
       await loadData();
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Override submission failed.";
-      if (message.includes("Optimistic lock conflict")) {
-        await loadData();
+      let latestCase: CaseDetailResponse | null = null;
+      try {
+        latestCase = await getCaseDetail(caseId);
+        setCaseData(latestCase);
+      } catch {
+        // Keep the original request error when the case cannot be reloaded.
+      }
+
+      const latestReview = latestCase?.latest_human_review;
+      const overrideWasApplied =
+        latestCase !== null &&
+        latestCase.version > caseData.version &&
+        latestCase.current_decision === overrideDecision &&
+        latestReview?.action === "OVERRIDE" &&
+        latestReview.new_decision === overrideDecision &&
+        latestReview.reason_code === reasonCode &&
+        latestReview.remarks === remarks.trim();
+      const caseVersionChanged =
+        latestCase !== null && latestCase.version !== caseData.version;
+
+      if (overrideWasApplied) {
+        setIsOverrideModalOpen(false);
+        setLockData(null);
+        setRemarks("");
+        setActionError(null);
+      } else if (message.includes("Optimistic lock conflict") || caseVersionChanged) {
         setActionError("The case changed while you were reviewing it. The latest version is loaded; verify its current decision before submitting another override.");
       } else {
         setActionError(message);
@@ -335,10 +432,8 @@ export default function CaseDetailPage() {
     setActionError(null);
     try {
       await rerunCase(caseId);
-      setPipelineAwaitingReveal(true);
     } catch (err: unknown) {
       setActionError(err instanceof Error ? err.message : "Workflow rerun failed.");
-    } finally {
       setRerunning(false);
     }
   };

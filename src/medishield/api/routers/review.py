@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from kombu.exceptions import OperationalError as KombuOperationalError
 from sqlalchemy.orm import Session
 
 from medishield.api.deps import (
@@ -262,7 +263,7 @@ def submit_human_override(
             reviewer_id=current_user.user_id,
             expected_case_version=case.version,
         )
-    except (ConnectionError, OSError) as exc:
+    except (ConnectionError, OSError, KombuOperationalError) as exc:
         logger.warning("Celery broker offline; resume task deferred for case %s: %s", case_id, exc)
 
     return HumanReviewResponse(
