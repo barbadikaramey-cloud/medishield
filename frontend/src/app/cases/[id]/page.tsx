@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import {
@@ -67,6 +67,7 @@ export default function CaseDetailPage() {
   const { user, loading: authLoading } = useAuth();
 
   const [caseData, setCaseData] = useState<CaseDetailResponse | null>(null);
+  const caseVersionRef = useRef<number | undefined>(undefined);
   const [auditData, setAuditData] = useState<AuditVerifyResponse | null>(null);
   const [lockData, setLockData] = useState<ReviewLockResponse | null>(null);
   const [selectedDocIndex, setSelectedDocIndex] = useState(0);
@@ -163,6 +164,7 @@ export default function CaseDetailPage() {
         getCaseDetail(caseId),
         getAuditVerification(caseId).catch(() => null),
       ]);
+      caseVersionRef.current = detail.version;
       setCaseData(detail);
       setAuditData(audit);
     } catch (err: unknown) {
@@ -172,16 +174,87 @@ export default function CaseDetailPage() {
     }
   }, [caseId]);
 
-  const handlePipelineComplete = useCallback(() => {
-    void loadData();
+  const handlePipelineComplete = useCallback(async () => {
+    const startingVersion = caseVersionRef.current;
+    let latestCase: CaseDetailResponse | null = null;
+
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      try {
+        latestCase = await getCaseDetail(caseId);
+        const terminalState = ["COMPLETED", "FAILED"].includes(latestCase.workflow_state);
+        if (
+          startingVersion === undefined ||
+          latestCase.version > startingVersion ||
+          (!rerunning && terminalState) ||
+          attempt === 11
+        ) {
+          break;
+        }
+      } catch {
+        if (attempt === 11) break;
+      }
+
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 250));
+    }
+
+    if (latestCase) {
+      setCaseData(latestCase);
+      setAuditData(await getAuditVerification(caseId).catch(() => null));
+    } else {
+      await loadData();
+    }
+
     if (rerunning) {
+      setRerunning(false);
       setPipelineAwaitingReveal(true);
     }
-  }, [loadData, rerunning]);
+  }, [caseId, loadData, rerunning]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    if (!caseData) return;
+
+    const workflowInProgress = ["RECEIVED", "SCANNING", "SPLIT", "CLASSIFYING", "ANALYZING"].includes(
+      caseData.workflow_state,
+    );
+    if (!rerunning && !workflowInProgress) return;
+
+    const startingVersion = caseData.version;
+    let isCurrent = true;
+    let requestPending = false;
+    const intervalId = window.setInterval(async () => {
+      if (requestPending) return;
+      requestPending = true;
+      try {
+        const latestCase = await getCaseDetail(caseId);
+        const workflowSettled = ["AWAITING_INFO", "AWAITING_HUMAN", "COMPLETED", "FAILED"].includes(
+          latestCase.workflow_state,
+        );
+        if (isCurrent && latestCase.version > startingVersion && workflowSettled) {
+          caseVersionRef.current = latestCase.version;
+          setCaseData(latestCase);
+          setAuditData(await getAuditVerification(caseId).catch(() => null));
+          if (rerunning) {
+            setRerunning(false);
+            setPipelineAwaitingReveal(true);
+          }
+          window.clearInterval(intervalId);
+        }
+      } catch {
+        // Keep polling while the active workflow is temporarily unavailable.
+      } finally {
+        requestPending = false;
+      }
+    }, 1500);
+
+    return () => {
+      isCurrent = false;
+      window.clearInterval(intervalId);
+    };
+  }, [caseData, caseId, rerunning]);
 
   const selectedDocId = caseData?.documents?.[selectedDocIndex]?.document_id;
 
@@ -290,8 +363,32 @@ export default function CaseDetailPage() {
       await loadData();
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Override submission failed.";
-      if (message.includes("Optimistic lock conflict")) {
-        await loadData();
+      let latestCase: CaseDetailResponse | null = null;
+      try {
+        latestCase = await getCaseDetail(caseId);
+        setCaseData(latestCase);
+      } catch {
+        // Keep the original request error when the case cannot be reloaded.
+      }
+
+      const latestReview = latestCase?.latest_human_review;
+      const overrideWasApplied =
+        latestCase !== null &&
+        latestCase.version > caseData.version &&
+        latestCase.current_decision === overrideDecision &&
+        latestReview?.action === "OVERRIDE" &&
+        latestReview.new_decision === overrideDecision &&
+        latestReview.reason_code === reasonCode &&
+        latestReview.remarks === remarks.trim();
+      const caseVersionChanged =
+        latestCase !== null && latestCase.version !== caseData.version;
+
+      if (overrideWasApplied) {
+        setIsOverrideModalOpen(false);
+        setLockData(null);
+        setRemarks("");
+        setActionError(null);
+      } else if (message.includes("Optimistic lock conflict") || caseVersionChanged) {
         setActionError("The case changed while you were reviewing it. The latest version is loaded; verify its current decision before submitting another override.");
       } else {
         setActionError(message);
@@ -335,10 +432,8 @@ export default function CaseDetailPage() {
     setActionError(null);
     try {
       await rerunCase(caseId);
-      setPipelineAwaitingReveal(true);
     } catch (err: unknown) {
       setActionError(err instanceof Error ? err.message : "Workflow rerun failed.");
-    } finally {
       setRerunning(false);
     }
   };
@@ -713,7 +808,7 @@ export default function CaseDetailPage() {
                 </div>
 
                 {/* Visual Provenance Viewer */}
-                <div className="bg-card-inner rounded-card border border-border p-4 space-y-3 shadow-xs">
+                <div className="bg-card-inner/60 rounded-card p-4 space-y-3 shadow-xs">
                   <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 text-xs text-secondary border-b border-border pb-2.5">
                     <div className="flex items-center space-x-2">
                       <span className="font-semibold text-foreground">Extracted Visual Provenance</span>
@@ -914,8 +1009,8 @@ export default function CaseDetailPage() {
                 </div>
 
                 {/* Extracted vs Expected / Reconciled Adjudication Comparison Panel */}
-                <div className="bg-card-inner rounded-card border border-border p-4 space-y-3 shadow-xs">
-                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-2">
+                <div className="bg-card-inner/60 rounded-card p-4 space-y-3 shadow-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2 pb-2">
                     <div className="flex min-w-0 items-center space-x-2">
                       <Scale className="w-4 h-4 text-muted" />
                       <span className="font-semibold text-xs text-foreground uppercase tracking-wider">
@@ -927,7 +1022,7 @@ export default function CaseDetailPage() {
 
                   {/* Financial Totals Comparison Grid */}
                   <div className="grid min-w-0 grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-3">
-                    <div className="flex min-h-[112px] min-w-0 flex-col rounded-card border border-border bg-card p-3 shadow-xs transition-all duration-180 hover:border-sky/40 hover:shadow-sm">
+                    <div className="flex min-h-[112px] min-w-0 flex-col rounded-card border border-border/35 bg-card p-3 shadow-xs">
                       <span className="block min-h-8 text-[10px] font-semibold uppercase leading-4 text-muted">Declared Header Total</span>
                       <div className="mt-1 break-all font-mono text-base font-bold tabular-nums text-foreground">
                         ${Number(caseData.agent_findings?.claims?.claim_amount?.value ?? 0).toFixed(2)}
@@ -937,7 +1032,7 @@ export default function CaseDetailPage() {
                       </div>
                     </div>
 
-                    <div className="flex min-h-[112px] min-w-0 flex-col rounded-card border border-border bg-card p-3 shadow-xs transition-all duration-180 hover:border-sky/40 hover:shadow-sm">
+                    <div className="flex min-h-[112px] min-w-0 flex-col rounded-card border border-border/35 bg-card p-3 shadow-xs">
                       <span className="block min-h-8 text-[10px] font-semibold uppercase leading-4 text-muted">Calculated Line Sum</span>
                       <div className="mt-1 break-all font-mono text-base font-bold tabular-nums text-foreground">
                         ${Number(caseData.agent_findings?.claims?.calculated_lines_sum ?? 0).toFixed(2)}
@@ -947,30 +1042,30 @@ export default function CaseDetailPage() {
                       </div>
                     </div>
 
-                    <div className="flex min-h-[112px] min-w-0 flex-col rounded-card border border-border bg-card p-3 shadow-xs transition-all duration-180 hover:border-sky/40 hover:shadow-sm">
+                    <div className="flex min-h-[112px] min-w-0 flex-col rounded-card border border-border/35 bg-card p-3 shadow-xs">
                       <span className="block min-h-8 text-[10px] font-semibold uppercase leading-4 text-muted">Arithmetic Validation</span>
                       <div className="mt-1 min-w-0">
                         {caseData.agent_findings?.claims?.line_items_sum_valid ? (
-                          <span className="inline-flex max-w-full flex-wrap items-center gap-1 rounded border border-status-success/20 bg-status-success/10 px-2 py-0.5 text-[11px] font-bold text-status-success">
-                            <CheckCircle className="h-3.5 w-3.5 shrink-0" />
-                            <span className="break-words">MATCH (Exact)</span>
+                          <span className="inline-flex max-w-full flex-wrap items-center gap-1 rounded bg-status-success/5 px-2 py-0.5 text-[11px] font-semibold text-secondary">
+                            <CheckCircle className="h-3.5 w-3.5 shrink-0 text-status-success/75" />
+                            <span className="break-words">Totals match</span>
                           </span>
                         ) : (
-                          <span className="inline-flex max-w-full flex-wrap items-center gap-1 rounded border border-status-warning/20 bg-status-warning/10 px-2 py-0.5 text-[11px] font-bold text-status-warning">
-                            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                            <span className="break-all">ARITHMETIC_MISMATCH</span>
+                          <span className="inline-flex max-w-full flex-wrap items-center gap-1 rounded bg-status-warning/5 px-2 py-0.5 text-[11px] font-semibold text-secondary">
+                            <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-status-warning/75" />
+                            <span className="break-words">Totals differ</span>
                           </span>
                         )}
                       </div>
                       <div className="mt-auto pt-1 text-[9px] text-muted">
-                        Rule 11 Deterministic Check
+                        Billing total check
                       </div>
                     </div>
                   </div>
 
                   {/* Extracted CPT Procedural Codes */}
                   {caseData.agent_findings?.claims?.cpt_codes && caseData.agent_findings.claims.cpt_codes.length > 0 && (
-                    <div className="p-3 bg-card border border-border rounded-card space-y-1.5 shadow-xs">
+                    <div className="p-3 bg-card rounded-card border border-border/35 space-y-1.5 shadow-xs">
                       <div className="flex items-center justify-between">
                         <span className="text-[10px] text-muted uppercase font-semibold">Extracted Procedure Codes (CPT)</span>
                         <span className="text-[10px] text-muted">Table-Isolated Extraction</span>
@@ -988,9 +1083,9 @@ export default function CaseDetailPage() {
 
                   {/* Itemized Service Lines Table */}
                   {caseData.agent_findings?.claims?.service_lines && caseData.agent_findings.claims.service_lines.length > 0 && (
-                    <div className="overflow-x-auto rounded-card border border-border bg-card shadow-xs">
+                    <div className="overflow-x-auto rounded-card bg-card shadow-xs">
                       <table className="w-full text-left text-[11px] font-mono">
-                        <thead className="bg-card-inner text-muted uppercase text-[9px] border-b border-border">
+                        <thead className="bg-card-inner/70 text-muted uppercase text-[9px]">
                           <tr>
                             <th className="py-2 px-3">#</th>
                             <th className="py-2 px-3">CPT</th>
@@ -1001,7 +1096,7 @@ export default function CaseDetailPage() {
                             <th className="py-2 px-3 text-right">Total ($)</th>
                           </tr>
                         </thead>
-                        <tbody className="divide-y divide-border text-secondary">
+                        <tbody className="divide-y divide-black/5 text-secondary">
                           {caseData.agent_findings.claims.service_lines.map((line: any, i: number) => {
                             const cptVal = line.cpt_code?.value || line.hcpcs?.value || "—";
                             const amtVal = typeof line.total_charge?.value === "number" ? line.total_charge.value : (typeof line.amount?.value === "number" ? line.amount.value : null);
@@ -1334,7 +1429,7 @@ export default function CaseDetailPage() {
                   <button
                     onClick={handleConfirmRecommendation}
                     disabled={submittingAction}
-                    className="w-full h-9 py-2 px-4 rounded-btn bg-[#397FA9] hover:bg-[#2C6688] text-white text-xs font-bold shadow-xs flex items-center justify-center space-x-2 transition-all duration-180 active:scale-[0.98] disabled:opacity-50"
+                    className="w-full h-9 py-2 px-4 rounded-btn bg-accent-hover hover:bg-accent text-white text-xs font-bold shadow-xs flex items-center justify-center space-x-2 transition-all duration-180 active:scale-[0.98] disabled:opacity-50"
                   >
                     <CheckCircle className="w-4 h-4" />
                     <span>Confirm Recommended Decision</span>
@@ -1344,16 +1439,16 @@ export default function CaseDetailPage() {
                     <button
                       onClick={() => openOverrideModal()}
                       disabled={submittingAction}
-                      className="h-9 py-2 px-3 rounded-btn bg-card hover:bg-rose-blush text-rose-deep border border-border hover:border-rose-med/40 text-xs font-semibold shadow-xs flex items-center justify-center space-x-1.5 transition-all duration-180 active:scale-[0.98] disabled:opacity-50"
+                      className="h-9 py-2 px-3 rounded-btn bg-card-inner/70 hover:bg-card-hover text-secondary border border-border/60 text-xs font-semibold shadow-xs flex items-center justify-center space-x-1.5 transition-all duration-180 active:scale-[0.98] disabled:opacity-50"
                     >
-                      <AlertTriangle className="w-3.5 h-3.5 text-status-warning" />
+                      <AlertTriangle className="w-3.5 h-3.5 text-status-warning/75" />
                       <span>Override Decision</span>
                     </button>
 
                     <button
                       onClick={() => setIsRfiModalOpen(true)}
                       disabled={submittingAction}
-                      className="h-9 py-2 px-3 rounded-btn bg-card hover:bg-pink-hover text-secondary hover:text-pink-deep border border-border hover:border-pink-border text-xs font-semibold shadow-xs flex items-center justify-center space-x-1.5 transition-all duration-180 active:scale-[0.98] disabled:opacity-50"
+                      className="h-9 py-2 px-3 rounded-btn bg-card-inner/70 hover:bg-card-hover text-secondary border border-border/60 text-xs font-semibold shadow-xs flex items-center justify-center space-x-1.5 transition-all duration-180 active:scale-[0.98] disabled:opacity-50"
                     >
                       <Send className="w-3.5 h-3.5 text-muted" />
                       <span>Request Info (RFI)</span>
@@ -1369,15 +1464,15 @@ export default function CaseDetailPage() {
                   <div className="flex flex-col sm:flex-row gap-2 justify-center">
                     <button
                       onClick={handleAcquireLock}
-                      className="h-8 px-4 py-1.5 rounded-btn bg-[#397FA9] hover:bg-[#2C6688] text-white text-xs font-semibold shadow-xs transition-all duration-180 active:scale-[0.98]"
+                      className="h-8 px-4 py-1.5 rounded-btn bg-accent-hover hover:bg-accent text-white text-xs font-semibold shadow-xs transition-all duration-180 active:scale-[0.98]"
                     >
                       Acquire Review Lock
                     </button>
                     <button
                       onClick={() => openOverrideModal()}
-                      className="h-8 px-3.5 py-1.5 rounded-btn bg-card hover:bg-pink-hover text-pink-text hover:text-pink-deep border border-border hover:border-pink-border text-xs font-semibold shadow-xs transition-all duration-180 active:scale-[0.98] flex items-center justify-center space-x-1.5"
+                      className="h-8 px-3.5 py-1.5 rounded-btn bg-card-inner/70 hover:bg-card-hover text-secondary border border-border/60 text-xs font-semibold shadow-xs transition-all duration-180 active:scale-[0.98] flex items-center justify-center space-x-1.5"
                     >
-                      <AlertTriangle className="w-3.5 h-3.5 text-warning" />
+                      <AlertTriangle className="w-3.5 h-3.5 text-status-warning/75" />
                       <span>Override Decision</span>
                     </button>
                   </div>
@@ -1411,9 +1506,9 @@ export default function CaseDetailPage() {
                   <button
                     onClick={() => openOverrideModal()}
                     disabled={submittingAction}
-                    className="w-full h-9 py-2 px-3 rounded-btn bg-card hover:bg-pink-hover text-pink-text hover:text-pink-deep border border-border hover:border-pink-border text-xs font-semibold shadow-xs flex items-center justify-center space-x-2 transition-all duration-180 active:scale-[0.98] disabled:opacity-50"
+                    className="w-full h-9 py-2 px-3 rounded-btn bg-card-inner/70 hover:bg-card-hover text-secondary border border-border/60 text-xs font-semibold shadow-xs flex items-center justify-center space-x-2 transition-all duration-180 active:scale-[0.98] disabled:opacity-50"
                   >
-                    <AlertTriangle className="w-3.5 h-3.5 text-warning" />
+                    <AlertTriangle className="w-3.5 h-3.5 text-status-warning/75" />
                     <span>Override Adjudication Decision</span>
                   </button>
                 </div>

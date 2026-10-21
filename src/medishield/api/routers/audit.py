@@ -254,9 +254,8 @@ def get_calibration_metrics(
     db: Session = Depends(get_db),
 ) -> CalibrationMetricsResponse:
     """
-    Evaluates Orchestrator decision confidence calibration against ground truth accuracy.
-    Computes Brier Score, Expected Calibration Error (ECE), reliability diagram bins,
-    and Platt-calibrated probabilities on a strictly held-out evaluation dataset split.
+    Computes a simulation-only calibration diagnostic from generated synthetic cases.
+    These metrics do not represent live Orchestrator accuracy or metadata fraud-label performance.
     """
     from medishield.eval.calibration import (
         PlattCalibrator,
@@ -267,7 +266,7 @@ def get_calibration_metrics(
     from medishield.eval.generator import SyntheticDatasetGenerator
     from medishield.eval.harness import BenchmarkHarness
 
-    # 1. Generate versioned evaluation dataset (44 cases across 11 standard categories)
+    # Generate benchmark scenarios for a simulation-only calibration diagnostic.
     gen = SyntheticDatasetGenerator(base_seed=42)
     all_cases = gen.generate_tier_2_dataset()
 
@@ -319,6 +318,12 @@ def get_calibration_metrics(
     return CalibrationMetricsResponse(
         strategy=valid_strategy,
         total_samples=raw_data.total_samples,
+        evaluation_source="generated_synthetic_simulation",
+        evaluation_label="Prediction correctness against generated expected_business_decision labels",
+        evaluation_population=(
+            f"Generated synthetic cases: {len(cal_cases)} fit cases and "
+            f"{len(test_cases)} disjoint evaluation cases."
+        ),
         brier_score=raw_data.brier_score,
         expected_calibration_error=raw_data.expected_calibration_error,
         maximum_calibration_error=raw_data.maximum_calibration_error,
@@ -330,8 +335,9 @@ def get_calibration_metrics(
         bins=[CalibrationBinSchema(**b.to_dict()) for b in raw_data.bins],
         calibrated_bins=[CalibrationBinSchema(**b.to_dict()) for b in cal_bins],
         selective_risk_coverage=[SelectiveCoverageSchema(**c) for c in raw_data.selective_risk_coverage],
-        interpretation=interpretation,
+        interpretation=(
+            f"{interpretation} This curve is based on a generated simulation, not "
+            "dataset/metadata.json fraud labels or independently reviewed case outcomes."
+        ),
     )
-
-
 

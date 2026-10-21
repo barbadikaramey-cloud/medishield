@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from medishield.api.deps import ROLE_ADMIN, ROLE_MANAGER, ROLE_REVIEWER
 from medishield.api.main import app
+from medishield.benchmarks.evaluator import summarize_fraud_metadata_labels
 from medishield.core.config import settings
 
 
@@ -27,6 +28,36 @@ def test_get_benchmark_metrics_endpoint() -> None:
     assert len(data["fraud_tests"]) >= 2
     assert "last_run_timestamp" in data
     assert "execution_time_seconds" in data
+    labels = data["fraud_label_summary"]
+    assert labels["source"] == "dataset/metadata.json"
+    assert labels["total_documents"] == 155
+    assert labels["labelled_documents"] == 155
+    assert labels["positive_documents"] == 6
+    assert labels["negative_documents"] == 149
+    assert labels["unlabelled_documents"] == 0
+    assert len(labels["positive_by_reason"]) == 6
+
+
+def test_fraud_metadata_label_summary_counts_only_explicit_boolean_labels() -> None:
+    summary = summarize_fraud_metadata_labels(
+        [
+            {"fraud_label": True, "fraud_reason": "duplicate_claim"},
+            {"fraud_label": True, "fraud_reason": None},
+            {"fraud_label": False},
+            {"fraud_label": "true"},
+            {},
+        ]
+    )
+
+    assert summary["total_documents"] == 5
+    assert summary["labelled_documents"] == 3
+    assert summary["positive_documents"] == 2
+    assert summary["negative_documents"] == 1
+    assert summary["unlabelled_documents"] == 2
+    assert summary["positive_by_reason"] == [
+        {"reason": "duplicate_claim", "count": 1},
+        {"reason": "unspecified", "count": 1},
+    ]
 
 
 def test_trigger_benchmark_evaluation_run() -> None:
@@ -98,9 +129,12 @@ def test_calibration_metrics_endpoint() -> None:
     assert "expected_calibration_error" in data
     assert "maximum_calibration_error" in data
     assert "calibration_method" in data
+    assert data["evaluation_source"] == "generated_synthetic_simulation"
+    assert "generated expected_business_decision" in data["evaluation_label"]
+    assert data["evaluation_population"] == "Generated synthetic cases: 50 fit cases and 50 disjoint evaluation cases."
+    assert data["total_samples"] == 50
     assert len(data["bins"]) >= 3
     assert "selective_risk_coverage" in data
     assert len(data["selective_risk_coverage"]) > 0
     assert "interpretation" in data
-
 

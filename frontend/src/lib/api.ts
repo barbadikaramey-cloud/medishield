@@ -132,6 +132,18 @@ export interface BenchmarkEvaluationResponse {
   total_clusters: number;
   classification_accuracy_percentage: number;
   member_resolution_percentage: number;
+  fraud_label_summary: {
+    source: string;
+    total_documents: number;
+    labelled_documents: number;
+    positive_documents: number;
+    negative_documents: number;
+    unlabelled_documents: number;
+    positive_by_reason: Array<{
+      reason: string;
+      count: number;
+    }>;
+  } | null;
   categories: Array<{
     category: string;
     total: number;
@@ -180,6 +192,9 @@ export interface SelectiveCoverageItem {
 export interface CalibrationMetricsResponse {
   strategy: string;
   total_samples: number;
+  evaluation_source: string;
+  evaluation_label: string;
+  evaluation_population: string;
   brier_score: number;
   expected_calibration_error: number;
   maximum_calibration_error: number;

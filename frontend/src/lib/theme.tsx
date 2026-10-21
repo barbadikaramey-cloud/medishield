@@ -17,7 +17,7 @@ const ThemeContext = createContext<ThemeContextType>({
 });
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [theme, setThemeState] = useState<Theme>("light");
+  const [theme, setThemeState] = useState<Theme>("dark");
   const [mounted, setMounted] = useState(false);
 
   const applyTheme = (t: Theme) => {
@@ -32,9 +32,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   };
 
   useEffect(() => {
-    const isDomDark = document.documentElement.classList.contains("dark");
     const stored = localStorage.getItem("medishield_theme") as Theme | null;
-    let initial: Theme = stored === "dark" ? "dark" : "light";
+    const initial: Theme = stored === "light" ? "light" : "dark";
     setThemeState(initial);
     applyTheme(initial);
     setMounted(true);

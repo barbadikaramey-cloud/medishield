@@ -1,6 +1,6 @@
 from datetime import UTC, date, datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, computed_field, model_validator
 
@@ -337,7 +337,7 @@ class FraudAgentOutput(BaseModel):
     confidence: float = Field(..., ge=0.0, le=1.0)
 
     fraud_score: float = Field(..., ge=0.0, le=1.0)
-    fraud_review_required: bool = False
+    fraud_review_required: bool | None = None
     risk_level: RiskLevel
     features: list[FraudFeature] = Field(default_factory=list)
     anomalies: list[str] = Field(default_factory=list)
@@ -540,6 +540,10 @@ class LineClinicalEvidence(BaseModel):
         ...,
         description="Explicit determination of repeat service status (never defaulted)",
     )
+    determination_outcome: Literal["SUPPORTED", "UNCERTAIN", "NOT_ESTABLISHED", "NO_RESPONSE"] | None = Field(
+        default=None,
+        description="Raw ADR-032 clinical determination outcome for this line",
+    )
 
     # Line-Level Evaluation Outcome
     line_verdict: AgentVerdict  # PASS, FAIL, INDETERMINATE, CONFLICT, UNAVAILABLE
@@ -579,7 +583,11 @@ class LineClinicalEvidence(BaseModel):
         if self.necessity_status == MedicalNecessityStatus.GUIDELINE_UNAVAILABLE:
             codes.append(IndeterminateReason.GUIDELINE_UNAVAILABLE)
         elif self.necessity_status == MedicalNecessityStatus.CRITERIA_INCOMPLETE:
-            codes.append(IndeterminateReason.GUIDELINE_CRITERIA_UNSATISFIED)
+            codes.append(
+                IndeterminateReason.CLINICAL_DETERMINATION_UNCERTAIN
+                if self.determination_outcome == "UNCERTAIN"
+                else IndeterminateReason.GUIDELINE_CRITERIA_UNSATISFIED
+            )
         if self.prior_auth_requirement == PriorAuthRequirementStatus.REQUIREMENT_UNKNOWN:
             codes.append(IndeterminateReason.PRIOR_AUTH_REQUIREMENT_UNKNOWN)
         if self.prior_auth_verification in (

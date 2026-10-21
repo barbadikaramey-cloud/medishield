@@ -112,12 +112,32 @@ class FraudBenchmarkCheck(BaseModel):
     details: str
 
 
+class FraudLabelReasonCount(BaseModel):
+    """Count of supplied positive document fraud labels by metadata reason."""
+
+    reason: str
+    count: int
+
+
+class FraudMetadataLabelSummary(BaseModel):
+    """Metadata label coverage; these labels are not case-level adjudication outcomes."""
+
+    source: str
+    total_documents: int
+    labelled_documents: int
+    positive_documents: int
+    negative_documents: int
+    unlabelled_documents: int
+    positive_by_reason: list[FraudLabelReasonCount] = Field(default_factory=list)
+
+
 class BenchmarkEvaluationResponse(BaseModel):
-    """Full benchmark suite results across 30 patient clusters & 155 real documents."""
+    """Benchmark diagnostics and supplied fraud-label coverage for the synthetic dataset."""
     total_documents: int
     total_clusters: int
     classification_accuracy_percentage: float
     member_resolution_percentage: float
+    fraud_label_summary: FraudMetadataLabelSummary | None = None
     categories: list[CategoryClassificationStat]
     ocr_samples: list[SampleKVExtraction]
     fraud_tests: list[FraudBenchmarkCheck]
@@ -144,9 +164,12 @@ class SelectiveCoverageSchema(BaseModel):
 
 
 class CalibrationMetricsResponse(BaseModel):
-    """Reliability curve and uncertainty metrics for Orchestrator decisions (ADR-017)."""
+    """Reliability and uncertainty diagnostics for generated synthetic decision scenarios."""
     strategy: str
     total_samples: int
+    evaluation_source: str
+    evaluation_label: str
+    evaluation_population: str
     brier_score: float
     expected_calibration_error: float
     maximum_calibration_error: float
@@ -159,6 +182,4 @@ class CalibrationMetricsResponse(BaseModel):
     calibrated_bins: list[CalibrationBinSchema] = Field(default_factory=list)
     selective_risk_coverage: list[SelectiveCoverageSchema] = Field(default_factory=list)
     interpretation: str
-
-
 

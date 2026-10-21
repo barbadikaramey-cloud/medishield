@@ -450,6 +450,47 @@ def test_human_review_override_optimistic_concurrency(client: TestClient, fake_d
     assert fake_db.human_reviews[-1].remarks == "Post-adjudication investigation confirmed fabricated receipts."
 
 
+def test_human_review_override_succeeds_when_broker_is_unavailable(
+    client: TestClient,
+    fake_db: FakeDBSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kombu.exceptions import OperationalError
+
+    from medishield.worker import tasks
+
+    now = datetime.now(UTC)
+    case = Case(
+        case_id="CASE-OVERRIDE-BROKER-01",
+        workflow_state=WorkflowState.AWAITING_HUMAN,
+        current_decision=BusinessDecision.ESCALATE,
+        version=1,
+        created_at=now,
+        updated_at=now,
+    )
+    fake_db.add(case)
+
+    def fail_enqueue(*args: Any, **kwargs: Any) -> None:
+        raise OperationalError("broker unavailable")
+
+    monkeypatch.setattr(tasks.resume_case_workflow_task, "delay", fail_enqueue)
+    response = client.post(
+        "/api/v1/cases/CASE-OVERRIDE-BROKER-01/review/override",
+        json={
+            "new_decision": "APPROVE",
+            "reason_code": "CLINICAL_NECESSITY_VERIFIED",
+            "remarks": "Additional clinical evidence reviewed by the assigned reviewer.",
+            "expected_case_version": 1,
+        },
+        headers={"X-User-Role": ROLE_REVIEWER, "X-User-Id": "adj-alice"},
+    )
+
+    assert response.status_code == 200
+    assert case.current_decision == BusinessDecision.APPROVE
+    assert case.version == 2
+    assert len(fake_db.human_reviews) == 1
+
+
 def test_override_on_approved_and_rejected_cases(client: TestClient, fake_db: FakeDBSession) -> None:
     """Verify that cases already in APPROVE or REJECT state can be authoritatively overridden (ADR-005)."""
     now = datetime.now(UTC)

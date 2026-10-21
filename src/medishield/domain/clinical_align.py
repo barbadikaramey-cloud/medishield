@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any, ClassVar, Protocol, runtime_checkable
+from typing import Any, ClassVar, Literal, Protocol, runtime_checkable
 
 from sqlalchemy.exc import OperationalError
 
@@ -762,6 +762,7 @@ class DeterministicClinicalAlignmentEngine:
         performance_status: PerformanceEvidenceStatus | None = None,
         indication_status: ClinicalIndicationStatus | None = None,
         necessity_status: MedicalNecessityStatus | None = None,
+        determination_outcome: Literal["SUPPORTED", "UNCERTAIN", "NOT_ESTABLISHED", "NO_RESPONSE"] | None = None,
         guideline_citation: GuidelineCitation | None = None,
         prior_auth_requirement: PriorAuthRequirementStatus | None = None,
         prior_auth_verification: PriorAuthVerificationStatus | None = None,
@@ -832,6 +833,7 @@ class DeterministicClinicalAlignmentEngine:
                 performance_status=resolved_performance,
                 indication_status=resolved_indication,
                 necessity_status=resolved_necessity,
+                determination_outcome=determination_outcome,
                 guideline_citation=None,
                 prior_auth_requirement=resolved_prior_auth_req,
                 prior_auth_verification=resolved_prior_auth_ver,
@@ -874,6 +876,7 @@ class DeterministicClinicalAlignmentEngine:
                 performance_status=resolved_performance,
                 indication_status=resolved_indication,
                 necessity_status=resolved_necessity,
+                determination_outcome=determination_outcome,
                 guideline_citation=None,
                 prior_auth_requirement=resolved_prior_auth_req,
                 prior_auth_verification=resolved_prior_auth_ver,
@@ -1129,6 +1132,7 @@ class DeterministicClinicalAlignmentEngine:
             performance_status=resolved_performance,
             indication_status=resolved_indication,
             necessity_status=resolved_necessity,
+            determination_outcome=determination_outcome,
             guideline_citation=resolved_guideline,
             performance_evidence=list(performance_evidence or []),
             indication_evidence=list(indication_evidence or []),

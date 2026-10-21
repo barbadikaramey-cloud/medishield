@@ -77,7 +77,7 @@ export function sanitizeArchitecturalJargon(text: string): string {
   return text
     // Remove ADR citations like (ADR-015), (ADR-002), (ADR-011), (ADR-001)
     .replace(/\s*\((?:Stage\s+[A-Z]\s+)?ADR-\d+\)/gi, "")
-    .replace(/\bADR-\d+\b/gi, "Clinical Review Standard")
+    .replace(/\bADR-\d+\b/gi, "")
     // Replace Rule P3 / Ambiguity escalation jargon
     .replace(/Ambiguity Escalation \(P3\):/gi, "Review Escalation (Information Discrepancy):")
     .replace(/Ambiguity escalation:/gi, "Review escalation (information discrepancy):")
@@ -95,6 +95,20 @@ export function sanitizeArchitecturalJargon(text: string): string {
     .replace(/RULE-P4-HIGH-FRAUD/g, "Billing Anomaly Review")
     .replace(/RULE-P7-BORDERLINE-REVIEW/g, "Medical Necessity Review")
     .replace(/RULE-P8-CATCH-ALL/g, "Operational Review")
+    .replace(/\bRULE-P[1-8](?:-[A-Z-]+)?\b/gi, "review check")
+    .replace(/\bP[1-8]\b/gi, "review check")
+    .replace(/\bRule\s+review check\b/gi, "Review check")
+    .replace(/\bRule\s+review check\b/gi, "Review check")
+    .replace(/\bdeterministic (?:decision )?engine\b/gi, "review process")
+    .replace(/\bdeterministic rules?\b/gi, "review checks")
+    .replace(/\bAPPROVE\b/gi, "Approved")
+    .replace(/\bREJECT\b/gi, "Denied")
+    .replace(/\bESCALATE\b/gi, "Needs review")
+    .replace(/\bINDETERMINATE\b/gi, "Needs review")
+    .replace(/\bCONFLICT\b/gi, "Conflicting information")
+    .replace(/\bPASS\b/gi, "Passed")
+    .replace(/\bFAIL\b/gi, "Failed")
+    .replace(/\bUNKNOWN\b/gi, "Not classified")
     .replace(/\b[Rr]ule\s+P\d+\b/g, "Policy Guideline")
     // Humanize standalone ambiguity/ambiguities in prose
     .replace(/\bAmbiguities\b/g, "Information discrepancies")
@@ -103,7 +117,10 @@ export function sanitizeArchitecturalJargon(text: string): string {
     .replace(/\bambiguity\b/g, "information discrepancy")
     // Clean repetitive robotic phrasing
     .replace(/MediShield's autonomous multi-agent pipeline evaluated claim packet [^\s]+ for member [^\s]+ and (?:recommended|determined)/gi, "Evaluated claim packet for member and recommended")
-    .replace(/Under deterministic rule [^,]+ with calibrated confidence [^,]+,\s*/gi, "");
+    .replace(/Under deterministic rule [^,]+ with calibrated confidence [^,]+,\s*/gi, "")
+    .replace(new RegExp("[\\u{1F300}-\\u{1FAFF}\\u{2600}-\\u{27BF}\\u{2300}-\\u{23FF}\\u{2B00}-\\u{2BFF}]", "gu"), "")
+    .replace(/[\u200D\uFE0F]/g, "")
+    .replace(/[ \t]{2,}/g, " ");
 }
 
 export interface ClinicalExplanationViewerProps {
@@ -149,76 +166,76 @@ const CATEGORY_CONFIG: Record<
   }
 > = {
   executive: {
-    name: "Executive Summary",
+    name: "Decision summary",
     icon: Sparkles,
     accentBorder: "border-border",
     accentBg: "bg-card",
     badgeBg: "bg-card-inner border-border",
     badgeText: "text-foreground",
-    shortLabel: "Executive Summary",
+    shortLabel: "Decision",
   },
   clinical: {
-    name: "Medical Necessity & Alignment",
+    name: "Clinical review",
     icon: Stethoscope,
     accentBorder: "border-border",
     accentBg: "bg-card",
     badgeBg: "bg-card-inner border-border",
     badgeText: "text-foreground",
-    shortLabel: "Medical Necessity",
+    shortLabel: "Clinical",
   },
   claims: {
-    name: "Billing & Financial Lines",
+    name: "Billing totals",
     icon: Receipt,
     accentBorder: "border-border",
     accentBg: "bg-card",
     badgeBg: "bg-card-inner border-border",
     badgeText: "text-foreground",
-    shortLabel: "Billing Lines",
+    shortLabel: "Billing",
   },
   policy: {
-    name: "Policy Coverage & Benefits",
+    name: "Coverage",
     icon: BookOpen,
     accentBorder: "border-border",
     accentBg: "bg-card",
     badgeBg: "bg-card-inner border-border",
     badgeText: "text-foreground",
-    shortLabel: "Policy Coverage",
+    shortLabel: "Policy",
   },
   kyc: {
-    name: "Member Identity & KYC",
+    name: "Member identity",
     icon: ShieldCheck,
     accentBorder: "border-border",
     accentBg: "bg-card",
     badgeBg: "bg-card-inner border-border",
     badgeText: "text-foreground",
-    shortLabel: "Identity & KYC",
+    shortLabel: "Identity",
   },
   fraud: {
-    name: "Fraud Risk & Anomaly Scoring",
+    name: "Fraud & billing",
     icon: Radar,
     accentBorder: "border-border",
     accentBg: "bg-card",
     badgeBg: "bg-card-inner border-border",
     badgeText: "text-foreground",
-    shortLabel: "Fraud Risk",
+    shortLabel: "Fraud",
   },
   consistency: {
-    name: "Document Attestation",
+    name: "Document checks",
     icon: FileCheck,
     accentBorder: "border-border",
     accentBg: "bg-card",
     badgeBg: "bg-card-inner border-border",
     badgeText: "text-foreground",
-    shortLabel: "Attestation",
+    shortLabel: "Documents",
   },
   guidance: {
-    name: "Recommended Next Steps",
+    name: "Next steps",
     icon: Compass,
     accentBorder: "border-border",
     accentBg: "bg-card",
     badgeBg: "bg-card-inner border-border",
     badgeText: "text-foreground",
-    shortLabel: "Next Steps",
+    shortLabel: "Actions",
   },
   other: {
     name: "Additional Details",
@@ -255,28 +272,45 @@ export interface CategoryHealth {
 }
 
 const CARD_NEUTRAL =
-  "border-border bg-card text-foreground hover:bg-pink-hover/60 hover:border-pink-border hover:text-pink-deep shadow-xs transition-all duration-180 active:scale-[0.99] cursor-pointer";
+  "border border-border bg-card text-foreground hover:bg-card-hover shadow-xs transition-all duration-180 active:scale-[0.99] cursor-pointer";
 const CARD_ACTIVE =
-  "border-sky-med/60 text-sky-deep bg-sky-soft font-bold shadow-xs transition-all duration-180 cursor-pointer";
+  "border border-border bg-accent/8 text-foreground font-semibold shadow-xs transition-all duration-180 cursor-pointer";
 
 const CARD_PROBLEM =
-  "border-rose-med/50 bg-rose-blush/20 text-foreground hover:bg-rose-blush/30 hover:border-rose-med shadow-xs transition-all duration-180 active:scale-[0.99] cursor-pointer";
+  "border border-border bg-card text-foreground hover:bg-card-hover shadow-xs transition-all duration-180 active:scale-[0.99] cursor-pointer";
 const CARD_ACTIVE_PROBLEM =
-  "border-rose-med bg-rose-blush/40 text-rose-deep font-bold shadow-xs transition-all duration-180 cursor-pointer";
+  "border border-border bg-accent/8 text-foreground font-semibold shadow-xs transition-all duration-180 cursor-pointer";
 
 const CARD_WARNING =
-  "border-status-warning/40 bg-status-warning/10 text-foreground hover:bg-status-warning/20 hover:border-status-warning shadow-xs transition-all duration-180 active:scale-[0.99] cursor-pointer";
+  "border border-border bg-card text-foreground hover:bg-card-hover shadow-xs transition-all duration-180 active:scale-[0.99] cursor-pointer";
 const CARD_ACTIVE_WARNING =
-  "border-status-warning bg-status-warning/20 text-status-warning font-bold shadow-xs transition-all duration-180 cursor-pointer";
+  "border border-border bg-accent/8 text-foreground font-semibold shadow-xs transition-all duration-180 cursor-pointer";
+const CARD_PASS =
+  "border border-border bg-card text-foreground hover:bg-card-hover shadow-xs transition-all duration-180 active:scale-[0.99] cursor-pointer";
+const CARD_ACTIVE_PASS =
+  "border border-border bg-accent/8 text-foreground font-semibold shadow-xs transition-all duration-180 cursor-pointer";
 
 const BADGE_PROBLEM =
-  "bg-rose-blush text-rose-deep border-rose-med/40";
+  "bg-rose-blush/30 text-rose-deep";
 const BADGE_WARNING =
-  "bg-status-warning/15 text-status-warning border-status-warning/30";
+  "bg-status-warning/6 text-status-warning";
 const BADGE_PASS =
-  "bg-status-success/15 text-status-success border-status-success/30";
+  "bg-status-success/5 text-status-success";
 const BADGE_NEUTRAL =
   "bg-sky-pale text-secondary border-border";
+
+function makeCategoryHealth(status: HealthStatus, label: string): CategoryHealth {
+  const icon = status === "problem" ? AlertCircle : status === "warning" ? AlertTriangle : CheckCircle2;
+  const badgeClass =
+    status === "problem" ? BADGE_PROBLEM : status === "warning" ? BADGE_WARNING : BADGE_PASS;
+  return {
+    status,
+    label,
+    icon,
+    ...getCardPillClasses(status),
+    badgeClass,
+  };
+}
 
 function getCardPillClasses(status: HealthStatus): { pillClass: string; activePillClass: string } {
   if (status === "problem") {
@@ -284,6 +318,9 @@ function getCardPillClasses(status: HealthStatus): { pillClass: string; activePi
   }
   if (status === "warning") {
     return { pillClass: CARD_WARNING, activePillClass: CARD_ACTIVE_WARNING };
+  }
+  if (status === "pass") {
+    return { pillClass: CARD_PASS, activePillClass: CARD_ACTIVE_PASS };
   }
   return { pillClass: CARD_NEUTRAL, activePillClass: CARD_ACTIVE };
 }
@@ -294,6 +331,18 @@ export function getCategoryHealth(
   currentDecision: string | null | undefined,
   sectionLines: string[] = []
 ): CategoryHealth {
+  const finding = cat === "clinical"
+    ? findings?.clinical ?? findings?.clinical_alignment
+    : findings?.[cat];
+  const hasStructuredFinding =
+    finding !== null &&
+    typeof finding === "object" &&
+    Object.keys(finding).length > 0;
+
+  if (cat !== "executive" && cat !== "guidance" && !hasStructuredFinding) {
+    return makeCategoryHealth("warning", "Not assessed");
+  }
+
   if (cat === "clinical") {
     const clin = findings?.clinical || findings?.clinical_alignment;
     const raw = sectionLines.join(" ").toLowerCase();
@@ -351,13 +400,13 @@ export function getCategoryHealth(
         badgeClass: BADGE_WARNING,
       };
     }
-    return {
-      status: "pass",
-      label: "Met",
-      icon: CheckCircle2,
-      ...getCardPillClasses("pass"),
-      badgeClass: BADGE_PASS,
-    };
+    if (
+      verdict === "PASS" ||
+      (typeof linesSupported === "number" && totalLines > 0 && linesSupported === totalLines)
+    ) {
+      return makeCategoryHealth("pass", "Supported");
+    }
+    return makeCategoryHealth("warning", "Not verified");
   }
 
   if (cat === "claims") {
@@ -401,13 +450,10 @@ export function getCategoryHealth(
         badgeClass: BADGE_WARNING,
       };
     }
-    return {
-      status: "pass",
-      label: "Valid",
-      icon: CheckCircle2,
-      ...getCardPillClasses("pass"),
-      badgeClass: BADGE_PASS,
-    };
+    if (verdict === "PASS" || (schemaValid === true && lineMathValid === true)) {
+      return makeCategoryHealth("pass", "Verified");
+    }
+    return makeCategoryHealth("warning", "Not verified");
   }
 
   if (cat === "policy") {
@@ -455,14 +501,10 @@ export function getCategoryHealth(
         badgeClass: BADGE_WARNING,
       };
     }
-    const cov = covPct !== undefined ? `${covPct}%` : "100%";
-    return {
-      status: "pass",
-      label: cov,
-      icon: CheckCircle2,
-      ...getCardPillClasses("pass"),
-      badgeClass: BADGE_PASS,
-    };
+    if (verdict === "PASS" || (covered === true && covPct === 100 && exclusions.length === 0)) {
+      return makeCategoryHealth("pass", covPct !== undefined ? `${covPct}%` : "Covered");
+    }
+    return makeCategoryHealth("warning", "Not verified");
   }
 
   if (cat === "kyc") {
@@ -543,14 +585,10 @@ export function getCategoryHealth(
       };
     }
 
-    // Clean pass only when zero tamper signals and verified
-    return {
-      status: "pass",
-      label: "Verified",
-      icon: CheckCircle2,
-      ...getCardPillClasses("pass"),
-      badgeClass: BADGE_PASS,
-    };
+    if (verdict === "PASS" && memberMatched !== false && tamperScore === 0) {
+      return makeCategoryHealth("pass", "Verified");
+    }
+    return makeCategoryHealth("warning", "Not verified");
   }
 
   if (cat === "fraud") {
@@ -571,14 +609,11 @@ export function getCategoryHealth(
       raw.includes("anomaly") ||
       raw.includes("⚠️");
 
-    if (reviewRequired || risk === "REVIEW_REQUIRED" || risk === "MEDIUM" || risk === "HIGH" || verdict === "FAIL" || textHasProblem) {
-      return {
-        status: "warning",
-        label: "Fraud Review",
-        icon: AlertTriangle,
-        ...getCardPillClasses("warning"),
-        badgeClass: BADGE_WARNING,
-      };
+    if (verdict === "FAIL") {
+      return makeCategoryHealth("problem", "Failed");
+    }
+    if (reviewRequired || risk === "REVIEW_REQUIRED" || risk === "MEDIUM" || risk === "HIGH" || textHasProblem) {
+      return makeCategoryHealth("warning", "Review needed");
     }
     if (
       anomalies.length > 0 ||
@@ -586,21 +621,11 @@ export function getCategoryHealth(
       verdict === "INDETERMINATE" ||
       textHasWarning
     ) {
-      return {
-        status: "warning",
-        label: "Med Risk",
-        icon: AlertTriangle,
-        ...getCardPillClasses("warning"),
-        badgeClass: BADGE_WARNING,
-      };
+      return makeCategoryHealth("warning", "Review");
     }
-    return {
-      status: "pass",
-      label: "Low Risk",
-      icon: CheckCircle2,
-      ...getCardPillClasses("pass"),
-      badgeClass: BADGE_PASS,
-    };
+    return verdict === "PASS" && risk === "LOW"
+      ? makeCategoryHealth("pass", "Clear")
+      : makeCategoryHealth("warning", "Not verified");
   }
 
   if (cat === "consistency") {
@@ -649,13 +674,9 @@ export function getCategoryHealth(
         badgeClass: BADGE_WARNING,
       };
     }
-    return {
-      status: "pass",
-      label: "Verified",
-      icon: CheckCircle2,
-      ...getCardPillClasses("pass"),
-      badgeClass: BADGE_PASS,
-    };
+    return isConsistent === true
+      ? makeCategoryHealth("pass", "Consistent")
+      : makeCategoryHealth("warning", "Not verified");
   }
 
   if (cat === "executive") {
@@ -694,43 +715,25 @@ export function getCategoryHealth(
         badgeClass: BADGE_WARNING,
       };
     }
-    return {
-      status: "pass",
-      label: "Approved",
-      icon: CheckCircle2,
-      ...getCardPillClasses("pass"),
-      badgeClass: BADGE_PASS,
-    };
+    return normDecision === "APPROVE"
+      ? makeCategoryHealth("pass", "Approved")
+      : makeCategoryHealth("warning", "Pending");
   }
 
   // Guidance or neutral
   if (cat === "guidance") {
     const raw = sectionLines.join(" ").toLowerCase();
-    if (raw.includes("urgent") || raw.includes("action required") || raw.includes("resolve")) {
-      return {
-        status: "warning",
-        label: "Action Req",
-        icon: AlertTriangle,
-        ...getCardPillClasses("warning"),
-        badgeClass: BADGE_WARNING,
-      };
+    const normDecision = String(currentDecision || "").toUpperCase();
+    if (normDecision === "REJECT") return makeCategoryHealth("problem", "Decision issued");
+    if (normDecision === "ESCALATE" || raw.includes("action required") || raw.includes("resolve")) {
+      return makeCategoryHealth("warning", "Action required");
     }
-    return {
-      status: "neutral",
-      label: "Actions",
-      icon: Compass,
-      ...getCardPillClasses("neutral"),
-      badgeClass: BADGE_NEUTRAL,
-    };
+    return normDecision === "APPROVE"
+      ? makeCategoryHealth("pass", "Complete")
+      : makeCategoryHealth("warning", "Pending");
   }
 
-  return {
-    status: "neutral",
-    label: "Actions",
-    icon: Compass,
-    ...getCardPillClasses("neutral"),
-    badgeClass: BADGE_NEUTRAL,
-  };
+  return makeCategoryHealth("warning", "Not assessed");
 }
 
 export function ClinicalExplanationViewer({
@@ -857,6 +860,19 @@ export function ClinicalExplanationViewer({
     return result;
   }, [content]);
 
+  const displaySections = useMemo<ParsedSection[]>(
+    () =>
+      ORDERED_CATEGORIES.map((category) =>
+        sections.find((section) => section.category === category) ?? {
+          id: `sec-${category}-unassessed`,
+          title: CATEGORY_CONFIG[category].name,
+          category,
+          rawLines: [],
+        },
+      ),
+    [sections],
+  );
+
   // Compute issue count to show live diagnostics summary
   const issueSummary = useMemo(() => {
     let problemCount = 0;
@@ -873,7 +889,7 @@ export function ClinicalExplanationViewer({
 
   // Filter sections by active tab and search query
   const filteredSections = useMemo(() => {
-    return sections.filter((sec) => {
+    return displaySections.filter((sec) => {
       if (activeCategory !== "all" && sec.category !== activeCategory) {
         return false;
       }
@@ -885,7 +901,7 @@ export function ClinicalExplanationViewer({
       }
       return true;
     });
-  }, [sections, activeCategory, searchQuery]);
+  }, [displaySections, activeCategory, searchQuery]);
 
   // Extract decision verdict if present
   const decisionBadge = useMemo(() => {
@@ -906,65 +922,63 @@ export function ClinicalExplanationViewer({
   return (
     <div className="space-y-3">
       {/* Top Filter & Tool Bar */}
-      <div className="bg-card-inner p-3 rounded-card border border-border space-y-2.5 transition-colors shadow-xs">
+      <div className="bg-card-inner/60 p-3 rounded-card space-y-2.5 shadow-xs">
         {/* Navigation Category Matrix - Multi-Line, Non-Scrollable, Full Section Names Fully Visible */}
         <div className="grid min-w-0 grid-cols-2 gap-2">
           {/* All Sections Master Control Card */}
           <button
             type="button"
             onClick={() => setActiveCategory("all")}
-            className={`col-span-full flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-btn border p-2.5 text-left transition-all duration-180 active:scale-[0.99] cursor-pointer ${
+            className={`col-span-full flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-btn p-2.5 text-left transition-all duration-180 active:scale-[0.99] cursor-pointer ${
               activeCategory === "all"
-                ? "bg-sky-soft text-sky-deep font-bold shadow-xs border-sky-med/60"
-                : "border-border bg-card text-foreground hover:bg-pink-hover/60 hover:border-pink-border hover:text-pink-deep shadow-xs"
+                ? "bg-sky-soft text-sky-deep font-bold shadow-xs"
+                : "bg-card text-foreground hover:bg-card-inner shadow-xs"
             }`}
             title="View All Audit Evaluation Sections Simultaneously"
           >
             <div className="flex min-w-0 flex-1 items-center space-x-2.5">
-              <div className={`p-1.5 rounded-btn border shrink-0 transition ${
+              <div className={`p-1.5 rounded-btn shrink-0 transition ${
                 activeCategory === "all"
-                  ? "bg-sky-soft text-sky-deep border-sky/40 shadow-xs"
-                  : "bg-card-inner text-muted border-border"
+                  ? "bg-sky-soft text-sky-deep shadow-xs"
+                  : "bg-card-inner text-muted"
               }`}>
                 <Layers className={`w-4 h-4 ${activeCategory === "all" ? "text-sky-deep" : "text-muted"}`} />
               </div>
               <div className="min-w-0">
                 <div className="break-words text-xs font-bold leading-tight text-foreground">All Adjudication Sections</div>
                 <div className="break-words text-[10px] text-muted">
-                  Full multi-domain audit review across {sections.length} report sections
+                  Eight review areas, each with its own status
                 </div>
               </div>
             </div>
 
             <div className="flex max-w-full shrink-0 flex-wrap items-center justify-end gap-2">
               {issueSummary.problemCount > 0 ? (
-                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-blush text-rose-deep border border-rose-med/40 flex items-center space-x-1 shadow-xs">
-                  <AlertCircle className="w-3 h-3 text-rose-deep shrink-0" />
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-rose-blush/35 text-secondary flex items-center space-x-1">
+                  <AlertCircle className="w-3 h-3 text-rose-deep/75 shrink-0" />
                   <span>{issueSummary.problemCount} Critical {issueSummary.problemCount === 1 ? "Issue" : "Issues"}</span>
                 </span>
               ) : issueSummary.warningCount > 0 ? (
-                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-status-warning/15 text-status-warning border border-status-warning/30 flex items-center space-x-1 shadow-xs">
-                  <AlertTriangle className="w-3 h-3 text-status-warning shrink-0" />
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-status-warning/5 text-secondary flex items-center space-x-1">
+                  <AlertTriangle className="w-3 h-3 text-status-warning/75 shrink-0" />
                   <span>{issueSummary.warningCount} {issueSummary.warningCount === 1 ? "Discrepancy" : "Discrepancies"} Under Review</span>
                 </span>
               ) : (
-                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-status-success/15 text-status-success border border-status-success/30 flex items-center space-x-1 shadow-xs">
-                  <CheckCircle2 className="w-3 h-3 text-status-success shrink-0" />
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-status-success/5 text-secondary flex items-center space-x-1">
+                  <CheckCircle2 className="w-3 h-3 text-status-success/75 shrink-0" />
                   <span>All Verified</span>
                 </span>
               )}
-              <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-card-inner border border-border text-secondary">
-                {sections.length}
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-card-inner text-secondary">
+                {ORDERED_CATEGORIES.length}
               </span>
             </div>
           </button>
 
           {/* Ordered Clinical Sections (4 Symmetrical Pairs of 2) */}
           {ORDERED_CATEGORIES.map((cat) => {
-            const hasCat = sections.some((s) => s.category === cat);
-            if (!hasCat) return null;
             const cfg = CATEGORY_CONFIG[cat];
-            const sec = sections.find((s) => s.category === cat);
+            const sec = displaySections.find((section) => section.category === cat);
             const CategoryIcon = cfg.icon;
             const health = getCategoryHealth(cat, agentFindings, currentDecision, sec?.rawLines);
             const HealthIcon = health.icon;
@@ -975,59 +989,35 @@ export function ClinicalExplanationViewer({
                 key={cat}
                 type="button"
                 onClick={() => setActiveCategory(cat)}
-                className={`flex min-w-0 items-center justify-between gap-2.5 rounded-btn border p-2.5 text-left transition-all duration-180 active:scale-[0.99] cursor-pointer ${
+                className={`flex min-w-0 items-center justify-between gap-2.5 rounded-btn p-2.5 text-left transition-all duration-180 active:scale-[0.99] cursor-pointer ${
                   isActive ? health.activePillClass : health.pillClass
                 }`}
                 title={`Category: ${cfg.name} (${health.label})`}
               >
-                <div className="flex min-w-0 flex-1 items-center space-x-2.5">
-                  <div
-                    className={`p-1.5 rounded-btn border shrink-0 transition ${
-                      health.status === "problem"
-                        ? isActive
-                          ? "bg-rose-blush text-rose-deep border-rose-med/60 shadow-xs"
-                          : "bg-rose-blush/40 text-rose-deep border-rose-med/30"
-                        : health.status === "warning"
-                        ? isActive
-                          ? "bg-status-warning/25 text-status-warning border-status-warning/60 shadow-xs"
-                          : "bg-status-warning/15 text-status-warning border-status-warning/30"
-                        : isActive
-                        ? "bg-sky-soft text-accent border-sky/40 shadow-xs"
-                        : "bg-card-inner text-muted border-border"
-                    }`}
-                  >
-                    <CategoryIcon
-                      className={`w-3.5 h-3.5 ${
-                        health.status === "problem"
-                          ? "text-rose-deep"
-                          : health.status === "warning"
-                          ? "text-status-warning"
-                          : isActive
-                          ? "text-accent"
-                          : "text-muted"
-                      }`}
-                    />
-                  </div>
+                <div className="grid min-w-0 flex-1 grid-cols-[auto,minmax(0,1fr),auto] items-center gap-2">
+                  <CategoryIcon className="w-4 h-4 shrink-0 text-muted" />
                   <div className="min-w-0">
-                    <div className="break-words text-xs font-bold leading-tight text-foreground">
-                      {cfg.name}
-                    </div>
+                    <div className="break-normal text-xs font-semibold leading-tight text-foreground">{cfg.name}</div>
+                    <div className="mt-0.5 truncate text-[10px] leading-tight text-muted">{health.label}</div>
                   </div>
+                  <HealthIcon
+                    className={`h-4 w-4 shrink-0 ${
+                      health.status === "problem"
+                        ? "text-rose-deep"
+                        : health.status === "warning"
+                        ? "text-status-warning"
+                        : "text-status-success"
+                    }`}
+                    aria-label={health.status}
+                  />
                 </div>
-
-                <span
-                  className={`min-w-0 max-w-full px-1.5 py-0.5 rounded-full text-[10px] font-mono font-bold flex items-center gap-1 border shadow-xs ${health.badgeClass}`}
-                >
-                  <HealthIcon className="w-3 h-3 shrink-0" />
-                  <span className="break-words text-center leading-tight">{health.label}</span>
-                </span>
               </button>
             );
           })}
         </div>
 
-        {/* Action & Filter Toolbar */}
-        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-border">
+          {/* Action & Filter Toolbar */}
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
           {/* Quick Search Input */}
           <div className="relative flex-1 min-w-[180px] sm:max-w-xs">
             <Search className="w-3.5 h-3.5 text-muted absolute left-2.5 top-3" />
@@ -1036,7 +1026,7 @@ export function ClinicalExplanationViewer({
               placeholder="Search reasons, CPT, ICD-10..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full h-9 bg-card text-foreground pl-8 pr-7 py-1.5 rounded-btn text-xs border border-border focus:outline-none focus:border-sky focus:ring-2 focus:ring-sky/30 placeholder:text-muted font-sans shadow-xs transition-colors"
+              className="w-full h-9 bg-card text-foreground pl-8 pr-7 py-1.5 rounded-btn text-xs border border-border/70 focus:outline-none focus:border-accent/50 focus:ring-2 focus:ring-accent/10 placeholder:text-muted font-sans shadow-xs transition-colors"
             />
             {searchQuery && (
               <button
@@ -1052,22 +1042,22 @@ export function ClinicalExplanationViewer({
           {/* Quick Diagnostic Status Indicator & Actions */}
           <div className="flex items-center space-x-2">
             {issueSummary.problemCount > 0 ? (
-              <div className="flex items-center space-x-1 px-2.5 py-1 rounded-btn bg-rose-blush text-rose-deep border border-rose-med/40 text-[10px] font-semibold">
-                <AlertCircle className="w-3 h-3 text-rose-deep shrink-0" />
+              <div className="flex items-center space-x-1 px-2.5 py-1 rounded-btn bg-rose-blush/35 text-secondary text-[10px] font-semibold">
+                <AlertCircle className="w-3 h-3 text-rose-deep/75 shrink-0" />
                 <span>
                   {issueSummary.problemCount} Critical {issueSummary.problemCount === 1 ? "Issue" : "Issues"}
                 </span>
               </div>
             ) : issueSummary.warningCount > 0 ? (
-              <div className="flex items-center space-x-1 px-2.5 py-1 rounded-btn bg-status-warning/15 text-status-warning border border-status-warning/30 text-[10px] font-semibold">
-                <AlertTriangle className="w-3 h-3 text-status-warning shrink-0" />
+              <div className="flex items-center space-x-1 px-2.5 py-1 rounded-btn bg-status-warning/5 text-secondary text-[10px] font-semibold">
+                <AlertTriangle className="w-3 h-3 text-status-warning/75 shrink-0" />
                 <span>
                   {issueSummary.warningCount} {issueSummary.warningCount === 1 ? "Discrepancy" : "Discrepancies"} Under Review
                 </span>
               </div>
             ) : (
-              <div className="flex items-center space-x-1 px-2.5 py-1 rounded-btn bg-status-success/15 text-status-success border border-status-success/30 text-[10px] font-semibold">
-                <CheckCircle2 className="w-3 h-3 text-status-success shrink-0" />
+              <div className="flex items-center space-x-1 px-2.5 py-1 rounded-btn bg-status-success/5 text-secondary text-[10px] font-semibold">
+                <CheckCircle2 className="w-3 h-3 text-status-success/75 shrink-0" />
                 <span>All Checks Passed</span>
               </div>
             )}
@@ -1078,7 +1068,7 @@ export function ClinicalExplanationViewer({
                 type="button"
                 onClick={onRefresh}
                 disabled={isRefreshing}
-                className="h-8 flex items-center space-x-1.5 px-3 py-1 rounded-btn bg-card hover:bg-pink-hover text-secondary hover:text-pink-deep hover:border-pink-border text-[11px] font-medium transition border border-border shadow-xs disabled:opacity-50"
+                className="h-8 flex items-center space-x-1.5 px-3 py-1 rounded-btn bg-card hover:bg-card-inner text-secondary text-[11px] font-medium transition shadow-xs disabled:opacity-50"
                 title="Synthesize fresh clinical narrative"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? "animate-spin text-sky-deep" : "text-muted"}`} />
@@ -1090,7 +1080,7 @@ export function ClinicalExplanationViewer({
             <button
               type="button"
               onClick={() => setIsReaderModalOpen(true)}
-              className="h-8 flex items-center space-x-1.5 px-3 py-1 rounded-btn bg-card hover:bg-pink-hover text-secondary hover:text-pink-deep hover:border-pink-border text-[11px] font-medium transition border border-border shadow-xs"
+              className="h-8 flex items-center space-x-1.5 px-3 py-1 rounded-btn bg-card hover:bg-card-inner text-secondary text-[11px] font-medium transition shadow-xs"
               title="Expand into comfortable wide Reader View"
             >
               <Maximize2 className="w-3.5 h-3.5 text-muted" />
@@ -1104,7 +1094,7 @@ export function ClinicalExplanationViewer({
       {/* Render Filtered Sections */}
       <div className="space-y-3.5 max-h-[850px] overflow-y-auto pr-1.5 scrollbar-thin">
         {filteredSections.length === 0 ? (
-          <div className="p-8 text-center text-muted text-xs bg-card-inner border border-border rounded-btn space-y-2">
+          <div className="p-8 text-center text-muted text-xs bg-card-inner/70 rounded-btn space-y-2">
             <Search className="w-6 h-6 text-muted mx-auto" />
             <div>No matching clinical reasons found for &ldquo;{searchQuery}&rdquo;.</div>
             <button
@@ -1119,28 +1109,34 @@ export function ClinicalExplanationViewer({
             </button>
           </div>
         ) : (
-          filteredSections.map((section) => (
-            <SectionCard
-              key={section.id}
-              section={section}
-              onCopy={(text) => handleCopy(text, section.id)}
-              isCopied={copiedKey === section.id}
-              decisionBadge={decisionBadge}
-              confidence={decisionConfidence}
-              ruleId={ruleIdMatched}
-            />
-          ))
+          filteredSections.map((section) => {
+            const health = getCategoryHealth(
+              section.category,
+              agentFindings,
+              currentDecision,
+              section.rawLines,
+            );
+            return (
+              <SectionCard
+                key={section.id}
+                section={section}
+                health={health}
+                onCopy={(text) => handleCopy(text, section.id)}
+                isCopied={copiedKey === section.id}
+              />
+            );
+          })
         )}
       </div>
 
       {/* Fullscreen / Wide Reader Mode Modal */}
       {isReaderModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6 animate-in fade-in duration-150">
-          <div className="bg-card border border-border rounded-card w-full max-w-5xl h-[92vh] flex flex-col shadow-2xl overflow-hidden">
+          <div className="bg-card rounded-card w-full max-w-5xl h-[92vh] flex flex-col shadow-2xl overflow-hidden">
             {/* Modal Header */}
-            <div className="bg-card-inner px-6 py-4 border-b border-border flex items-center justify-between">
+            <div className="bg-card-inner px-6 py-4 flex items-center justify-between">
               <div className="flex items-center space-x-3">
-                <div className="p-2 rounded-btn bg-card border border-border text-foreground">
+                <div className="p-2 rounded-btn bg-card text-foreground">
                   <Stethoscope className="w-5 h-5 text-muted" />
                 </div>
                 <div>
@@ -1149,12 +1145,12 @@ export function ClinicalExplanationViewer({
                       Clinical Adjudication Reader Console
                     </h2>
                     {caseId && (
-                      <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-card text-foreground border border-border">
+                      <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-card text-foreground">
                         {caseId}
                       </span>
                     )}
                     {ruleIdMatched && (
-                      <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-card text-foreground border border-border">
+                      <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-card text-foreground">
                         {formatRuleLabel(ruleIdMatched)}
                       </span>
                     )}
@@ -1169,7 +1165,7 @@ export function ClinicalExplanationViewer({
                 <button
                   type="button"
                   onClick={() => handleCopy(content, "modal-all")}
-                  className="flex items-center space-x-1.5 px-3 py-1.5 rounded-btn bg-card hover:bg-card-inner text-foreground text-xs font-medium transition border border-border shadow-xs"
+                  className="flex items-center space-x-1.5 px-3 py-1.5 rounded-btn bg-card hover:bg-card-inner text-foreground text-xs font-medium transition shadow-xs"
                 >
                   {copiedKey === "modal-all" ? (
                     <>
@@ -1186,7 +1182,7 @@ export function ClinicalExplanationViewer({
                 <button
                   type="button"
                   onClick={() => setIsReaderModalOpen(false)}
-                  className="p-1.5 rounded-btn bg-card hover:bg-border text-muted hover:text-foreground border border-border transition"
+                  className="p-1.5 rounded-btn bg-card hover:bg-card-inner text-muted hover:text-foreground transition"
                   title="Close Reader Mode"
                 >
                   <X className="w-5 h-5" />
@@ -1195,15 +1191,17 @@ export function ClinicalExplanationViewer({
             </div>
 
             {/* Modal Body: Left TOC & Right Reader Area */}
-            <div className="flex-1 overflow-hidden grid grid-cols-1 md:grid-cols-12 divide-y md:divide-y-0 md:divide-x divide-border">
+            <div className="flex-1 overflow-hidden grid grid-cols-1 md:grid-cols-12 gap-4">
               {/* Left Column: Quick TOC */}
-              <div className="md:col-span-4 p-4 overflow-y-auto space-y-2 bg-card-inner">
+              <div className="md:col-span-4 p-4 overflow-y-auto space-y-2 bg-card-inner/60 rounded-card">
                 <div className="text-[10px] font-bold uppercase tracking-wider text-muted mb-2">
                   Table of Contents
                 </div>
-                {sections.map((s, idx) => {
+                {displaySections.map((s, idx) => {
                   const cfg = CATEGORY_CONFIG[s.category];
                   const Icon = cfg.icon;
+                  const health = getCategoryHealth(s.category, agentFindings, currentDecision, s.rawLines);
+                  const HealthIcon = health.icon;
                   return (
                     <button
                       key={s.id}
@@ -1212,32 +1210,36 @@ export function ClinicalExplanationViewer({
                         const el = document.getElementById(`modal-sec-${idx}`);
                         if (el) el.scrollIntoView({ behavior: "smooth" });
                       }}
-                      className="w-full text-left p-2.5 rounded-btn text-xs transition border flex items-start space-x-2.5 bg-card text-foreground border-border hover:bg-card-inner"
+                      className={`w-full text-left p-2.5 rounded-btn text-xs transition flex items-start justify-between gap-2 ${health.pillClass}`}
                     >
-                      <Icon className="w-4 h-4 mt-0.5 shrink-0 text-muted" />
-                      <div className="flex-1 truncate">
-                        <div className="font-semibold truncate text-foreground">{s.title}</div>
-                        <div className="text-[10px] text-muted capitalize">{cfg.name}</div>
+                      <div className="flex min-w-0 items-start gap-2.5">
+                        <Icon className="w-4 h-4 mt-0.5 shrink-0 text-current" />
+                        <div className="min-w-0">
+                          <div className="font-semibold break-words text-foreground">{s.title}</div>
+                          <div className="text-[10px] text-muted">{cfg.name}</div>
+                        </div>
                       </div>
+                      <HealthIcon className="h-4 w-4 shrink-0" />
                     </button>
                   );
                 })}
               </div>
 
               {/* Right Column: Full Spacious Report */}
-              <div className="md:col-span-8 p-6 overflow-y-auto space-y-6 bg-card">
-                {sections.map((s, idx) => (
+              <div className="md:col-span-8 p-6 overflow-y-auto space-y-6 bg-card rounded-card">
+                {displaySections.map((s, idx) => {
+                  const health = getCategoryHealth(s.category, agentFindings, currentDecision, s.rawLines);
+                  return (
                   <div key={s.id} id={`modal-sec-${idx}`}>
                     <SectionCard
                       section={s}
+                      health={health}
                       onCopy={(text) => handleCopy(text, s.id)}
                       isCopied={copiedKey === s.id}
-                      decisionBadge={decisionBadge}
-                      confidence={decisionConfidence}
-                      ruleId={ruleIdMatched}
                     />
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           </div>
@@ -1250,37 +1252,42 @@ export function ClinicalExplanationViewer({
 // Subcomponent: Section Card
 function SectionCard({
   section,
+  health,
   onCopy,
   isCopied,
-  decisionBadge,
-  confidence,
-  ruleId,
 }: {
   section: ParsedSection;
+  health: CategoryHealth;
   onCopy: (text: string) => void;
   isCopied: boolean;
-  decisionBadge: string;
-  confidence?: number | null;
-  ruleId?: string | null;
 }) {
   const cfg = CATEGORY_CONFIG[section.category];
   const Icon = cfg.icon;
+  const HealthIcon = health.icon;
+  const healthIconClass =
+    health.status === "problem"
+      ? "text-rose-deep"
+      : health.status === "warning"
+      ? "text-status-warning"
+      : "text-status-success";
 
   // Executive Section
   if (section.category === "executive") {
     return (
-      <div className="p-4 rounded-card border border-border bg-card-inner space-y-3 shadow-xs transition-all duration-180 hover:border-pink-border hover:shadow-card-hover">
-        <div className="flex items-center justify-between flex-wrap gap-2 border-b border-border pb-2.5">
-          <div className="flex items-center space-x-2">
-            <div className="p-1.5 rounded-btn bg-[#397FA9] text-white shadow-xs">
-              <Icon className="w-3.5 h-3.5" />
-            </div>
+      <div className="p-4 rounded-card border border-border/35 bg-card-inner/50 space-y-3 shadow-xs">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <Icon className="w-4 h-4 shrink-0 text-muted" />
             <h3 className="text-xs font-bold text-foreground uppercase tracking-wider">{section.title}</h3>
           </div>
+          <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-[10px] font-semibold ${health.badgeClass}`}>
+            <HealthIcon className={`h-3.5 w-3.5 ${healthIconClass}`} />
+            {health.label}
+          </span>
           <button
             type="button"
             onClick={() => onCopy(section.rawLines.join("\n"))}
-            className="text-[10px] text-muted hover:text-pink-deep flex items-center space-x-1"
+            className="inline-flex items-center gap-1 text-[10px] text-muted hover:text-foreground"
           >
             {isCopied ? <Check className="w-3 h-3 text-status-success" /> : <Copy className="w-3 h-3" />}
             <span>{isCopied ? "Copied" : "Copy"}</span>
@@ -1301,34 +1308,30 @@ function SectionCard({
 
   return (
     <div
-      className="rounded-card border border-border bg-card overflow-hidden shadow-xs transition-all duration-180 hover:border-pink-border hover:shadow-card-hover"
+      className="rounded-card border border-border/35 bg-card overflow-hidden shadow-xs"
     >
       {/* Header */}
-      <div className="px-4 py-2.5 bg-card-inner border-b border-border flex items-center justify-between flex-wrap gap-2">
-        <div className="flex items-center space-x-2">
-          <div className="p-1.5 rounded-btn bg-card border border-border text-foreground">
-            <Icon className="w-3.5 h-3.5" />
-          </div>
-          <div>
-            <h4 className="text-xs font-bold text-foreground tracking-wide flex items-center space-x-2">
-              <span>{section.title}</span>
-              {isClinical && (
-                <span className="px-2 py-0.5 rounded text-[9px] font-mono font-medium bg-sky-soft text-sky-deep border border-sky/30">
-                  Medical Necessity Evaluated
-                </span>
-              )}
-            </h4>
-          </div>
+      <div className="px-4 py-3 bg-card-inner/60 flex items-center justify-between flex-wrap gap-2.5">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <Icon className="h-4 w-4 shrink-0 text-muted" />
+          <h4 className="min-w-0 break-words text-xs font-bold text-foreground">{section.title}</h4>
         </div>
 
-        <button
-          type="button"
-          onClick={() => onCopy(section.rawLines.join("\n"))}
-          className="text-[10px] text-muted hover:text-pink-deep flex items-center space-x-1 px-2 py-0.5 rounded-btn bg-card hover:bg-pink-hover border border-border hover:border-pink-border transition-all duration-180 active:scale-[0.96]"
-        >
-          {isCopied ? <Check className="w-3 h-3 text-status-success" /> : <Copy className="w-3 h-3" />}
-          <span>{isCopied ? "Copied" : "Copy"}</span>
-        </button>
+        <div className="ml-auto flex items-center gap-2">
+          <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-[10px] font-semibold ${health.badgeClass}`}>
+            <HealthIcon className={`h-3.5 w-3.5 ${healthIconClass}`} />
+            {health.label}
+          </span>
+          <button
+            type="button"
+            onClick={() => onCopy(section.rawLines.join("\n"))}
+            className="inline-flex items-center gap-1 text-[10px] text-muted hover:text-foreground"
+            title="Copy this section"
+          >
+            {isCopied ? <Check className="w-3.5 h-3.5 text-status-success" /> : <Copy className="w-3.5 h-3.5" />}
+            <span>{isCopied ? "Copied" : "Copy"}</span>
+          </button>
+        </div>
       </div>
 
       {/* Body */}
@@ -1342,16 +1345,33 @@ function SectionCard({
 }
 
 // Line Content Parser & Rich Renderer
+function getExplanationTone(text: string): "problem" | "warning" | "neutral" {
+  const requiredAuthorizationMissing =
+    /\b(?:missing|no valid|without(?: a| valid)?)\s+(?:(?:required|valid)\s+)?(?:prior\s+)?authorization\b/i.test(text) ||
+    /\b(?:prior\s+)?authorization(?:\s+was)?\s+(?:not\s+(?:provided|submitted|found)|missing)\b/i.test(text);
+  if (
+    requiredAuthorizationMissing ||
+    /\b(failed|denied|not met|not covered|excluded|contradicted|expired|forged|tampered)\b/i.test(text)
+  ) {
+    return "problem";
+  }
+  if (/\b(needs review|discrepancy|missing|unverified|unsupported|pending|indeterminate|mismatch|conflict)\b/i.test(text)) {
+    return "warning";
+  }
+  return "neutral";
+}
+
+function explanationTextClass(text: string): string {
+  const tone = getExplanationTone(text);
+  if (tone === "problem") return "text-rose-deep/90 font-medium";
+  if (tone === "warning") return "text-status-warning/90";
+  return "text-secondary";
+}
+
 function RenderContentLine({ line, isClinical }: { line: string; isClinical: boolean }) {
   const trimmed = line.trim();
 
-  if (!trimmed) {
-    return <div className="h-1" />;
-  }
-
-  if (trimmed === "---") {
-    return <hr className="border-border my-2" />;
-  }
+  if (!trimmed || trimmed === "---") return null;
 
   // Clinical Sub-Headers (e.g. **Medical Indication Rationale**, **Performance & Evidence Grounding**)
   if (
@@ -1364,21 +1384,9 @@ function RenderContentLine({ line, isClinical }: { line: string; isClinical: boo
     trimmed.startsWith("- **Inpatient Hospital Stay & Bed-Day") ||
     trimmed.startsWith("- **Clinical Discrepancies")
   ) {
-    const isIndication = trimmed.toLowerCase().includes("indication");
-    const isPerformance = trimmed.toLowerCase().includes("performance") || trimmed.toLowerCase().includes("evidence");
-    const isGuideline = trimmed.toLowerCase().includes("guideline");
-    const isBedDay = trimmed.toLowerCase().includes("bed-day") || trimmed.toLowerCase().includes("stay");
-    const isDiscrepancy = trimmed.toLowerCase().includes("discrepanc") || trimmed.toLowerCase().includes("gap");
-
-    const badgeColor = isDiscrepancy
-      ? "bg-status-warning/10 text-status-warning border-status-warning/20 shadow-xs"
-      : "bg-card-inner text-foreground border-border shadow-xs";
-
-    const HeaderIcon = isDiscrepancy ? AlertTriangle : Stethoscope;
-
     return (
-      <div className={`mt-3 mb-1.5 p-2 rounded-btn border ${badgeColor} flex items-center space-x-2`}>
-        <HeaderIcon className="w-3.5 h-3.5 shrink-0 text-muted" />
+      <div className="mt-3 mb-1.5 p-2 bg-card-inner/60 flex items-center gap-2">
+        <Stethoscope className="w-3.5 h-3.5 shrink-0 text-muted" />
         <span className="font-semibold text-[11px] uppercase tracking-wider">{renderFormattedTokens(trimmed)}</span>
       </div>
     );
@@ -1387,16 +1395,10 @@ function RenderContentLine({ line, isClinical }: { line: string; isClinical: boo
   // Sub-bullet (indented: '  - ')
   if (trimmed.startsWith("  - ") || line.startsWith("    *")) {
     const text = trimmed.replace(/^(\s*-\s*|\s*\*\s*)/, "");
-    const isWarning = text.includes("⚠️") || text.includes("Discrepancy");
+    const textClass = explanationTextClass(text);
     return (
-      <div
-        className={`ml-5 pl-2.5 py-1 my-0.5 rounded text-[11px] border-l-2 ${
-          isWarning
-            ? "border-status-warning bg-status-warning/10 text-status-warning"
-            : "border-border bg-card-inner text-secondary"
-        }`}
-      >
-        {renderFormattedTokens(text)}
+      <div className={`ml-5 pl-2.5 py-1 my-0.5 rounded text-[11px] bg-card-inner/50 ${textClass}`}>
+        {renderFormattedTokens(text, textClass)}
       </div>
     );
   }
@@ -1404,40 +1406,29 @@ function RenderContentLine({ line, isClinical }: { line: string; isClinical: boo
   // Standard Bullet (starts with '- ' or '* ')
   if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
     const text = trimmed.substring(2);
-    const hasPass = text.includes("✅") || text.includes("PASS");
-    const hasFail = text.includes("❌") || text.includes("FAIL");
-    const hasWarn = text.includes("⚠️") || text.includes("Escalation") || text.includes("Review");
-
-    const bulletIcon = hasPass ? (
-      <CheckCircle2 className="w-3.5 h-3.5 text-status-success shrink-0 mt-0.5" />
-    ) : hasFail ? (
-      <XCircle className="w-3.5 h-3.5 text-rose-deep shrink-0 mt-0.5" />
-    ) : hasWarn ? (
-      <AlertTriangle className="w-3.5 h-3.5 text-status-warning shrink-0 mt-0.5" />
-    ) : (
-      <span className="text-muted mt-0.5 text-xs font-bold">&bull;</span>
-    );
-
     return (
-      <div className="flex items-start space-x-2 text-foreground py-0.5">
-        {bulletIcon}
-        <div className="flex-1">{renderFormattedTokens(text)}</div>
+      <div className={`flex items-start gap-2 py-0.5 ${explanationTextClass(text)}`}>
+        <span aria-hidden="true" className="mt-[0.55em] h-1.5 w-1.5 shrink-0 rounded-full bg-current opacity-50" />
+        <div className="flex-1">{renderFormattedTokens(text, explanationTextClass(text))}</div>
       </div>
     );
   }
 
-  // Standard paragraph
+  // Keep narrative lines compact and consistently scannable.
   return (
-    <p className="text-secondary py-0.5 leading-relaxed">
-      {renderFormattedTokens(trimmed)}
-    </p>
+    <div className={`flex items-start gap-2 py-0.5 leading-relaxed ${explanationTextClass(trimmed)}`}>
+      <span aria-hidden="true" className="mt-[0.55em] h-1.5 w-1.5 shrink-0 rounded-full bg-current opacity-50" />
+      <p className="min-w-0">{renderFormattedTokens(trimmed, explanationTextClass(trimmed))}</p>
+    </div>
   );
 }
 
 // Token Formatter for CPT, ICD-10, Guidelines, Dollars, and Markdown
-function renderFormattedTokens(text: string) {
-  // Clean emoji clutter from text if present as icons are rendered separately
-  const clean = text.replace(/^[✅❌⚠️ℹ️]\s*/, "");
+function renderFormattedTokens(text: string, textClass = "text-secondary") {
+  const clean = text
+    .replace(new RegExp("[\\u{1F300}-\\u{1FAFF}\\u{2600}-\\u{27BF}\\u{2300}-\\u{23FF}\\u{2B00}-\\u{2BFF}]", "gu"), "")
+    .replace(/[\u200D\uFE0F]/g, "")
+    .replace(/\b(?:RULE-)?P[1-8](?:-[A-Z-]+)?\b/gi, "review check");
 
   const parts: React.ReactNode[] = [];
   // Regex to match: **bold**, `code`, CPT \d{5}, ICD [A-Z]\d{2}(\.\d+)?, [₹€$£]\d+
@@ -1455,7 +1446,7 @@ function renderFormattedTokens(text: string) {
     if (token.startsWith("**") && token.endsWith("**")) {
       const inner = token.slice(2, -2);
       parts.push(
-        <strong key={match.index} className="text-foreground font-semibold">
+        <strong key={match.index} className={`font-semibold ${textClass}`}>
           {inner}
         </strong>
       );
@@ -1464,14 +1455,14 @@ function renderFormattedTokens(text: string) {
       parts.push(
         <code
           key={match.index}
-          className="px-1.5 py-0.5 rounded bg-card-inner text-foreground border border-border font-mono text-[11px]"
+          className={`px-1.5 py-0.5 rounded bg-card-inner font-mono text-[11px] ${textClass}`}
         >
           {inner}
         </code>
       );
     } else if (/^[₹€$£][0-9,]+/.test(token)) {
       parts.push(
-        <span key={match.index} className="font-semibold font-mono text-foreground">
+        <span key={match.index} className={`font-semibold font-mono ${textClass}`}>
           {token}
         </span>
       );
@@ -1479,7 +1470,7 @@ function renderFormattedTokens(text: string) {
       parts.push(
         <span
           key={match.index}
-          className="px-1.5 py-0.5 rounded bg-card-inner text-secondary border border-border font-mono text-[10px] font-medium"
+          className="px-1.5 py-0.5 rounded bg-card-inner text-secondary font-mono text-[10px] font-medium"
         >
           {token}
         </span>
@@ -1494,7 +1485,7 @@ function renderFormattedTokens(text: string) {
       parts.push(
         <span
           key={match.index}
-          className="px-1.5 py-0.5 rounded bg-status-success/10 text-status-success border border-status-success/20 font-mono text-[10px] font-medium"
+          className="px-1.5 py-0.5 rounded bg-status-success/10 text-status-success font-mono text-[10px] font-medium"
         >
           {token}
         </span>
@@ -1503,7 +1494,7 @@ function renderFormattedTokens(text: string) {
       parts.push(
         <span
           key={match.index}
-          className="px-1.5 py-0.5 rounded bg-rose-blush text-rose-deep border border-rose-med/30 font-mono text-[10px] font-medium"
+          className="px-1.5 py-0.5 rounded bg-rose-blush text-rose-deep font-mono text-[10px] font-medium"
         >
           {token}
         </span>
@@ -1512,7 +1503,7 @@ function renderFormattedTokens(text: string) {
       parts.push(
         <span
           key={match.index}
-          className="px-1.5 py-0.5 rounded bg-status-warning/10 text-status-warning border border-status-warning/20 font-mono text-[10px] font-medium"
+          className="px-1.5 py-0.5 rounded bg-status-warning/10 text-status-warning font-mono text-[10px] font-medium"
         >
           {token}
         </span>

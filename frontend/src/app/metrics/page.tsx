@@ -302,7 +302,7 @@ export default function OperationalMetricsPage() {
             </div>
             <h2 className="text-base font-bold text-foreground mt-1.5 flex items-center space-x-2">
               <FileCheck2 className="w-4 h-4 text-accent" />
-              <span>Authoritative 30-Cluster Benchmark Results (155 Real Documents)</span>
+              <span>30-Cluster Synthetic Benchmark Results (155 Documents)</span>
             </h2>
             <p className="text-xs text-muted mt-0.5">
               Automated offline test suite evaluating Document Classification, Member Resolution, RapidOCR Key-Value Extraction, and Fraud Scenarios.
@@ -361,6 +361,50 @@ export default function OperationalMetricsPage() {
             <span className="text-[10px] text-muted">Collisions, Outliers &amp; Tampering</span>
           </div>
         </div>
+
+        <section className="rounded-btn border border-border bg-card-inner p-4 space-y-3">
+          <div className="flex items-start gap-2">
+            <Info className="w-4 h-4 mt-0.5 flex-shrink-0 text-accent" />
+            <div>
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-foreground">
+                Metadata Fraud Labels (Document-Level)
+              </h3>
+              <p className="text-[11px] text-secondary mt-1">
+                Supplied labels from {benchmark?.fraud_label_summary?.source ?? "dataset/metadata.json"}; these are not case-level adjudication labels or a fraud-model accuracy score.
+              </p>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            {[
+              ["Documents", benchmark?.fraud_label_summary?.total_documents],
+              ["Fraud-positive", benchmark?.fraud_label_summary?.positive_documents],
+              ["Fraud-negative", benchmark?.fraud_label_summary?.negative_documents],
+              ["Unlabelled", benchmark?.fraud_label_summary?.unlabelled_documents],
+            ].map(([label, count]) => (
+              <div key={label} className="rounded border border-border bg-card p-3">
+                <div className="text-[10px] uppercase tracking-wider text-muted">{label}</div>
+                <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-foreground">
+                  {typeof count === "number" ? count : "—"}
+                </div>
+              </div>
+            ))}
+          </div>
+          {benchmark?.fraud_label_summary && (
+            <div className="flex flex-wrap gap-2">
+              {benchmark.fraud_label_summary.positive_by_reason.map(({ reason, count }) => (
+                <span key={reason} className="rounded border border-border bg-card px-2 py-1 text-[10px] text-secondary">
+                  {reason}: <strong className="font-mono text-foreground">{count}</strong>
+                </span>
+              ))}
+              {benchmark.fraud_label_summary.positive_by_reason.length === 0 && (
+                <span className="text-[10px] text-muted">No positive fraud labels in metadata.</span>
+              )}
+            </div>
+          )}
+          <p className="text-[10px] leading-relaxed text-muted">
+            Labels are shown as supplied, not independently verified. The positive label count must not be interpreted as a business decision or classifier performance.
+          </p>
+        </section>
 
         {/* Breakdown by Category Table */}
         <div className="space-y-2.5">
@@ -573,14 +617,14 @@ export default function OperationalMetricsPage() {
             <div className="flex items-center space-x-2">
               <Target className="w-4 h-4 text-accent" />
               <h2 className="text-sm font-bold text-foreground tracking-tight">
-                Orchestrator Confidence Calibration &amp; Reliability Curve
+                Synthetic Decision Calibration &amp; Reliability Curve
               </h2>
               <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-accent/10 text-accent border border-accent/20">
                 ADR-017 Feature 1
               </span>
             </div>
             <p className="text-xs text-secondary">
-              Evaluates whether the Orchestrator&apos;s decision confidence accurately reflects true adjudication correctness across independently held-out evaluation cases.
+              Simulation-only calibration against generated decision labels; this curve does not use metadata fraud labels or independently reviewed case outcomes.
             </p>
           </div>
 
@@ -610,7 +654,7 @@ export default function OperationalMetricsPage() {
               </button>
             </div>
             <span className="px-2 py-1 rounded bg-card-inner border border-border text-[10px] font-mono text-muted">
-              {calibration?.calibration_method || "Platt Scaling (Logistic)"}
+            {calibration?.calibration_method || "—"}
             </span>
           </div>
         </div>
@@ -625,7 +669,7 @@ export default function OperationalMetricsPage() {
               <span className="text-xl font-bold font-mono text-foreground tabular-nums">
                 {calibration
                   ? `${(calibration.expected_calibration_error * 100).toFixed(2)}%`
-                  : "3.40%"}
+                  : "—"}
               </span>
               {calibration?.calibrated_expected_calibration_error != null && (
                 <span className="text-xs font-semibold text-status-success font-mono">
@@ -645,7 +689,7 @@ export default function OperationalMetricsPage() {
             </span>
             <div className="flex items-baseline space-x-2">
               <span className="text-xl font-bold font-mono text-foreground tabular-nums">
-                {calibration ? calibration.brier_score.toFixed(4) : "0.0412"}
+                {calibration ? calibration.brier_score.toFixed(4) : "—"}
               </span>
               {calibration?.calibrated_brier_score != null && (
                 <span className="text-xs font-semibold text-accent font-mono">
@@ -663,7 +707,7 @@ export default function OperationalMetricsPage() {
             <div className="text-xl font-bold font-mono text-foreground tabular-nums">
               {calibration
                 ? `${(calibration.maximum_calibration_error * 100).toFixed(2)}%`
-                : "7.14%"}
+                : "—"}
             </div>
             <p className="text-[11px] text-muted">Worst-case bucket probability gap</p>
           </div>
@@ -673,11 +717,18 @@ export default function OperationalMetricsPage() {
               Evaluation Population
             </span>
             <div className="text-xl font-bold font-mono text-accent tabular-nums">
-              {calibration ? calibration.total_samples : 60} Cases
+              {calibration ? calibration.total_samples : "—"} Cases
             </div>
-            <p className="text-[11px] text-secondary">Held-out test set (Zero data leakage)</p>
+            <p className="text-[11px] text-secondary">
+              {calibration?.evaluation_population ?? "Generated simulation; no result loaded"}
+            </p>
           </div>
         </div>
+        {calibration && (
+          <p className="text-[10px] text-muted">
+            Source: {calibration.evaluation_source}. Label: {calibration.evaluation_label}.
+          </p>
+        )}
 
         {/* Reliability Diagram & Selective Coverage Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 pt-1">
@@ -818,7 +869,7 @@ export default function OperationalMetricsPage() {
               <span>Selective Risk &amp; Coverage Profile</span>
             </h3>
             <p className="text-xs text-secondary">
-              Adjudication accuracy when low-confidence cases are routed to human reviewers:
+              Simulated decision correctness at each confidence threshold:
             </p>
 
             <div className="overflow-x-auto">
@@ -861,10 +912,10 @@ export default function OperationalMetricsPage() {
             <div className="p-2.5 rounded bg-card border border-border/80 text-[11px] text-secondary space-y-1">
               <div className="flex items-center space-x-1 text-foreground font-medium">
                 <Info className="w-3 h-3 text-accent" />
-                <span>Deterministic Safety Assurance</span>
+                <span>Calibration Scope</span>
               </div>
               <p className="text-[10px] text-muted leading-relaxed">
-                Cases with calibrated confidence below safety threshold are automatically escalated to human review, preventing automated false approvals.
+                This offline diagnostic does not drive live routing and does not establish false-approval safety. Validate calibration on independently reviewed, held-out case labels before operational use.
               </p>
             </div>
           </div>

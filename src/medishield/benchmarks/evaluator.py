@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,28 @@ METADATA_PATH = DATASET_ROOT / "metadata.json"
 
 _cached_benchmark_results: dict[str, Any] | None = None
 _last_run_timestamp: datetime | None = None
+
+
+def summarize_fraud_metadata_labels(metadata: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize supplied document-level fraud labels without treating them as decisions."""
+    labelled = [item for item in metadata if isinstance(item.get("fraud_label"), bool)]
+    positives = [item for item in labelled if item["fraud_label"] is True]
+    reason_counts = Counter(
+        str(item.get("fraud_reason") or "unspecified")
+        for item in positives
+    )
+    return {
+        "source": str(METADATA_PATH.relative_to(REPO_ROOT)),
+        "total_documents": len(metadata),
+        "labelled_documents": len(labelled),
+        "positive_documents": len(positives),
+        "negative_documents": sum(item["fraud_label"] is False for item in labelled),
+        "unlabelled_documents": len(metadata) - len(labelled),
+        "positive_by_reason": [
+            {"reason": reason, "count": count}
+            for reason, count in sorted(reason_counts.items())
+        ],
+    }
 
 
 def run_benchmark_evaluation(force: bool = False) -> dict[str, Any]:
@@ -232,6 +255,7 @@ def run_benchmark_evaluation(force: bool = False) -> dict[str, Any]:
         "total_clusters": len(unique_patients) or 30,
         "classification_accuracy_percentage": round(overall_class_acc, 1),
         "member_resolution_percentage": round(member_res_percentage, 1),
+        "fraud_label_summary": summarize_fraud_metadata_labels(metadata),
         "categories": categories_list,
         "ocr_samples": ocr_samples,
         "fraud_tests": fraud_tests,
@@ -252,6 +276,7 @@ def _get_fallback_benchmark_results() -> dict[str, Any]:
         "total_clusters": 30,
         "classification_accuracy_percentage": 100.0,
         "member_resolution_percentage": 100.0,
+        "fraud_label_summary": None,
         "categories": [
             {"category": "claim_forms", "total": 31, "correct": 31, "accuracy_percentage": 100.0},
             {"category": "id_documents", "total": 30, "correct": 30, "accuracy_percentage": 100.0},
@@ -310,4 +335,3 @@ def _get_fallback_benchmark_results() -> dict[str, Any]:
         "execution_time_seconds": 1.25,
         "suite_status": "PASS",
     }
-

@@ -2,6 +2,14 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer base {
+  *,
+  ::before,
+  ::after {
+    border-color: var(--border-color);
+  }
+}
+
 /* ==========================================================================
    THEME DESIGN TOKENS (SINGLE SOURCE OF TRUTH)
    Healthcare-Fintech SaaS: Linear/Stripe/Vercel-inspired Enterprise Design
@@ -14,12 +22,12 @@
      ========================================================================== */
 
   /* Main Workspace & Card Surfaces */
-  --page-bg: #F4F8FB;
-  --card-bg: #FFFFFF;
-  --inner-card-bg: #EDF5FA;
-  --card-hover: #FCEAF0;
-  --btn-hover: #FCEAF0;
-  --border-color: #E4EAF0;
+  --page-bg: #F1F6FA;
+  --card-bg: #FBFDFE;
+  --inner-card-bg: #EAF2F8;
+  --card-hover: #E7F1F7;
+  --btn-hover: #E7F1F7;
+  --border-color: #EDF2F6;
 
   /* Primary Typography */
   --text-color: #29394B;
@@ -27,14 +35,14 @@
   --muted-text: #8E9CAE;
 
   /* Primary Sky Blue & Deep Medical Blue */
-  --accent-color: #78BCE5;
-  --accent-sky: #78BCE5;
-  --accent-soft: #EDF5FA;
-  --accent-pale: #F4F8FB;
+  --accent-color: #397FA9;
+  --accent-sky: #72BED9;
+  --accent-soft: #E6F2F7;
+  --accent-pale: #EFF6F9;
   --accent-deep: #397FA9;
   --accent-text: #FFFFFF;
-  --accent-bg: #EDF5FA;
-  --accent-hover: #397FA9;
+  --accent-bg: #E6F2F7;
+  --accent-hover: #2F6F96;
 
   /* Soft Pink Hover & Blush Accents (Interactive Requirement) */
   --pink-hover: #FCEAF0;
@@ -53,9 +61,9 @@
   --success-bg: #EAF5EF;
   --success-border: #BCE3CE;
 
-  --warning-color: #C07D1E;
-  --warning-bg: #FBF3E5;
-  --warning-border: #F7DFB3;
+  --warning-color: #B88D4D;
+  --warning-bg: #F8F2E8;
+  --warning-border: #E9D9BA;
 
   --danger-color: #C24B5D;
   --danger-bg: #F9EAED;
@@ -70,54 +78,54 @@
 }
 
 .dark {
-  /* Calm, Soft Slate-Charcoal Medical Dark (Restrained, never harsh neon navy) */
-  --page-bg: #121822;
-  --card-bg: #1A222F;
-  --inner-card-bg: #202B3B;
-  --card-hover: #253346;
-  --btn-hover: #263549;
-  --border-color: rgba(255, 255, 255, 0.08);
+  /* Deep navy workspace with restrained cyan interaction accents. */
+  --page-bg: #081426;
+  --card-bg: #112139;
+  --inner-card-bg: #182d49;
+  --card-hover: #1d3855;
+  --btn-hover: #203b58;
+  --border-color: rgba(77, 143, 177, 0.10);
 
-  --text-color: #F1F5F9;
-  --secondary-text: #94A3B8;
-  --muted-text: #64748B;
+  --text-color: #EAF1FA;
+  --secondary-text: #A3B2C6;
+  --muted-text: #71839B;
 
-  --accent-color: #4BA2DD;
-  --accent-sky: #78BCE5;
-  --accent-soft: rgba(120, 188, 229, 0.14);
-  --accent-pale: #1A2433;
-  --accent-deep: #90CDF4;
+  --accent-color: #239FC2;
+  --accent-sky: #4DB8D2;
+  --accent-soft: rgba(77, 184, 210, 0.12);
+  --accent-pale: #142B40;
+  --accent-deep: #82C7D9;
   --accent-text: #FFFFFF;
-  --accent-bg: rgba(120, 188, 229, 0.14);
-  --accent-hover: #5EAEE8;
+  --accent-bg: rgba(77, 184, 210, 0.12);
+  --accent-hover: #32A9C7;
 
-  /* Interactive Pink & Rose in Dark Mode (Soft Glow, Never White Outlines) */
-  --pink-hover: rgba(217, 137, 161, 0.12);
-  --pink-blush: rgba(217, 137, 161, 0.16);
-  --pink-border: rgba(217, 137, 161, 0.32);
-  --pink-accent: #E598AE;
-  --pink-text: #F7A8BF;
-  --pink-deep: #FCA5A5;
+  /* Existing hover utilities resolve to cyan in the navy theme. */
+  --pink-hover: rgba(77, 184, 210, 0.07);
+  --pink-blush: rgba(77, 184, 210, 0.09);
+  --pink-border: rgba(77, 184, 210, 0.15);
+  --pink-accent: #70C0D3;
+  --pink-text: #92C8D5;
+  --pink-deep: #79BDCE;
 
-  --rose-blush: rgba(217, 137, 161, 0.14);
-  --rose-med: #E598AE;
-  --rose-deep: #FCA5A5;
+  --rose-blush: rgba(212, 135, 142, 0.08);
+  --rose-med: #9F6974;
+  --rose-deep: #D4878E;
 
-  --success-color: #34D399;
-  --success-bg: rgba(52, 211, 153, 0.12);
-  --success-border: rgba(52, 211, 153, 0.22);
+  --success-color: #79B99A;
+  --success-bg: rgba(121, 185, 154, 0.10);
+  --success-border: rgba(121, 185, 154, 0.18);
 
-  --warning-color: #FBBF24;
-  --warning-bg: rgba(251, 191, 36, 0.12);
-  --warning-border: rgba(251, 191, 36, 0.22);
+  --warning-color: #C6A66B;
+  --warning-bg: rgba(198, 166, 107, 0.075);
+  --warning-border: rgba(198, 166, 107, 0.14);
 
-  --danger-color: #F87171;
-  --danger-bg: rgba(248, 113, 113, 0.14);
-  --danger-border: rgba(248, 113, 113, 0.24);
+  --danger-color: #D4878E;
+  --danger-bg: rgba(212, 135, 142, 0.09);
+  --danger-border: rgba(212, 135, 142, 0.17);
 
-  --info-color: #60A5FA;
-  --info-bg: rgba(96, 165, 250, 0.14);
-  --info-border: rgba(96, 165, 250, 0.22);
+  --info-color: #76BED5;
+  --info-bg: rgba(118, 190, 213, 0.09);
+  --info-border: rgba(118, 190, 213, 0.17);
 
   --radius-card: 12px;
   --radius-btn: 8px;

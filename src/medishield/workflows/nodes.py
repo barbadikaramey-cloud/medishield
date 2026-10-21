@@ -1577,6 +1577,7 @@ def clinical_alignment_node(
                 performance_evidence=performance_spans,
                 indication_evidence=diagnosis_evidence,
                 necessity_status=necessity_status,
+                determination_outcome=determination.raw_outcome if determination is not None else None,
                 indication_conflict=indication_conflict,
                 clinical_notes_text=combined_text,
                 diagnosis_codes=affirmed_diagnosis_codes,

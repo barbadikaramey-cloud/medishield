@@ -52,6 +52,22 @@ def test_verify_audit_chain_valid():
     assert verify_audit_chain([e1, e2]) is True
 
 
+def test_verify_audit_chain_accepts_sqlite_naive_utc_timestamp():
+    event_id = uuid.uuid4()
+    created_at = datetime(2026, 10, 2, 10, 0, 0, tzinfo=UTC)
+    payload = {"action": "HUMAN_OVERRIDE", "decision": "REJECT"}
+    current_hash = compute_audit_hash(event_id, GENESIS_HASH, payload, created_at)
+    sqlite_event = MockAuditEvent(
+        event_id,
+        GENESIS_HASH,
+        current_hash,
+        payload,
+        created_at.replace(tzinfo=None),
+    )
+
+    assert verify_audit_chain([sqlite_event]) is True
+
+
 def test_verify_audit_chain_tampered_payload():
     id1 = uuid.uuid4()
     now1 = datetime(2026, 10, 2, 10, 0, 0, tzinfo=UTC)

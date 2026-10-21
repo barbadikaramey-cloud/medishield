@@ -8,18 +8,20 @@ unavailable, and the other specialists pass, the case approves via P6.
 import pytest
 
 from medishield.core.config import Settings
-from medishield.db.enums import AgentVerdict, BusinessDecision
+from medishield.db.enums import AgentVerdict, BusinessDecision, IndeterminateReason
 from medishield.domain.contracts import (
     BedDayReconciliation,
     ClaimsAgentOutput,
     ClinicalAlignmentOutput,
     ClinicalIndicationStatus,
+    LineClinicalEvidence,
     MedicalNecessityStatus,
     PerformanceEvidenceStatus,
     ProvenanceValue,
     build_clinical_alignment_output,
 )
 from medishield.domain.decision import (
+    RULE_P4_HIGH_FRAUD,
     RULE_P3_AMBIGUITY,
     RULE_P6_CLEAN_PASS,
     DecisionInputContext,
@@ -89,7 +91,8 @@ def _decide(
     claims_lines: list[tuple[int, str, float]],
     clinical: ClinicalAlignmentOutput | None,
     threshold: float | None = 0.5,
-    fraud_score: float = 0.05,
+    fraud_score: float = 0.0,
+    fraud_review_required: bool = False,
     uncertainty_enabled: bool = False,
 ) -> tuple[BusinessDecision, str | None, str]:
     codes = [cpt for _, cpt, _ in claims_lines]
@@ -97,7 +100,7 @@ def _decide(
         case_id="CASE-CLIN-SUPPORT",
         claims=_claims(claims_lines),
         policy=_policy_covering(codes),
-        fraud=_fraud_pass(fraud_score),
+        fraud=_fraud_pass(fraud_score, fraud_review_required),
         clinical=clinical,
     ).model_copy(
         update={
@@ -262,15 +265,17 @@ class TestClinicalSupportExemptionDecision:
         assert decision == BusinessDecision.ESCALATE
         assert rule == RULE_P3_AMBIGUITY
 
-    def test_other_escalation_reason_is_not_cleared(self) -> None:
+    def test_fraud_review_requirement_is_not_cleared(self) -> None:
         claims_lines = [(1, "70553", 1500.00), (2, "93000", 480.00), (3, "99213", 150.00)]
 
         decision, rule, _ = _decide(
-            claims_lines, _clinical(_three_lines_two_supported()), fraud_score=0.5
+            claims_lines,
+            _clinical(_three_lines_two_supported()),
+            fraud_review_required=True,
         )
 
         assert decision == BusinessDecision.ESCALATE
-        assert rule != RULE_P6_CLEAN_PASS
+        assert rule == RULE_P4_HIGH_FRAUD
 
 
 class TestIsClinicalSupportExempt:
@@ -336,3 +341,61 @@ class TestClinicalSupportThresholdConfig:
     def test_ratio_outside_unit_interval_is_rejected(self) -> None:
         with pytest.raises(ValueError):
             Settings(_env_file=None, CLINICAL_SUPPORT_APPROVAL_MIN_RATIO=1.5)
+
+
+def _determined_line(ln: int, cpt: str, amount: float, outcome: str) -> LineClinicalEvidence:
+    return make_clean_line_evidence(
+        line_number=ln, service_code=cpt, billed_units=1.0, billed_amount=amount
+    ).model_copy(
+        update={
+            "line_verdict": AgentVerdict.INDETERMINATE,
+            "necessity_status": MedicalNecessityStatus.CRITERIA_INCOMPLETE,
+            "determination_outcome": outcome,
+        }
+    )
+
+
+class TestDeterminationOutcomeMapping:
+    def test_uncertain_determination_maps_to_approvable_reason(self) -> None:
+        line = _determined_line(1, "99213", 150.00, "UNCERTAIN")
+
+        assert line.reason_codes == [IndeterminateReason.CLINICAL_DETERMINATION_UNCERTAIN]
+
+    def test_not_established_determination_keeps_criteria_unsatisfied_reason(self) -> None:
+        line = _determined_line(1, "99213", 150.00, "NOT_ESTABLISHED")
+
+        assert line.reason_codes == [IndeterminateReason.GUIDELINE_CRITERIA_UNSATISFIED]
+
+    def test_uncertain_lines_approve_with_discrepancy_notice(self) -> None:
+        claims_lines = [(1, "99213", 150.00), (2, "99214", 200.00)]
+        clinical = build_clinical_alignment_output(
+            expected_line_numbers=[1, 2],
+            line_assessments=[
+                _determined_line(1, "99213", 150.00, "UNCERTAIN"),
+                _determined_line(2, "99214", 200.00, "UNCERTAIN"),
+            ],
+            clinical_documents_present=["DOC-CLIN-01"],
+        )
+
+        decision, rule, justification = _decide(
+            claims_lines, clinical, threshold=None, uncertainty_enabled=True
+        )
+
+        assert decision == BusinessDecision.APPROVE
+        assert rule == RULE_P6_CLEAN_PASS
+        assert "Clinical discrepancy notice" in justification
+
+    def test_not_established_line_escalates_even_with_uncertainty_approval(self) -> None:
+        claims_lines = [(1, "99213", 150.00), (2, "99214", 200.00)]
+        clinical = build_clinical_alignment_output(
+            expected_line_numbers=[1, 2],
+            line_assessments=[
+                _determined_line(1, "99213", 150.00, "UNCERTAIN"),
+                _determined_line(2, "99214", 200.00, "NOT_ESTABLISHED"),
+            ],
+            clinical_documents_present=["DOC-CLIN-01"],
+        )
+
+        decision, _, _ = _decide(claims_lines, clinical, threshold=None, uncertainty_enabled=True)
+
+        assert decision == BusinessDecision.ESCALATE

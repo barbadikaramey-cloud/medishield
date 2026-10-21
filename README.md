@@ -94,7 +94,7 @@ Open `http://localhost:3000`. The login screen provides preset demo personas; th
 |---|---|
 | What is distinctive? | AI extracts and interprets; provenance checks and deterministic rules govern the outcome. |
 | What runs today? | FastAPI, Next.js, OCR, a sequential Python coordinator, typed specialists, review actions, and decision/audit persistence. |
-| What did the saved full-workflow run do? | 30/30 synthetic cases escalated; 0 approved, 0 rejected. This is an observed failure signal, not an accuracy score. |
+| What do the saved full-workflow runs show? | Oct 21 artifact: 1 approved, 4 rejected, 25 escalated. Oct 20 artifact: 30 escalated. These are separate runs/configurations, not an accuracy score. |
 | What is not established? | Independent case-level truth, clinical validation, production security/compliance, and real-claim readiness. |
 
 ## 2. Implementation Status
@@ -479,19 +479,32 @@ The current migration directory includes revisions `001` through `007`: initial 
 
 ## 15. Evaluation and Quality Assurance
 
-### Observed full-workflow run
+### Observed full-workflow runs
 
-| Measure | Saved result | Interpretation |
+| Run | Saved result | Interpretation |
 |---|---:|---|
-| Run artifact | `scripts/diagnostic_summary_20261020_full_workflow.json` | Full multi-agent workflow; sequential 30-case run. |
+| **Oct 21 latest saved artifact** (`scripts/diagnostic_summary.json`) | 30 cases: 1 `APPROVE`, 4 `REJECT`, 25 `ESCALATE`; first rule: P3=21, P4=4, P5=4, P6=1; duration 1,506.88 seconds. | Synthetic workflow observation. Labels are 0/30 reviewed; accuracy, FAR, and FDR are `N/A`. |
+| **Oct 20 earlier artifact** (`scripts/diagnostic_summary_20261020_full_workflow.json`) | 30 cases: 0 `APPROVE`, 0 `REJECT`, 30 `ESCALATE`; all first matched P3; duration 337.42 seconds. | Separate run and configuration. Do not combine with the Oct 21 result or treat the difference as a controlled improvement measurement. |
 | Dataset | 155 manifest documents across 30 patient clusters | Synthetic documents; one duplicate claim image is included. |
-| Observed decisions | 30 `ESCALATE`, 0 `APPROVE`, 0 `REJECT` | All cases stopped at `RULE-P3-AMBIGUITY`; useful evidence of current over-escalation, not a success metric. |
-| Batch duration | 337.42 seconds | Total run duration only. No reliable p50/p95 case latency is reported. |
-| Reviewed case labels | 0/30 | `dataset/metadata.json` contains no `adjudication_label` field. Decision accuracy, false-approval, and false-denial rates are unavailable. |
 | Clinical/policy grounding | Not independently scored | No reviewed span-level clinical truth or clause-applicability labels are available. |
-| Tokens and human overrides | Not available for this run | Provider token reporting is incomplete; no reviewed override cohort is attached. |
+| Human overrides | Not included in either artifact | No reviewed override cohort is attached. |
 
-**Do not interpret the legacy label comparison as ground truth.** An older summary reports 24 expected approvals and 24 false denials, but those expectations are not backed by independently reviewed case-level labels in the current manifest. The four document-level `expected_decision` values belong to `unknown` documents and are not patient-cluster adjudication labels. Fraud metadata is also not a claim decision label.
+**Do not interpret legacy label comparisons as ground truth.** A separate Oct 20 summary reports 24 expected approvals and 24 false denials, but those expectations are not backed by independently reviewed case-level labels in the current manifest. The four document-level `expected_decision` values belong to `unknown` documents and are not patient-cluster adjudication labels. Fraud metadata is also not a claim decision label.
+
+### Token economics
+
+The saved 30-case evaluation artifacts contain **no per-case token fields**, so this repository cannot currently substantiate tokens-per-case or dollars-per-case for either run.
+
+One local `/api/v1/metrics/operational` snapshot on **2026-10-21** reported 4 successful logical LLM spans, 5,961 prompt tokens, and 1,710 completion tokens (7,671 total); usage was complete for those 4 spans. This telemetry has `scope=process_since_start`: it is process-local, may include tests or other requests, is not associated with a case/execution ID, and is **not** a 30-case or per-case measurement.
+
+Use provider-reported usage and the applicable provider/model rate card to calculate cost:
+
+```text
+cost = prompt_tokens / 1,000,000 * input_rate_per_million
+    + completion_tokens / 1,000,000 * output_rate_per_million
+```
+
+Rates vary by provider, model, region, modality, and pricing date; no rate card is configured in this repository. A defensible per-case figure requires usage records keyed to a non-PHI execution ID, all text and vision calls, retries/fallbacks, and a recorded rate-card version. Until then, per-case token economics are **unmeasured**, not zero.
 
 ### Canonical assignment rubric (targets, not results)
 
@@ -511,12 +524,34 @@ The repository's [evaluation specification](docs/canonical/12_EVALUATION_AND_SYN
 
 `dataset/metadata.json` contains 155 document entries: 151 patient documents across 30 clusters and four `unknown` documents. The 31 claim images include a duplicate claim file; other categories have 30 each. Only four unknown-document entries have `expected_decision`; the 30 patient clusters lack independently reviewed case-level expected decisions. Some fraud labels conflict with source evidence, as recorded in `docs/sdd/audits/decision_quality_audit.md` and `docs/sdd/reviews/claims_validation_root_cause_remediation_plan.md`.
 
+### Metadata fraud-label report
+
+The benchmark reports the document-level `fraud_label` values as supplied by `dataset/metadata.json`. They describe metadata coverage only; the benchmark does not currently compare these labels with per-document model predictions, so these counts are **not** fraud-detection accuracy.
+
+| Supplied metadata label | Documents |
+|---|---:|
+| Fraud-positive | 6 |
+| Fraud-negative | 149 |
+| Unlabelled | 0 |
+| **Total** | **155** |
+
+| Positive label reason | Documents |
+|---|---:|
+| `readmission_30d` | 1 |
+| `date_conflict` | 1 |
+| `proc_diag_mismatch` | 1 |
+| `amount_under_10k` | 1 |
+| `duplicate_claim` | 1 |
+| `name_mismatch` | 1 |
+
+These are document labels, not claim adjudications. The review register currently identifies three disputed records; preserve the supplied labels for provenance, but do not use them to claim model accuracy or infer `APPROVE`, `REJECT`, or `ESCALATE` outcomes.
+
 ### Evaluation code
 
 - `src/medishield/eval/generator.py`, `harness.py`, and `metrics.py` generate typed synthetic cases and compute metrics. `BenchmarkHarness.evaluate_case_simulated` copies expected document fields and uses category-based decisions; it does not execute the actual OCR/agent workflow.
 - `/api/v1/metrics/benchmark` uses `src/medishield/benchmarks/evaluator.py`, which runs classification over dataset filenames, samples a few claims for OCR, resolves synthetic members, and constructs fraud test contexts. It is a diagnostic, not end-to-end adjudication accuracy.
 - If the dataset is unavailable, the benchmark endpoint returns a fallback baseline with example values. Those values are not measured runtime results.
-- The calibration module implements Brier/ECE/reliability utilities. The API calibration path uses the simulation harness and generated splits; this is not a calibrated production decision model.
+- The metrics dashboard shows a Brier/ECE reliability curve from 100 generated synthetic decision scenarios: 50 cases fit Platt scaling and a disjoint 50-case subset is evaluated. It uses generated `expected_business_decision` correctness labels, not `dataset/metadata.json` fraud labels or independently reviewed case outcomes. Treat it as a simulation diagnostic, not a calibrated production decision model.
 
 To reproduce the full workflow, point `DATABASE_SYNC_URL` at a **disposable evaluation database** before running the script. It clears case, document, review, decision, and audit rows in the configured database, writes local objects, and updates generated summary files. Do not point it at a development database containing work you need to keep:
 

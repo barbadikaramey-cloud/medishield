@@ -175,14 +175,11 @@ class Settings(BaseSettings):
         description="Cerebras API key for ultra-fast Llama inference fallback",
     )
     CEREBRAS_MODEL: str = Field(
-        default="llama3.1-8b",
-        description="Primary Cerebras model identifier (e.g. llama3.1-8b, llama-3.3-70b)",
+        default="gpt-oss-120b",
+        description="Primary Cerebras model identifier",
     )
     CEREBRAS_FALLBACK_MODELS: list[str] | str = Field(
-        default_factory=lambda: [
-            "llama-3.3-70b",
-            "llama3.1-70b",
-        ],
+        default_factory=lambda: ["qwen-3.8-27b"],
         description="Ordered list of Cerebras fallback models",
     )
     CEREBRAS_BASE_URL: str = Field(
