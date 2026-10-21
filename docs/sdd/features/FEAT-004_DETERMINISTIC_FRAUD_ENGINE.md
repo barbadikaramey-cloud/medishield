@@ -8,13 +8,16 @@
 - **Authoritative References:**
   - `docs/canonical/10_FRAUD_DETECTION_ENGINE_SPECIFICATION.md`
   - `docs/adr/ADR-005_DETERMINISTIC_EXPLAINABLE_FRAUD_SCORING.md`
+  - `docs/adr/ADR-033_BINARY_FRAUD_INDICATORS_AND_ANY_FACTOR_REVIEW.md`
   - `AGENTS.md` (Rules 1–15)
 
 ---
 
 ## 2. Purpose
-Provides deterministic fraud scoring and explainability:
-1. **Mathematical Scoring:** Evaluates signals across billing, provider, identity, and duplicate metrics with calibrated weights.
-2. **Deterministic Risk Buckets:** LOW (< 0.40), MEDIUM (0.40–0.69), HIGH (>= 0.70).
-3. **No LLM Decision Authority:** Deterministic arithmetic guarantees explainable audit trails without hallucinated fraud scores.
+Provides deterministic fraud screening and explainability:
+1. **Binary factors:** Each detector reports yes/no while preserving its raw measurement and description.
+2. **Any-factor review:** One detected factor sets `fraud_review_required=true` and routes to `ESCALATE(FRAUD_REVIEW)`; factors are not weighted or accumulated.
+3. **No fraud denial authority:** Fraud findings require review and do not themselves reject a claim; the deterministic decision engine owns the final business outcome.
+4. **Compatibility value:** `fraud_score` is `1.0` when review is required and `0.0` otherwise; it is not a probability or severity estimate.
+5. **Incomplete billing safeguard:** Incomplete service-line extraction is not treated as confirmed arithmetic drift.
 

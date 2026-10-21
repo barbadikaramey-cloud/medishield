@@ -16,9 +16,16 @@ from medishield.domain.faithfulness import (
     evaluate_case_consistency,
     fuzzy_token_match,
     normalize_text,
+    verify_clinical_evidence_reference,
     verify_extracted_span,
 )
-from medishield.domain.provenance import ProvenanceType, ProvenanceValue
+from medishield.domain.provenance import (
+    EvidenceSource,
+    EvidenceVerificationStatus,
+    FieldProvenance,
+    ProvenanceType,
+    ProvenanceValue,
+)
 
 
 def test_normalize_text():
@@ -95,6 +102,69 @@ def test_verify_extracted_span_hallucination():
     assert verified is False
     assert prov.provenance_type == ProvenanceType.INFERRED
     assert prov.evidence_quality_score == 0.0
+
+
+def test_clinical_evidence_rejects_wrong_document_or_fabricated_span() -> None:
+    payload = build_mock_ocr_payload()
+    for reference in (
+        FieldProvenance(
+            document_id="DOC-OTHER",
+            page_number=1,
+            span_id="span-p1-001",
+            text_content="James T. Kirk",
+            evidence_quality_score=0.99,
+        ),
+        FieldProvenance(
+            document_id="doc-001",
+            page_number=1,
+            span_id="span-p1-fabricated",
+            text_content="James T. Kirk",
+            evidence_quality_score=0.99,
+        ),
+    ):
+        verified, result = verify_clinical_evidence_reference(reference, payload)
+        assert verified is False
+        assert result.verification_status == EvidenceVerificationStatus.REJECTED
+        assert result.evidence_source == EvidenceSource.OCR
+        assert result.evidence_quality_score == 0.0
+
+
+def test_clinical_evidence_verifies_exact_span_and_bbox() -> None:
+    payload = build_mock_ocr_payload()
+    source_span = payload.pages[0].spans[0]
+    reference = FieldProvenance(
+        document_id=payload.document_id,
+        page_number=source_span.page_number,
+        span_id=source_span.span_id,
+        text_content=source_span.text,
+        bbox=source_span.bbox,
+        evidence_quality_score=0.99,
+    )
+
+    verified, result = verify_clinical_evidence_reference(reference, payload)
+
+    assert verified is True
+    assert result.verification_status == EvidenceVerificationStatus.VERIFIED
+    assert result.provenance_type == ProvenanceType.SPAN
+    assert result.span_id == source_span.span_id
+    assert result.bounding_box == source_span.bbox.to_list()
+
+
+def test_clinical_evidence_page_match_is_not_criterion_relevance() -> None:
+    payload = build_mock_ocr_payload()
+    reference = FieldProvenance(
+        document_id=payload.document_id,
+        page_number=1,
+        text_content="Office Visit",
+        evidence_quality_score=0.8,
+    )
+
+    verified, result = verify_clinical_evidence_reference(reference, payload)
+
+    assert verified is True
+    assert result.provenance_type == ProvenanceType.PAGE
+    assert result.verification_status == EvidenceVerificationStatus.VERIFIED
+    assert result.evidence_relevance_verified is False
 
 
 def test_evaluate_case_consistency_clean():

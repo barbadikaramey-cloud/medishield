@@ -8,7 +8,8 @@ from medishield.agents.kyc import (
     KYCAgent,
     MemberRecord,
 )
-from medishield.db.enums import AgentVerdict
+from medishield.db.catalog import InMemoryCodeCatalogRepository
+from medishield.db.enums import AgentVerdict, CodingSystem
 from medishield.domain.contracts import OCRDocumentPayload
 from medishield.domain.provenance import ProvenanceType
 from medishield.ocr.preprocessor import DefaultOCREngine
@@ -327,7 +328,13 @@ EXP DATE: 2030-01-01
 
 
 def test_claims_agent_pass_clean_claim() -> None:
-    agent = ClaimsAgent()
+    code_catalog = InMemoryCodeCatalogRepository()
+    code_catalog.upsert_code(
+        "J02.9",
+        CodingSystem.ICD10_CM,
+        short_description="Acute pharyngitis, unspecified",
+    )
+    agent = ClaimsAgent(code_catalog=code_catalog)
     text = """HEALTH INSURANCE CLAIM FORM
 PROVIDER: Dr. Sarah Jenkins Hospital
 NPI: 1234567890

@@ -256,6 +256,8 @@ def test_policy_coverage_agent_fail_exclusion_clause() -> None:
     assert "Policy Exclusion" in result.reasoning_summary
     assert result.exclusion_clause_verified is True
     assert result.applicable_service_codes == ["15780"]
+    assert result.policy_deductible_limit is None
+    assert result.policy_copay_percentage is None
 
 
 def test_exclusion_without_billed_code_is_not_a_policy_fail() -> None:
@@ -335,6 +337,8 @@ def test_policy_coverage_agent_unmatched_codes_indeterminate() -> None:
 
     assert result.verdict == AgentVerdict.INDETERMINATE
     assert "No matching policy clauses found" in result.reasoning_summary
+    assert result.policy_deductible_limit is None
+    assert result.policy_copay_percentage is None
 
 
 def test_gate_2_grounding_verification() -> None:

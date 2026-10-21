@@ -1,16 +1,25 @@
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, computed_field, model_validator
 
 from medishield.db.enums import (
     AgentVerdict,
     BusinessDecision,
     DocumentType,
     EscalationSubReason,
+    IndeterminateReason,
 )
-from medishield.domain.provenance import BBox, FieldProvenance, ProvenanceValue
+from medishield.domain.provenance import (
+    BBox,
+    ClinicalAssertionStatus,
+    EvidenceSource,
+    EvidenceVerificationStatus,
+    FieldProvenance,
+    ProvenanceType,
+    ProvenanceValue,
+)
 
 # ── 1. OCR Preprocessor Schemas ──────────────────────────────────────────────
 
@@ -82,6 +91,8 @@ class TamperSignal(BaseModel):
     severity: str = Field(..., description="LOW, MEDIUM, HIGH")
     description: str
     confidence: float = Field(..., ge=0.0, le=1.0)
+    document_id: str | None = Field(default=None, description="Document the signal originated from")
+    document_name: str | None = Field(default=None, description="File name of the flagged document")
 
 
 class KYCAgentOutput(BaseModel):
@@ -109,6 +120,10 @@ class KYCAgentOutput(BaseModel):
     tamper_detected: bool = False
     tamper_score: float = Field(default=0.0, ge=0.0, le=1.0)
     tamper_signals: list[TamperSignal] = Field(default_factory=list)
+    forensic_status: str | None = Field(
+        default=None,
+        description="Forensic analysis state: FORENSICS_COMPLETED, ANOMALY_DETECTED, IMAGE_RETRIEVAL_FAILED, NO_SUPPORTED_IMAGE_AVAILABLE",
+    )
 
     flags: list[str] = Field(default_factory=list)
     latency_ms: int = Field(..., ge=0)
@@ -125,6 +140,8 @@ class ServiceLine(BaseModel):
     service_date: ProvenanceValue
     units: ProvenanceValue
     amount: ProvenanceValue
+    currency: str = Field(default="USD", description="ISO-4217 Currency Code (e.g. USD, INR, EUR)")
+    currency_symbol: str = Field(default="$", description="Currency symbol (e.g. $, ₹, €)")
 
     @model_validator(mode="before")
     @classmethod
@@ -132,15 +149,46 @@ class ServiceLine(BaseModel):
         if isinstance(data, dict):
             if "rev_code" not in data:
                 data["rev_code"] = ProvenanceValue(value="UNKNOWN", confidence=0.0)
+            elif not isinstance(data["rev_code"], (ProvenanceValue, dict)):
+                data["rev_code"] = ProvenanceValue(value=str(data["rev_code"]), confidence=1.0)
+
             if "hcpcs" not in data and "cpt_code" in data:
                 data["hcpcs"] = data["cpt_code"]
-            if "units" not in data and "quantity" in data:
-                data["units"] = data["quantity"]
+            if "hcpcs" in data and not isinstance(data["hcpcs"], (ProvenanceValue, dict)) and data["hcpcs"] is not None:
+                data["hcpcs"] = ProvenanceValue(value=str(data["hcpcs"]), confidence=1.0)
+
+            if "description" not in data and "line_description" in data:
+                data["description"] = data["line_description"]
+            if "description" in data and not isinstance(data["description"], (ProvenanceValue, dict)) and data["description"] is not None:
+                data["description"] = ProvenanceValue(value=str(data["description"]), confidence=1.0)
+
+            if "units" not in data:
+                if "quantity" in data:
+                    data["units"] = data["quantity"]
+                else:
+                    data["units"] = 1.0
+            if "units" in data and not isinstance(data["units"], (ProvenanceValue, dict)) and data["units"] is not None:
+                data["units"] = ProvenanceValue(value=float(data["units"]), confidence=1.0)
+
             if "amount" not in data:
-                if "total_charge" in data:
+                if "billed_amount" in data:
+                    data["amount"] = data["billed_amount"]
+                elif "total_charge" in data:
                     data["amount"] = data["total_charge"]
                 elif "unit_charge" in data:
                     data["amount"] = data["unit_charge"]
+            if "amount" in data and not isinstance(data["amount"], (ProvenanceValue, dict)) and data["amount"] is not None:
+                data["amount"] = ProvenanceValue(value=float(data["amount"]), confidence=1.0)
+
+            if "service_date" not in data:
+                data["service_date"] = ProvenanceValue(value="UNKNOWN", confidence=0.0)
+            elif not isinstance(data["service_date"], (ProvenanceValue, dict)):
+                data["service_date"] = ProvenanceValue(value=str(data["service_date"]), confidence=1.0)
+
+            if "currency" not in data:
+                data["currency"] = "USD"
+            if "currency_symbol" not in data:
+                data["currency_symbol"] = "$"
         return data
 
 
@@ -182,6 +230,8 @@ class ClaimsAgentOutput(BaseModel):
 
     # Header Information
     claim_amount: ProvenanceValue
+    currency: str = Field(default="USD", description="Detected claim currency code (e.g. USD, INR, EUR)")
+    currency_symbol: str = Field(default="$", description="Detected claim currency symbol (e.g. $, ₹, €)")
     service_date: ProvenanceValue
     provider_name: ProvenanceValue | None = None
     provider_npi: ProvenanceValue
@@ -197,6 +247,7 @@ class ClaimsAgentOutput(BaseModel):
     validation_errors: list[str] = Field(default_factory=list)
     line_items_sum_valid: bool
     calculated_lines_sum: float = Field(..., ge=0.0)
+    reason_codes: list[IndeterminateReason] = Field(default_factory=list)
 
     latency_ms: int = Field(..., ge=0)
 
@@ -211,6 +262,8 @@ class CandidatePolicy(BaseModel):
     effective_end_date: date | None = None
     plan_name: str
     active_riders: list[str] = Field(default_factory=list)
+    payer_product: str | None = None
+    jurisdiction: str | None = None
 
 
 class PolicyContextOutput(BaseModel):
@@ -253,6 +306,7 @@ class PolicyCoverageOutput(BaseModel):
     applicable_service_codes: list[str] = Field(default_factory=list)
     prior_authorization_required: bool = False
     prior_authorization_present: bool = False
+    reason_codes: list[IndeterminateReason] = Field(default_factory=list)
 
     reasoning_summary: str
     latency_ms: int = Field(..., ge=0)
@@ -261,28 +315,29 @@ class PolicyCoverageOutput(BaseModel):
 # ── 6. Fraud Detection Agent Contract ────────────────────────────────────────
 
 class FraudFeature(BaseModel):
-    """Individual explainable feature score within the fraud scoring suite (ADR-005)."""
+    """Binary fraud indicator with its raw supporting measurement (ADR-005)."""
     feature_name: str
     raw_value: float
-    normalized_score: float = Field(..., ge=0.0, le=1.0)
-    weight: float = Field(..., ge=0.0, le=1.0)
+    detected: bool = False
     description: str
 
 
 class RiskLevel(str, Enum):
-    """Calibrated risk tier based on composite fraud score."""
-    LOW = "LOW"        # score < 0.30
-    MEDIUM = "MEDIUM"  # 0.30 <= score < 0.70
-    HIGH = "HIGH"      # score >= 0.70
+    """Fraud review state; MEDIUM/HIGH remain readable for historical records."""
+    LOW = "LOW"
+    REVIEW_REQUIRED = "REVIEW_REQUIRED"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
 
 
 class FraudAgentOutput(BaseModel):
-    """Deterministic, explainable fraud score and anomaly breakdown (ADR-005)."""
+    """Deterministic binary fraud-review signal and anomaly breakdown (ADR-005)."""
     agent_name: str = "fraud_agent"
     verdict: AgentVerdict
     confidence: float = Field(..., ge=0.0, le=1.0)
 
     fraud_score: float = Field(..., ge=0.0, le=1.0)
+    fraud_review_required: bool = False
     risk_level: RiskLevel
     features: list[FraudFeature] = Field(default_factory=list)
     anomalies: list[str] = Field(default_factory=list)
@@ -363,19 +418,56 @@ class CriterionEvaluationOutcome(str, Enum):
     NOT_SATISFIED = "NOT_SATISFIED"
     UNASSESSED_EVIDENCE_UNAVAILABLE = "UNASSESSED_EVIDENCE_UNAVAILABLE"
     NOT_APPLICABLE = "NOT_APPLICABLE"
+    CONTRADICTORY = "CONTRADICTORY"
 
 
 class MandatoryGuidelineCriterion(BaseModel):
     """Granular clinical criterion within an authoritative coverage guideline."""
     criterion_id: str = Field(..., description="Unique criterion identifier (e.g., CRIT-01-CONSERVATIVE-THERAPY)")
     description: str = Field(..., description="Plain-text requirement")
+    requirement_reference_id: str | None = None
+    requirement_source_reference: str | None = None
+    requirement_source_chunk_id: str | None = None
+    requirement_source_verified: bool = False
     is_mandatory: bool = Field(default=True, description="Whether criterion is strictly required for coverage")
     evaluation_outcome: CriterionEvaluationOutcome
     supporting_spans: list[FieldProvenance] = Field(
         default_factory=list,
-        description="Bounding box, document ID, and page provenance corroborating outcome",
+        description="Patient evidence only; guideline text must not be stored here",
     )
+    evidence_interpretation: str | None = None
+    evidence_relevance_verified: bool = False
     rationale: str | None = Field(default=None, description="Clinical rationale explaining outcome")
+
+    @property
+    def has_verified_relevant_patient_evidence(self) -> bool:
+        return bool(
+            self.evidence_relevance_verified
+            and self.evidence_interpretation
+            and any(
+                span.document_id
+                and span.page_number > 0
+                and span.text_content.strip()
+                and span.evidence_source == EvidenceSource.OCR
+                and span.verification_status == EvidenceVerificationStatus.VERIFIED
+                and span.evidence_quality_score > 0
+                and span.provenance_type in (ProvenanceType.SPAN, ProvenanceType.PAGE)
+                and span.assertion_status in (
+                    ClinicalAssertionStatus.AFFIRMED,
+                    ClinicalAssertionStatus.NEGATED,
+                    ClinicalAssertionStatus.CONTRADICTORY,
+                )
+                and span.normalized_interpretation == self.evidence_interpretation
+                for span in self.supporting_spans
+            )
+        )
+
+    @property
+    def has_verified_patient_evidence(self) -> bool:
+        return self.has_verified_relevant_patient_evidence and any(
+            span.assertion_status == ClinicalAssertionStatus.AFFIRMED
+            for span in self.supporting_spans
+        )
 
 
 class GuidelineCitation(BaseModel):
@@ -383,19 +475,44 @@ class GuidelineCitation(BaseModel):
     guideline_id: str = Field(..., description="Unique identifier (e.g., CMS-LCD-L34212)")
     guideline_version: str = Field(..., description="Version tag (e.g., 2026.1)")
     guideline_title: str | None = Field(default=None, description="Official title of the clinical guideline")
-    jurisdiction: str = Field(default="NATIONAL", description="Target MAC jurisdiction or payer region")
-    payer_product: str = Field(default="COMMERCIAL", description="Applicable line of business")
+    jurisdiction: str | None = Field(default=None, description="Verified target jurisdiction or payer region")
+    payer_product: str | None = Field(default=None, description="Verified applicable payer/program")
+    source_reference: str | None = Field(default=None, description="Authoritative guideline source reference")
+    source_chunk_id: str | None = Field(default=None, description="Exact authoritative source chunk identifier")
+    source_verified: bool = False
+    applicable_to_claim: bool = False
     effective_date: date = Field(..., description="Effective date of the guideline version")
     expiration_date: date | None = Field(default=None, description="Expiration date; None if active")
     criteria_evaluations: list[MandatoryGuidelineCriterion] = Field(default_factory=list)
 
     @property
     def all_mandatory_criteria_satisfied(self) -> bool:
-        """Returns True if every mandatory criterion is affirmatively SATISFIED."""
+        """Returns True only when the guideline and each mandatory patient fact are verified."""
         mandatory = [c for c in self.criteria_evaluations if c.is_mandatory]
-        if not mandatory:
+        if (
+            not mandatory
+            or not self.source_verified
+            or not self.source_reference
+            or not self.source_chunk_id
+            or not self.payer_product
+            or not self.jurisdiction
+            or not self.applicable_to_claim
+        ):
             return False
-        return all(c.evaluation_outcome == CriterionEvaluationOutcome.SATISFIED for c in mandatory)
+        return all(
+            criterion.requirement_reference_id
+            and criterion.requirement_source_reference
+            and criterion.requirement_source_chunk_id
+            and criterion.requirement_source_verified
+            and (
+                criterion.evaluation_outcome == CriterionEvaluationOutcome.NOT_APPLICABLE
+                or (
+                    criterion.evaluation_outcome == CriterionEvaluationOutcome.SATISFIED
+                    and criterion.has_verified_patient_evidence
+                )
+            )
+            for criterion in mandatory
+        )
 
 
 class LineClinicalEvidence(BaseModel):
@@ -431,6 +548,8 @@ class LineClinicalEvidence(BaseModel):
     primary_icd10_codes: list[str] = Field(default_factory=list)
     secondary_icd10_codes: list[str] = Field(default_factory=list)
     guideline_citation: GuidelineCitation | None = None
+    performance_evidence: list[FieldProvenance] = Field(default_factory=list)
+    indication_evidence: list[FieldProvenance] = Field(default_factory=list)
     supporting_spans: list[FieldProvenance] = Field(
         default_factory=list,
         description="Bounding box, document ID, and page provenance of clinical evidence",
@@ -440,6 +559,113 @@ class LineClinicalEvidence(BaseModel):
     )
     discrepancy_flag: bool = False
     discrepancy_description: str | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def reason_codes(self) -> list[IndeterminateReason]:
+        """Structured causes for an INDETERMINATE line; derived from evidence statuses, never stored."""
+        if self.line_verdict != AgentVerdict.INDETERMINATE:
+            return []
+        codes: list[IndeterminateReason] = []
+        if self.performance_status in (
+            PerformanceEvidenceStatus.NOT_DOCUMENTED,
+            PerformanceEvidenceStatus.ORDERED_ONLY,
+        ):
+            codes.append(IndeterminateReason.PERFORMANCE_NOT_DOCUMENTED)
+        if self.indication_status == ClinicalIndicationStatus.NO_DOCUMENTED_INDICATION:
+            codes.append(IndeterminateReason.NO_DOCUMENTED_INDICATION)
+        elif self.indication_status == ClinicalIndicationStatus.POTENTIALLY_RELATED:
+            codes.append(IndeterminateReason.DIAGNOSIS_VALIDATION_UNAVAILABLE)
+        if self.necessity_status == MedicalNecessityStatus.GUIDELINE_UNAVAILABLE:
+            codes.append(IndeterminateReason.GUIDELINE_UNAVAILABLE)
+        elif self.necessity_status == MedicalNecessityStatus.CRITERIA_INCOMPLETE:
+            codes.append(IndeterminateReason.GUIDELINE_CRITERIA_UNSATISFIED)
+        if self.prior_auth_requirement == PriorAuthRequirementStatus.REQUIREMENT_UNKNOWN:
+            codes.append(IndeterminateReason.PRIOR_AUTH_REQUIREMENT_UNKNOWN)
+        if self.prior_auth_verification in (
+            PriorAuthVerificationStatus.MISSING_OR_UNVERIFIED,
+            PriorAuthVerificationStatus.AUTH_SERVICE_UNAVAILABLE,
+        ):
+            codes.append(IndeterminateReason.PRIOR_AUTH_MISSING)
+        if self.repeat_service_status in (
+            RepeatServiceStatus.UNASSESSED,
+            RepeatServiceStatus.REPEATED_AND_UNJUSTIFIED,
+        ):
+            codes.append(IndeterminateReason.REPEAT_SERVICE_UNASSESSED)
+        if not self.supporting_spans:
+            codes.append(IndeterminateReason.MISSING_EVIDENCE_SPANS)
+        if self.guideline_citation is None:
+            codes.append(IndeterminateReason.GUIDELINE_UNAVAILABLE)
+        elif not self.guideline_citation.all_mandatory_criteria_satisfied:
+            codes.append(IndeterminateReason.GUIDELINE_CRITERIA_UNSATISFIED)
+        return list(dict.fromkeys(codes)) or [IndeterminateReason.OTHER]
+
+    @property
+    def evidence_sufficient(self) -> bool:
+        if self.line_verdict in (AgentVerdict.FAIL, AgentVerdict.CONFLICT):
+            candidate_evidence = [
+                *self.supporting_spans,
+                *self.performance_evidence,
+                *self.indication_evidence,
+                *(
+                    span
+                    for criterion in (self.guideline_citation.criteria_evaluations if self.guideline_citation else [])
+                    for span in criterion.supporting_spans
+                ),
+            ]
+            return any(
+                item.evidence_source == EvidenceSource.OCR
+                and item.verification_status == EvidenceVerificationStatus.VERIFIED
+                and item.evidence_relevance_verified
+                and item.text_content.strip()
+                and item.assertion_status in (
+                    ClinicalAssertionStatus.AFFIRMED,
+                    ClinicalAssertionStatus.NEGATED,
+                    ClinicalAssertionStatus.CONTRADICTORY,
+                )
+                for item in candidate_evidence
+            )
+
+        guideline = self.guideline_citation
+        if (
+            guideline is None
+            or not guideline.source_verified
+            or not guideline.source_reference
+            or not guideline.source_chunk_id
+            or not guideline.payer_product
+            or not guideline.jurisdiction
+            or not guideline.applicable_to_claim
+        ):
+            return False
+
+        def has_verified_reference(items: list[FieldProvenance]) -> bool:
+            return any(
+                item.evidence_source == EvidenceSource.OCR
+                and item.verification_status == EvidenceVerificationStatus.VERIFIED
+                and item.evidence_relevance_verified
+                and item.text_content.strip()
+                and item.assertion_status != ClinicalAssertionStatus.NOT_ASSESSED
+                for item in items
+            )
+
+        for criterion in guideline.criteria_evaluations:
+            if not criterion.is_mandatory:
+                continue
+            if (
+                criterion.evaluation_outcome == CriterionEvaluationOutcome.UNASSESSED_EVIDENCE_UNAVAILABLE
+                or not criterion.requirement_source_verified
+                or not criterion.requirement_source_reference
+                or not criterion.requirement_source_chunk_id
+            ):
+                return False
+            if (
+                criterion.evaluation_outcome != CriterionEvaluationOutcome.NOT_APPLICABLE
+                and not criterion.has_verified_relevant_patient_evidence
+            ):
+                return False
+        if self.line_verdict == AgentVerdict.PASS:
+            return has_verified_reference(self.performance_evidence) and has_verified_reference(self.indication_evidence)
+        return True
 
     @model_validator(mode="after")
     def validate_line_verdict_consistency(self) -> "LineClinicalEvidence":
@@ -501,10 +727,33 @@ class LineClinicalEvidence(BaseModel):
                     )
             if not self.guideline_citation.all_mandatory_criteria_satisfied:
                 raise ValueError("Line verdict PASS requires all mandatory criteria in GuidelineCitation to be SATISFIED")
-            # Verify supporting spans present on mandatory criteria
-            for crit in self.guideline_citation.criteria_evaluations:
-                if crit.is_mandatory and not crit.supporting_spans:
-                    raise ValueError(f"Mandatory criterion '{crit.criterion_id}' requires non-empty supporting_spans")
+            for evidence_name, evidence in (
+                ("performance", self.performance_evidence),
+                ("indication", self.indication_evidence),
+            ):
+                if not any(
+                    item.evidence_source == EvidenceSource.OCR
+                    and item.verification_status == EvidenceVerificationStatus.VERIFIED
+                    and item.evidence_relevance_verified
+                    and item.assertion_status == ClinicalAssertionStatus.AFFIRMED
+                    and item.text_content.strip()
+                    and item.normalized_interpretation
+                    for item in evidence
+                ):
+                    raise ValueError(f"Line verdict PASS requires verified, relevant {evidence_name} evidence")
+            if not self.evidence_sufficient:
+                raise ValueError("Line verdict PASS requires complete evidence sufficient for assessment")
+
+        if (
+            self.guideline_citation is not None
+            and any(
+                criterion.evaluation_outcome == CriterionEvaluationOutcome.CONTRADICTORY
+                for criterion in self.guideline_citation.criteria_evaluations
+                if criterion.is_mandatory
+            )
+            and self.line_verdict != AgentVerdict.CONFLICT
+        ):
+            raise ValueError("Contradictory mandatory criterion evidence must produce AgentVerdict.CONFLICT")
 
         # 6. Prior authorization requirements for PASS
         if self.prior_auth_requirement == PriorAuthRequirementStatus.REQUIRED:
@@ -713,12 +962,28 @@ class ClinicalAlignmentOutput(BaseModel):
     # Document Coverage Context
     clinical_documents_present: list[str] = Field(default_factory=list)
     low_ocr_quality_pages: list[int] = Field(default_factory=list)
+    schema_valid: bool = False
+    ocr_quality_sufficient: bool = False
+    evidence_sufficient: bool = False
     assessment_sufficient: bool = False
 
     # Summary and Discrepancies
     clinical_summary: str
     blocking_discrepancies: list[str] = Field(default_factory=list)
     latency_ms: int = Field(..., ge=0)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def reason_codes(self) -> list[IndeterminateReason]:
+        """Union of line-level reason codes; empty unless the overall verdict is INDETERMINATE."""
+        if self.verdict != AgentVerdict.INDETERMINATE:
+            return []
+        codes: list[IndeterminateReason] = []
+        if not self.clinical_documents_present:
+            codes.append(IndeterminateReason.MISSING_INPUT)
+        for line in self.line_assessments:
+            codes.extend(line.reason_codes)
+        return list(dict.fromkeys(codes)) or [IndeterminateReason.OTHER]
 
     @model_validator(mode="after")
     def validate_composite_invariants(self) -> "ClinicalAlignmentOutput":
@@ -907,7 +1172,11 @@ def build_clinical_alignment_output(
     # 7. Composite Verdict Derivation (Fail-Closed)
     had_input_error = bool(input_errors)
     ocr_acceptable = len(low_ocr_quality_pages) == 0
-    assessment_sufficient = (not had_input_error) and ocr_acceptable and len(sanitized_assessments) > 0
+    schema_valid = not had_input_error
+    evidence_sufficient = bool(sanitized_assessments) and all(
+        line.evidence_sufficient for line in sanitized_assessments
+    )
+    assessment_sufficient = schema_valid and ocr_acceptable and evidence_sufficient
 
     if not assessment_sufficient:
         verdict = AgentVerdict.INDETERMINATE
@@ -928,21 +1197,30 @@ def build_clinical_alignment_output(
     # Decision Confidence = 0.40 * Provenance Quality + 0.35 * Validation Completeness + 0.25 * Model Confidence
     calibrated_confidence: float | None = None
     if verdict == AgentVerdict.PASS and assessment_sufficient:
-        all_spans = [s for l in sanitized_assessments for s in l.supporting_spans]
-        if all_spans:
+        all_spans = [
+            span
+            for line in sanitized_assessments
+            for evidence in (
+                line.performance_evidence,
+                line.indication_evidence,
+                *(
+                    criterion.supporting_spans
+                    for criterion in (
+                        line.guideline_citation.criteria_evaluations
+                        if line.guideline_citation is not None
+                        else []
+                    )
+                ),
+            )
+            for span in evidence
+        ]
+        if all_spans and all(span.model_confidence is not None for span in all_spans):
             prov_quality = sum(s.evidence_quality_score for s in all_spans) / len(all_spans)
-            val_completeness = 1.0 if (not had_input_error and ocr_acceptable) else 0.0
-            span_confidences: list[float] = []
-            for s in all_spans:
-                mc = getattr(s, "model_confidence", None)
-                if mc is not None:
-                    span_confidences.append(float(mc))
-            model_conf: float = min(span_confidences) if span_confidences else prov_quality
+            val_completeness = 1.0 if schema_valid and ocr_acceptable and evidence_sufficient else 0.0
+            model_conf = min(float(s.model_confidence) for s in all_spans if s.model_confidence is not None)
             calibrated_confidence = round(
                 0.40 * prov_quality + 0.35 * val_completeness + 0.25 * model_conf, 3
             )
-        else:
-            calibrated_confidence = None
 
     # Collect line-level discrepancies and clinical findings
     for l in sanitized_assessments:
@@ -952,13 +1230,16 @@ def build_clinical_alignment_output(
         if desc and desc not in blocking_discrepancies:
             blocking_discrepancies.append(desc)
 
-    summary_parts = [f"Clinical alignment completed with verdict {verdict.value}."]
-    if blocking_discrepancies:
-        diag_misaligns = [d for d in blocking_discrepancies if "Diagnosis-procedure clinical misalignment" in d]
-        if diag_misaligns:
-            summary_parts.append(f"Clinical findings: {'; '.join(diag_misaligns)}")
-        else:
-            summary_parts.append(f"Discrepancies: {'; '.join(blocking_discrepancies[:2])}")
+    summary_parts = [(
+        f"Clinical alignment {verdict.value}: {calc_pass}/{len(sanitized_assessments)} lines fully supported, "
+        f"{calc_ind} indeterminate, {calc_con} conflicted, {calc_fail} failed."
+    )]
+    unique_findings = list(dict.fromkeys(blocking_discrepancies))
+    if unique_findings:
+        summarized_findings = unique_findings[:3]
+        extra_count = len(unique_findings) - len(summarized_findings)
+        suffix = f" (+{extra_count} additional findings)" if extra_count else ""
+        summary_parts.append(f"Review: {'; '.join(summarized_findings)}{suffix}")
     clinical_summary_text = " ".join(summary_parts)
 
     return ClinicalAlignmentOutput(
@@ -977,6 +1258,9 @@ def build_clinical_alignment_output(
         unsupported_billed_amount=unsupported_amt,
         clinical_documents_present=clinical_documents_present,
         low_ocr_quality_pages=low_ocr_quality_pages,
+        schema_valid=schema_valid,
+        ocr_quality_sufficient=ocr_acceptable,
+        evidence_sufficient=evidence_sufficient,
         assessment_sufficient=assessment_sufficient,
         clinical_summary=clinical_summary_text,
         blocking_discrepancies=blocking_discrepancies,
@@ -996,6 +1280,7 @@ class ConsistencyCheckReport(BaseModel):
     verdict_override: AgentVerdict | None = None
     doctor_signature_verified: bool = True
     patient_signature_verified: bool = True
+    officer_signature_verified: bool = True
     npi_verified: bool = True
     prior_authorization_verified: bool = True
     procedure_codes_verified: bool = True
@@ -1023,4 +1308,4 @@ class OrchestratorOutput(BaseModel):
         description="Snapshot of KYC, Claims, Policy, and Fraud outputs",
     )
     is_auto_decided: bool = True
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

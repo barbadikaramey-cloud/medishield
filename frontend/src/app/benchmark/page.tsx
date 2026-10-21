@@ -40,8 +40,7 @@ interface BenchmarkCase {
   policy_confidence: number;
   fraud_score: number;
   fraud_verdict: string;
-  expected_decision: string;
-  is_fraud_ground_truth: boolean;
+  reviewed_adjudication_label?: "APPROVE" | "REJECT" | "ESCALATE" | null;
   justification: string;
   detailed_explanation: string;
   model_source: string;
@@ -110,28 +109,28 @@ export default function BenchmarkEvaluationPage() {
   const escalateCount = cases.filter((c) => c.final_decision === "ESCALATE").length;
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full space-y-6">
+    <div className="max-w-6xl mx-auto px-4 sm:px-6 py-6 w-full space-y-6">
       {/* Top Banner */}
-      <div className="bg-gradient-to-r from-slate-900 via-indigo-950/80 to-slate-900 border border-indigo-900/50 rounded-2xl p-6 shadow-xl relative overflow-hidden">
+      <div className="bg-card border border-border rounded-card p-5 sm:p-6 shadow-xs relative overflow-hidden">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
-            <div className="flex items-center space-x-2 text-cyan-400 text-xs font-mono uppercase tracking-wider">
-              <Sparkles className="w-4 h-4 animate-pulse" />
+            <div className="flex items-center space-x-1.5 text-accent text-xs font-semibold uppercase tracking-wider mb-1">
+              <Sparkles className="w-3.5 h-3.5" />
               <span>Full Benchmark Evaluation & LLM Explainability Portal</span>
             </div>
-            <h1 className="text-2xl sm:text-3xl font-extrabold text-white mt-1">
+            <h1 className="text-xl sm:text-2xl font-bold text-foreground tracking-tight">
               30-Case Benchmark Evaluation & Decision Explainability
             </h1>
-            <p className="text-sm text-slate-300 max-w-3xl mt-2 leading-relaxed">
-              Exhaustive evaluation of all 30 benchmark patient clusters (<code className="text-cyan-300 font-mono text-xs">C_001</code> to <code className="text-cyan-300 font-mono text-xs">C_030</code>).
-              Each case combines strict deterministic policy rules with rich, multi-agent clinical narratives synthesized via LLM.
+            <p className="text-secondary text-xs sm:text-sm mt-0.5 max-w-3xl leading-relaxed">
+              Exhaustive evaluation of all 30 benchmark patient clusters (<code className="text-accent font-mono text-xs">C_001</code> to <code className="text-accent font-mono text-xs">C_030</code>).
+              Each case combines strict deterministic policy rules with multi-agent clinical narratives synthesized via LLM.
             </p>
           </div>
 
           <div className="flex items-center gap-2 self-start md:self-auto shrink-0">
             <Link
               href="/"
-              className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold transition border border-slate-700 flex items-center space-x-1.5"
+              className="h-8 px-3.5 py-1.5 rounded-btn bg-card-inner hover:bg-pink-hover text-secondary hover:text-pink-deep hover:border-pink-border text-xs font-semibold transition border border-border flex items-center space-x-1.5 shadow-xs"
             >
               <span>Review Queue</span>
               <ArrowRight className="w-3.5 h-3.5" />
@@ -140,96 +139,108 @@ export default function BenchmarkEvaluationPage() {
         </div>
 
         {/* Metric Badges Strip */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-6 pt-6 border-t border-indigo-900/40">
-          <div className="bg-slate-950/80 p-3 rounded-xl border border-slate-800">
-            <div className="text-[11px] text-slate-400 font-medium uppercase tracking-wider">Total Evaluated</div>
-            <div className="text-2xl font-extrabold text-white font-mono mt-0.5">30 Clusters</div>
-            <div className="text-[10px] text-slate-500 mt-0.5">100% Pipeline Coverage</div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-5 pt-4 border-t border-border">
+          <div className="bg-card-inner p-3 rounded-btn border border-border transition hover:border-pink-border">
+            <div className="text-[11px] text-muted font-medium uppercase tracking-wider">Total Evaluated</div>
+            <div className="text-xl font-bold text-foreground font-mono tabular-nums mt-0.5">30 Clusters</div>
+            <div className="text-[10px] text-muted mt-0.5">100% Pipeline Coverage</div>
           </div>
-          <div className="bg-slate-950/80 p-3 rounded-xl border border-emerald-900/40">
-            <div className="text-[11px] text-emerald-400 font-medium uppercase tracking-wider">Clean Approvals</div>
-            <div className="text-2xl font-extrabold text-emerald-300 font-mono mt-0.5">{approveCount} (26.7%)</div>
-            <div className="text-[10px] text-emerald-500 mt-0.5">Automated Clean Pass</div>
+          <div className="bg-card-inner p-3 rounded-btn border border-status-success/30 transition hover:border-status-success/50">
+            <div className="text-[11px] text-status-success font-medium uppercase tracking-wider">Clean Approvals</div>
+            <div className="text-xl font-bold text-status-success font-mono tabular-nums mt-0.5">{approveCount} (26.7%)</div>
+            <div className="text-[10px] text-muted mt-0.5">Automated Clean Pass</div>
           </div>
-          <div className="bg-slate-950/80 p-3 rounded-xl border border-rose-900/40">
-            <div className="text-[11px] text-rose-400 font-medium uppercase tracking-wider">Policy Denials</div>
-            <div className="text-2xl font-extrabold text-rose-300 font-mono mt-0.5">{rejectCount} (30.0%)</div>
-            <div className="text-[10px] text-rose-500 mt-0.5">Confirmed Policy Exclusion</div>
+          <div className="bg-card-inner p-3 rounded-btn border border-rose-med/30 transition hover:border-rose-med/50">
+            <div className="text-[11px] text-rose-deep font-medium uppercase tracking-wider">Policy Denials</div>
+            <div className="text-xl font-bold text-rose-deep font-mono tabular-nums mt-0.5">{rejectCount} (30.0%)</div>
+            <div className="text-[10px] text-muted mt-0.5">Confirmed Exclusion</div>
           </div>
-          <div className="bg-slate-950/80 p-3 rounded-xl border border-amber-900/40">
-            <div className="text-[11px] text-amber-400 font-medium uppercase tracking-wider">Specialist Review</div>
-            <div className="text-2xl font-extrabold text-amber-300 font-mono mt-0.5">{escalateCount} (43.3%)</div>
-            <div className="text-[10px] text-amber-500 mt-0.5">Human Review Queue</div>
+          <div className="bg-card-inner p-3 rounded-btn border border-status-warning/30 transition hover:border-status-warning/50">
+            <div className="text-[11px] text-status-warning font-medium uppercase tracking-wider">Specialist Review</div>
+            <div className="text-xl font-bold text-status-warning font-mono tabular-nums mt-0.5">{escalateCount} (43.3%)</div>
+            <div className="text-[10px] text-muted mt-0.5">Human Review Queue</div>
           </div>
         </div>
       </div>
 
       {/* Filter and Search Bar */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col md:flex-row items-center justify-between gap-3 shadow-md">
+      <div className="bg-card border border-border rounded-card p-3 flex flex-col md:flex-row items-center justify-between gap-3 shadow-xs">
         {/* Filter Tabs */}
-        <div className="flex items-center space-x-1.5 flex-wrap gap-1 w-full md:w-auto">
+        <div className="flex items-center space-x-1.5 flex-wrap gap-1.5 w-full md:w-auto">
           <button
             type="button"
             onClick={() => setActiveFilter("ALL")}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+            className={`h-8 px-3 py-1.5 rounded-btn text-xs font-semibold transition-all duration-180 flex items-center space-x-1.5 ${
               activeFilter === "ALL"
-                ? "bg-cyan-600 text-white shadow-md"
-                : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                ? "bg-sky-soft text-sky-deep font-bold border border-sky-med/50 shadow-xs"
+                : "text-secondary hover:text-pink-deep hover:bg-pink-hover border border-border hover:border-pink-border"
             }`}
           >
-            All Cases ({cases.length})
+            <span>All Cases</span>
+            <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${activeFilter === "ALL" ? "bg-[#397FA9] text-white" : "bg-card-inner text-muted"}`}>
+              {cases.length}
+            </span>
           </button>
           <button
             type="button"
             onClick={() => setActiveFilter("APPROVE")}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+            className={`h-8 px-3 py-1.5 rounded-btn text-xs font-semibold transition-all duration-180 flex items-center space-x-1.5 ${
               activeFilter === "APPROVE"
-                ? "bg-emerald-600 text-white shadow-md"
-                : "bg-slate-800 text-emerald-400 hover:bg-slate-700"
+                ? "bg-status-success/15 text-status-success font-bold border border-status-success/40 shadow-xs"
+                : "text-secondary hover:text-pink-deep hover:bg-pink-hover border border-border hover:border-pink-border"
             }`}
           >
-            Approved ({approveCount})
+            <span>Approved</span>
+            <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${activeFilter === "APPROVE" ? "bg-status-success text-white" : "bg-card-inner text-muted"}`}>
+              {approveCount}
+            </span>
           </button>
           <button
             type="button"
             onClick={() => setActiveFilter("REJECT")}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+            className={`h-8 px-3 py-1.5 rounded-btn text-xs font-semibold transition-all duration-180 flex items-center space-x-1.5 ${
               activeFilter === "REJECT"
-                ? "bg-rose-600 text-white shadow-md"
-                : "bg-slate-800 text-rose-400 hover:bg-slate-700"
+                ? "bg-rose-blush text-rose-deep font-bold border border-rose-med/40 shadow-xs"
+                : "text-secondary hover:text-pink-deep hover:bg-pink-hover border border-border hover:border-pink-border"
             }`}
           >
-            Rejected ({rejectCount})
+            <span>Rejected</span>
+            <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${activeFilter === "REJECT" ? "bg-rose-deep text-white" : "bg-card-inner text-muted"}`}>
+              {rejectCount}
+            </span>
           </button>
           <button
             type="button"
             onClick={() => setActiveFilter("ESCALATE")}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+            className={`h-8 px-3 py-1.5 rounded-btn text-xs font-semibold transition-all duration-180 flex items-center space-x-1.5 ${
               activeFilter === "ESCALATE"
-                ? "bg-amber-600 text-white shadow-md"
-                : "bg-slate-800 text-amber-400 hover:bg-slate-700"
+                ? "bg-status-warning/15 text-status-warning font-bold border border-status-warning/40 shadow-xs"
+                : "text-secondary hover:text-pink-deep hover:bg-pink-hover border border-border hover:border-pink-border"
             }`}
           >
-            Escalated ({escalateCount})
+            <span>Escalated</span>
+            <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${activeFilter === "ESCALATE" ? "bg-status-warning text-white" : "bg-card-inner text-muted"}`}>
+              {escalateCount}
+            </span>
           </button>
         </div>
 
         {/* Search & Bulk Expand */}
         <div className="flex items-center space-x-2 w-full md:w-auto">
           <div className="relative flex-1 md:w-72">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <Search className="w-3.5 h-3.5 text-muted absolute left-3 top-3" />
             <input
               type="text"
               placeholder="Search patient, cluster, policy, rule..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500"
+              className="w-full h-9 bg-card border border-border rounded-btn pl-8 pr-3 py-1.5 text-xs text-foreground placeholder:text-muted focus:outline-none focus:border-sky-med focus:ring-2 focus:ring-sky/30 shadow-xs transition-colors"
             />
           </div>
           <button
             type="button"
             onClick={() => expandAll(true)}
-            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition shrink-0"
+            className="h-9 px-3 py-1.5 rounded-btn bg-card hover:bg-pink-hover text-secondary hover:text-pink-deep hover:border-pink-border text-xs font-medium border border-border transition shadow-xs shrink-0"
             title="Expand all case cards"
           >
             Expand All
@@ -237,7 +248,7 @@ export default function BenchmarkEvaluationPage() {
           <button
             type="button"
             onClick={() => expandAll(false)}
-            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition shrink-0"
+            className="h-9 px-3 py-1.5 rounded-btn bg-card hover:bg-pink-hover text-secondary hover:text-pink-deep hover:border-pink-border text-xs font-medium border border-border transition shadow-xs shrink-0"
             title="Collapse all case cards"
           >
             Collapse All
@@ -246,9 +257,9 @@ export default function BenchmarkEvaluationPage() {
       </div>
 
       {/* Case List */}
-      <div className="space-y-4">
+      <div className="space-y-3">
         {filteredCases.length === 0 ? (
-          <div className="p-12 text-center text-slate-500 bg-slate-900/50 rounded-xl border border-slate-800">
+          <div className="p-12 text-center text-muted bg-card rounded-card border border-border text-xs">
             No benchmark cases match the specified filters.
           </div>
         ) : (
@@ -261,83 +272,83 @@ export default function BenchmarkEvaluationPage() {
             return (
               <div
                 key={c.cluster_id}
-                className={`bg-slate-900 border rounded-xl overflow-hidden transition shadow-lg ${
+                className={`bg-card border border-border rounded-card overflow-hidden transition-all duration-180 hover:shadow-card-hover hover:-translate-y-0.5 ${
                   isApprove
-                    ? "border-emerald-950 hover:border-emerald-700"
+                    ? "hover:border-status-success/50"
                     : isReject
-                    ? "border-rose-950 hover:border-rose-700"
-                    : "border-amber-950 hover:border-amber-700"
+                    ? "hover:border-rose-med/50"
+                    : "hover:border-status-warning/50"
                 }`}
               >
                 {/* Case Card Header */}
                 <div
                   onClick={() => toggleCard(c.cluster_id)}
-                  className="p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 cursor-pointer hover:bg-slate-800/40 transition select-none"
+                  className="p-3.5 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 cursor-pointer hover:bg-pink-hover/40 transition-colors select-none"
                 >
-                  <div className="flex items-start sm:items-center space-x-3">
+                  <div className="flex items-start sm:items-center space-x-3 min-w-0">
                     <span
-                      className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-xs shrink-0 ${
+                      className={`w-8 h-8 rounded-btn flex items-center justify-center font-bold text-xs shrink-0 ${
                         isApprove
-                          ? "bg-emerald-950 text-emerald-400 border border-emerald-800"
+                          ? "bg-status-success/10 text-status-success border border-status-success/20"
                           : isReject
-                          ? "bg-rose-950 text-rose-400 border border-rose-800"
-                          : "bg-amber-950 text-amber-400 border border-amber-800"
+                          ? "bg-rose-blush text-rose-deep border border-rose-med/30"
+                          : "bg-status-warning/10 text-status-warning border border-status-warning/20"
                       }`}
                     >
                       {c.cluster_id.replace("C_", "#")}
                     </span>
 
-                    <div>
+                    <div className="min-w-0">
                       <div className="flex items-center space-x-2 flex-wrap gap-1">
-                        <span className="text-sm font-bold text-white">
+                        <span className="text-xs font-bold text-foreground truncate max-w-[200px]">
                           {c.patient_name}
                         </span>
-                        <span className="text-xs text-slate-400 font-mono">
+                        <span className="text-xs text-muted font-mono shrink-0">
                           ({c.patient_id})
                         </span>
-                        <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono border border-slate-700">
+                        <span className="text-[10px] px-2 py-0.2 rounded-full bg-card-inner text-muted font-mono border border-border shrink-0 truncate max-w-[150px]">
                           {c.policy_number}
                         </span>
                       </div>
-                      <div className="text-xs text-slate-400 mt-0.5 flex items-center space-x-3">
-                        <span>DOB: <strong className="text-slate-300">{c.dob}</strong></span>
-                        <span>•</span>
-                        <span>SSN: <strong className="text-slate-300">{c.ssn}</strong></span>
-                        <span>•</span>
-                        <span>Docs: <strong className="text-cyan-400">{c.documents.length}</strong></span>
+                      <div className="text-[11px] text-muted mt-0.5 flex items-center space-x-2 flex-wrap gap-1">
+                        <span className="shrink-0">DOB: <strong className="text-secondary font-mono">{c.dob}</strong></span>
+                        <span className="text-muted/60">&bull;</span>
+                        <span className="shrink-0">SSN: <strong className="text-secondary font-mono">{c.ssn}</strong></span>
+                        <span className="text-muted/60">&bull;</span>
+                        <span className="shrink-0">Docs: <strong className="text-accent font-mono">{c.documents.length}</strong></span>
                       </div>
                     </div>
                   </div>
 
-                  <div className="flex items-center space-x-2.5 self-start sm:self-auto shrink-0">
+                  <div className="flex items-center space-x-2 self-start sm:self-auto shrink-0">
                     <span
-                      className={`px-2.5 py-1 rounded-full text-xs font-bold font-mono border flex items-center space-x-1 ${
+                      className={`px-2 py-0.5 rounded-full text-[11px] font-bold font-mono border flex items-center space-x-1 ${
                         isApprove
-                          ? "bg-emerald-950 text-emerald-400 border-emerald-700"
+                          ? "bg-status-success/10 text-status-success border-status-success/20"
                           : isReject
-                          ? "bg-rose-950 text-rose-400 border-rose-700"
-                          : "bg-amber-950 text-amber-400 border-amber-700"
+                          ? "bg-rose-blush text-rose-deep border border-rose-med/30"
+                          : "bg-status-warning/10 text-status-warning border border-status-warning/20"
                       }`}
                     >
-                      {isApprove && <CheckCircle2 className="w-3.5 h-3.5" />}
-                      {isReject && <ShieldAlert className="w-3.5 h-3.5" />}
-                      {!isApprove && !isReject && <AlertCircle className="w-3.5 h-3.5" />}
+                      {isApprove && <CheckCircle2 className="w-3 h-3" />}
+                      {isReject && <ShieldAlert className="w-3 h-3" />}
+                      {!isApprove && !isReject && <AlertCircle className="w-3 h-3" />}
                       <span>{c.final_decision}</span>
                     </span>
 
-                    <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-slate-950 text-slate-300 border border-slate-800">
+                    <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-card-inner text-secondary border border-border truncate max-w-[180px]">
                       {formatRuleLabel(c.rule_id_matched)}
                     </span>
 
                     <button
                       type="button"
-                      className="p-1 rounded bg-slate-800 text-slate-400 hover:text-white"
+                      className="p-1 rounded bg-card-inner hover:bg-pink-hover text-muted hover:text-pink-deep border border-border hover:border-pink-border transition"
                       title={isExpanded ? "Collapse dossier" : "Expand dossier"}
                     >
                       {isExpanded ? (
-                        <ChevronUp className="w-4 h-4" />
+                        <ChevronUp className="w-3.5 h-3.5" />
                       ) : (
-                        <ChevronDown className="w-4 h-4" />
+                        <ChevronDown className="w-3.5 h-3.5" />
                       )}
                     </button>
                   </div>
@@ -345,110 +356,110 @@ export default function BenchmarkEvaluationPage() {
 
                 {/* Expanded Dossier View */}
                 {isExpanded && (
-                  <div className="p-5 border-t border-slate-800 bg-slate-950/70 space-y-5">
+                  <div className="p-4 border-t border-border bg-card-inner space-y-4">
                     {/* Multi-Agent Scorecard */}
                     <div>
-                      <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">
+                      <div className="text-[10px] font-bold text-muted uppercase tracking-wider mb-2">
                         Multi-Agent Evaluator Scorecard
                       </div>
-                      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
-                        <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800">
-                          <div className="text-[10px] text-slate-400 font-medium">KYC Identity</div>
-                          <div className={`text-xs font-bold mt-0.5 ${c.kyc_verdict === "PASS" ? "text-emerald-400" : "text-rose-400"}`}>
+                      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                        <div className="p-2.5 rounded-btn bg-card border border-border">
+                          <div className="text-[10px] text-muted font-medium">KYC Identity</div>
+                          <div className={`text-xs font-bold mt-0.5 font-mono ${c.kyc_verdict === "PASS" ? "text-status-success" : "text-status-danger"}`}>
                             {c.kyc_verdict} ({(c.kyc_confidence * 100).toFixed(0)}%)
                           </div>
                         </div>
-                        <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800">
-                          <div className="text-[10px] text-slate-400 font-medium">Line-Item Arithmetic</div>
-                          <div className={`text-xs font-bold mt-0.5 ${c.claims_verdict === "PASS" ? "text-emerald-400" : "text-amber-400"}`}>
+                        <div className="p-2.5 rounded-btn bg-card border border-border">
+                          <div className="text-[10px] text-muted font-medium">Line-Item Arithmetic</div>
+                          <div className={`text-xs font-bold mt-0.5 font-mono ${c.claims_verdict === "PASS" ? "text-status-success" : "text-status-warning"}`}>
                             {c.claims_verdict} ({(c.claims_confidence * 100).toFixed(0)}%)
                           </div>
                         </div>
-                        <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800">
-                          <div className="text-[10px] text-slate-400 font-medium">Policy Coverage</div>
-                          <div className={`text-xs font-bold mt-0.5 ${c.policy_verdict === "PASS" ? "text-emerald-400" : "text-rose-400"}`}>
+                        <div className="p-2.5 rounded-btn bg-card border border-border">
+                          <div className="text-[10px] text-muted font-medium">Policy Coverage</div>
+                          <div className={`text-xs font-bold mt-0.5 font-mono ${c.policy_verdict === "PASS" ? "text-status-success" : "text-status-danger"}`}>
                             {c.policy_verdict} ({(c.policy_confidence * 100).toFixed(0)}%)
                           </div>
                         </div>
-                        <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800">
-                          <div className="text-[10px] text-slate-400 font-medium">Fraud Score</div>
-                          <div className={`text-xs font-bold font-mono mt-0.5 ${c.fraud_score < 0.3 ? "text-emerald-400" : c.fraud_score < 0.7 ? "text-amber-400" : "text-rose-400"}`}>
-                            {c.fraud_score.toFixed(2)} ({c.fraud_verdict})
+                        <div className="p-2.5 rounded-btn bg-card border border-border">
+                          <div className="text-[10px] text-muted font-medium">Fraud Score</div>
+                          <div className={`text-xs font-bold font-mono mt-0.5 ${c.fraud_score > 0 ? "text-status-warning" : "text-status-success"}`}>
+                            {c.fraud_score > 0 ? "REVIEW REQUIRED" : "CLEAR"} ({c.fraud_verdict})
                           </div>
                         </div>
-                        <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800">
-                          <div className="text-[10px] text-slate-400 font-medium">Expected Ground Truth</div>
-                          <div className="text-xs font-bold text-cyan-400 mt-0.5">
-                            {c.expected_decision} {c.is_fraud_ground_truth ? "(Fraud)" : "(Clean)"}
+                        <div className="p-2.5 rounded-btn bg-card border border-border">
+                          <div className="text-[10px] text-muted font-medium">Reviewed Decision Label</div>
+                          <div className="text-xs font-bold text-accent mt-0.5 font-mono">
+                            {c.reviewed_adjudication_label ?? "UNREVIEWED"}
                           </div>
                         </div>
                       </div>
                     </div>
 
                     {/* LLM-Backed Clinical Decision Explanation */}
-                    <div className="bg-slate-900 border border-indigo-900/60 rounded-xl overflow-hidden shadow-md">
-                      <div className="bg-gradient-to-r from-indigo-950 via-slate-900 to-slate-950 px-4 py-2.5 border-b border-indigo-900/40 flex items-center justify-between">
+                    <div className="bg-card border border-border rounded-card overflow-hidden shadow-xs">
+                      <div className="bg-card-inner px-3.5 py-2 border-b border-border flex items-center justify-between">
                         <div className="flex items-center space-x-2">
-                          <Sparkles className="w-4 h-4 text-cyan-400" />
-                          <span className="text-xs font-bold text-white uppercase tracking-wider">
+                          <Sparkles className="w-3.5 h-3.5 text-accent" />
+                          <span className="text-[11px] font-bold text-foreground uppercase tracking-wider">
                             Clinical & Policy Decision Narrative
                           </span>
-                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-indigo-950 text-indigo-300 border border-indigo-800 font-mono">
+                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-card text-muted border border-border font-mono">
                             {c.model_source.replace(/\s*\/\s*ADR-\d+\s*Engine/gi, "")}
                           </span>
                         </div>
                         <button
                           type="button"
                           onClick={() => handleCopy(c.cluster_id, c.detailed_explanation)}
-                          className="flex items-center space-x-1 px-2 py-0.5 rounded bg-slate-800 text-slate-300 hover:text-white text-[10px] font-mono transition border border-slate-700"
+                          className="h-7 flex items-center space-x-1.5 px-2.5 py-0.5 rounded-btn bg-card text-muted hover:text-pink-deep hover:bg-pink-hover hover:border-pink-border text-[10px] font-mono transition border border-border shadow-xs"
                         >
                           {copiedId === c.cluster_id ? (
                             <>
-                              <Check className="w-3 h-3 text-emerald-400" />
-                              <span className="text-emerald-400 font-sans">Copied</span>
+                              <Check className="w-3 h-3 text-status-success" />
+                              <span className="text-status-success font-sans">Copied</span>
                             </>
                           ) : (
                             <>
-                              <Copy className="w-3 h-3 text-slate-400" />
+                              <Copy className="w-3 h-3 text-muted" />
                               <span className="font-sans">Copy Markdown</span>
                             </>
                           )}
                         </button>
                       </div>
 
-                      <div className="p-4 text-xs text-slate-300 leading-relaxed space-y-2 whitespace-pre-wrap font-sans">
+                      <div className="p-3.5 text-xs text-secondary leading-relaxed space-y-2 whitespace-pre-wrap font-sans">
                         {c.detailed_explanation}
                       </div>
                     </div>
 
                     {/* Forensic Auditor Note (if Disputed) */}
                     {c.disputed_record && (
-                      <div className="p-3.5 bg-amber-950/40 border border-amber-700/50 rounded-xl text-xs space-y-1">
-                        <div className="font-bold text-amber-300 flex items-center space-x-1.5">
-                          <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+                      <div className="p-3 bg-status-warning/10 border border-status-warning/20 rounded-btn text-xs space-y-1">
+                        <div className="font-bold text-status-warning flex items-center space-x-1.5">
+                          <AlertCircle className="w-3.5 h-3.5 shrink-0" />
                           <span>Synthetic Ground Truth Disputed Record Note</span>
                         </div>
-                        <p className="text-slate-300 mt-1">
-                          <strong>Audit Finding:</strong> {c.disputed_record.audit_finding}
+                        <p className="text-secondary mt-1">
+                          <strong className="text-foreground">Audit Finding:</strong> {c.disputed_record.audit_finding}
                         </p>
-                        <p className="text-slate-300">
-                          <strong>Synthetic Anomaly:</strong> {c.disputed_record.synthetic_anomaly}
+                        <p className="text-secondary">
+                          <strong className="text-foreground">Synthetic Anomaly:</strong> {c.disputed_record.synthetic_anomaly}
                         </p>
-                        <p className="text-amber-200">
+                        <p className="text-status-warning">
                           <strong>Formal Disposition:</strong> {c.disputed_record.formal_disposition}
                         </p>
                       </div>
                     )}
 
                     {/* Evidence Document Roster & Direct Navigation */}
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2">
-                      <div className="flex items-center space-x-2 text-xs text-slate-400 flex-wrap gap-1">
-                        <FileText className="w-4 h-4 text-slate-500 shrink-0" />
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
+                      <div className="flex items-center space-x-2 text-xs text-muted flex-wrap gap-1">
+                        <FileText className="w-3.5 h-3.5 text-muted shrink-0" />
                         <span>Submitted Intake Documents:</span>
                         {c.documents.map((d) => (
                           <span
                             key={d.doc_id}
-                            className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 font-mono text-[10px] text-slate-300"
+                            className="px-1.5 py-0.5 rounded bg-card border border-border font-mono text-[10px] text-foreground"
                           >
                             {d.doc_id}
                           </span>
@@ -457,7 +468,7 @@ export default function BenchmarkEvaluationPage() {
 
                       <Link
                         href={`/cases/${encodeURIComponent(caseTrackingId)}`}
-                        className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition shrink-0 self-start sm:self-auto shadow-md"
+                        className="h-8 inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-btn bg-[#397FA9] hover:bg-[#2C6688] text-white text-xs font-semibold transition shrink-0 self-start sm:self-auto shadow-xs"
                       >
                         <span>Open in Review Workspace</span>
                         <ExternalLink className="w-3.5 h-3.5" />

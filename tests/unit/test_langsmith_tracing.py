@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import time
+from typing import Any
 from unittest import mock
 
 import pytest
@@ -185,11 +186,25 @@ def test_end_to_end_network_payload_privacy_enforcement():
     settings.LANGSMITH_API_KEY = "test-unit-langsmith-key"
     os.environ["LANGSMITH_TRACING"] = "true"
 
-    captured_bodies: list[bytes | str] = []
+    captured_bodies: list[bytes] = []
 
-    def fake_send(self, request, **kwargs):
+    def fake_send(self: Any, request: Any, **kwargs: Any) -> requests.Response:
         if request.body:
-            captured_bodies.append(request.body)
+            body = request.body
+            if isinstance(body, bytes):
+                captured_bodies.append(body)
+            elif hasattr(body, "getvalue"):
+                captured_bodies.append(body.getvalue())
+            elif hasattr(body, "read"):
+                pos = body.tell() if hasattr(body, "tell") else 0
+                content = body.read()
+                if hasattr(body, "seek"):
+                    body.seek(pos)
+                captured_bodies.append(content if isinstance(content, bytes) else str(content).encode("utf-8"))
+            elif isinstance(body, str):
+                captured_bodies.append(body.encode("utf-8"))
+            else:
+                captured_bodies.append(str(body).encode("utf-8"))
         resp = requests.Response()
         resp.status_code = 200
         resp._content = b"{}"
@@ -253,7 +268,7 @@ def test_end_to_end_network_payload_privacy_enforcement():
         time.sleep(0.3)  # Allow background queue to flush
 
     # Inspect all raw serialized bytes transmitted over the network
-    full_wire_bytes = b"".join([b if isinstance(b, bytes) else b.encode("utf-8") for b in captured_bodies])
+    full_wire_bytes = b"".join(captured_bodies)
     full_wire_str = full_wire_bytes.decode("utf-8", errors="ignore")
 
     assert len(full_wire_bytes) > 0, "No serialized network payloads were captured"
@@ -418,3 +433,103 @@ def test_nested_span_hierarchy_and_single_trace_tree():
     assert "CASE-C006-PT_39451" not in str(root_call)
     assert "CASE-C006-PT_39451" not in str(child_call)
     assert "pseudonymous_case_id" not in root_call["kwargs"]["inputs"]
+
+
+# ── Test 9: Agent-Only LangSmith Trace Filtering (LANGSMITH_AGENTS_ONLY) ──────
+def test_langsmith_agents_only_filters_tools_and_allows_agents():
+    """Asserts that when LANGSMITH_AGENTS_ONLY=True, only agent/workflow coordinator spans hit LangSmith."""
+    settings.LANGSMITH_TRACING = True
+    settings.LANGSMITH_API_KEY = "test-unit-key"
+    settings.LANGSMITH_AGENTS_ONLY = True
+    os.environ["LANGSMITH_TRACING"] = "true"
+
+    created_spans: list[str] = []
+
+    def mock_trace(name: str, **kwargs: Any) -> Any:
+        created_spans.append(name)
+        cm = mock.MagicMock()
+        cm.__enter__.return_value = mock.MagicMock()
+        return cm
+
+    with mock.patch("langsmith.trace", side_effect=mock_trace):
+        # 1. Non-agent tool span should be filtered out
+        with trace_span(name="storage_put_bytes", run_type="tool", component="storage_backend") as s1:
+            s1.set_summary(status="SUCCESS")
+
+        # 2. Non-agent OCR tool span should be filtered out
+        with trace_span(name="ocr_process_document", run_type="tool", component="ocr_preprocessor_engine") as s2:
+            s2.set_summary(status="SUCCESS")
+
+        # 3. Non-agent DB lookup should be filtered out
+        with trace_span(name="db_member_lookup", run_type="retriever", component="member_repository") as s3:
+            s3.set_summary(status="SUCCESS")
+
+        # 4. Agent nodes should be captured
+        with trace_span(name="kyc_agent_node", run_type="chain", component="kyc_agent_node") as s4:
+            s4.set_summary(verdict="PASS")
+
+        with trace_span(name="claims_extraction_node", run_type="chain", component="claims_extraction_node") as s5:
+            s5.set_summary(status="SUCCESS")
+
+        with trace_span(name="fraud_agent_node", run_type="chain", component="fraud_agent_node") as s6:
+            s6.set_summary(risk_level="LOW")
+
+        with trace_span(name="CaseWorkflowCoordinator.execute", run_type="chain", component="CaseWorkflowCoordinator") as s7:
+            s7.set_summary(decision="APPROVE")
+
+    assert created_spans == [
+        "kyc_agent_node",
+        "claims_extraction_node",
+        "fraud_agent_node",
+        "CaseWorkflowCoordinator.execute",
+    ]
+
+
+# ── Test 10: Prohibition of Image and Raw Byte Payloads ─────────────────────
+def test_langsmith_prohibits_image_and_byte_payloads():
+    """Asserts that image bytes, base64 data URLs, and image keys are strictly rejected from LangSmith spans."""
+    settings.LANGSMITH_TRACING = True
+    settings.LANGSMITH_API_KEY = "test-unit-key"
+    settings.LANGSMITH_AGENTS_ONLY = False
+    os.environ["LANGSMITH_TRACING"] = "true"
+
+    captured_inputs: list[dict[str, Any]] = []
+
+    def mock_trace(name: str, **kwargs: Any) -> Any:
+        captured_inputs.append(kwargs.get("inputs", {}))
+        cm = mock.MagicMock()
+        cm.__enter__.return_value = mock.MagicMock()
+        return cm
+
+    with (
+        mock.patch("langsmith.trace", side_effect=mock_trace),
+        trace_span(
+            name="kyc_agent_node",
+            component="KYCAgent",
+            inputs={
+                "image": b"\x89PNG\r\n\x1a\nrawimagedata",
+                "image_data": "data:image/jpeg;base64,/9j/4AAQSkZJRg==",
+                "raw_bytes": b"secretbinarybytes",
+                "document_count": 2,
+            },
+        ) as span,
+    ):
+        span.set_summary(
+            image_base64="data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==",
+            raw_bytes=b"\xff\xd8\xff\xe0",
+            verdict="PASS",
+        )
+        summary = span.get_summary()
+
+    # Verify input payload was sanitized
+    assert len(captured_inputs) == 1
+    inputs = captured_inputs[0]
+    assert "image" not in inputs
+    assert "image_data" not in inputs
+    assert "raw_bytes" not in inputs
+    assert inputs.get("document_count") == 2
+
+    # Verify summary output was sanitized
+    assert "image_base64" not in summary
+    assert "raw_bytes" not in summary
+    assert summary.get("verdict") == "PASS"

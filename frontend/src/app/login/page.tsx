@@ -6,7 +6,6 @@ import {
   Activity,
   AlertCircle,
   ArrowRight,
-  FileText,
   KeyRound,
   Layers,
   Loader2,
@@ -15,6 +14,7 @@ import {
   User,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
+import { MediShieldLogo } from "@/components/MediShieldLogo";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -35,7 +35,7 @@ export default function LoginPage() {
       user: "claimer",
       pass: "claimer123",
       icon: ShieldCheck,
-      color: "border-cyan-500/40 hover:border-cyan-400 bg-cyan-950/20 text-cyan-400",
+      color: "border-border hover:border-accent bg-card text-foreground",
       target: "/claimer",
     },
     {
@@ -47,7 +47,7 @@ export default function LoginPage() {
       user: "reviewer",
       pass: "reviewer123",
       icon: Layers,
-      color: "border-emerald-500/40 hover:border-emerald-400 bg-emerald-950/20 text-emerald-400",
+      color: "border-border hover:border-accent bg-card text-foreground",
       target: "/",
     },
     {
@@ -59,7 +59,7 @@ export default function LoginPage() {
       user: "admin",
       pass: "admin123",
       icon: Activity,
-      color: "border-purple-500/40 hover:border-purple-400 bg-purple-950/20 text-purple-400",
+      color: "border-border hover:border-accent bg-card text-foreground",
       target: "/admin",
     },
   ];
@@ -88,8 +88,8 @@ export default function LoginPage() {
       } else {
         router.push("/");
       }
-    } catch (err: any) {
-      setError(err.message || "Invalid credentials. Please verify your username and password.");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Invalid credentials. Please verify your username and password.");
     } finally {
       setLoading(false);
     }
@@ -98,24 +98,21 @@ export default function LoginPage() {
   return (
     <div className="max-w-4xl mx-auto px-4 py-8">
       {/* Brand Header */}
-      <div className="text-center mb-10">
-        <div className="inline-flex items-center justify-center p-3 bg-cyan-950/40 border border-cyan-800/60 rounded-2xl mb-4 shadow-lg">
-          <ShieldCheck className="w-10 h-10 text-cyan-400" />
+      <div className="text-center mb-8 space-y-2">
+        <div className="flex justify-center mb-2">
+          <MediShieldLogo size="xl" showWordmark={true} showBadge={true} badgeText="Enterprise" />
         </div>
-        <h1 className="text-3xl font-extrabold text-white tracking-tight sm:text-4xl">
-          Medi<span className="text-cyan-400">Shield</span> Access Control
-        </h1>
-        <p className="mt-2 text-sm text-slate-400 max-w-lg mx-auto">
-          Enterprise Role-Based Access Governance. Select a user persona or enter your enterprise credentials below.
+        <p className="text-xs sm:text-sm text-secondary max-w-lg mx-auto">
+          Enterprise Role-Based Access Governance. Select a persona preset or enter your credentials.
         </p>
       </div>
 
       {/* Preset Persona Quick Selector */}
       <div className="mb-8">
-        <div className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3 text-center">
+        <div className="text-[11px] font-semibold uppercase tracking-wider text-muted mb-3 text-center">
           Quick Demo Login &bull; Select a Persona
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           {personas.map((p) => {
             const Icon = p.icon;
             const isSelected = username === p.user;
@@ -124,24 +121,26 @@ export default function LoginPage() {
                 key={p.id}
                 type="button"
                 onClick={() => handleSelectPreset(p.user, p.pass)}
-                className={`text-left p-4 rounded-xl border transition-all ${p.color} ${
-                  isSelected ? "ring-2 ring-cyan-400 shadow-lg scale-[1.02]" : "opacity-90 hover:opacity-100"
+                className={`text-left p-4 rounded-card border transition-all duration-180 ${
+                  isSelected
+                    ? "ring-2 ring-sky/50 border-sky-med bg-sky-soft text-foreground shadow-xs"
+                    : "border-border bg-card text-foreground hover:bg-pink-hover/60 hover:border-pink-border shadow-xs hover:shadow-card-hover hover:-translate-y-0.5"
                 }`}
               >
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs px-2 py-0.5 rounded-full bg-slate-900 font-mono font-bold">
+                  <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-bold border ${isSelected ? "bg-[#397FA9] text-white border-transparent" : "bg-card-inner text-muted border-border"}`}>
                     {p.roleLabel}
                   </span>
-                  <Icon className="w-5 h-5" />
+                  <Icon className={`w-4 h-4 ${isSelected ? "text-sky-deep" : "text-muted"}`} />
                 </div>
-                <div className="font-bold text-white text-base mb-1">{p.title}</div>
-                <div className="text-xs text-slate-300 font-medium mb-2">{p.subtitle}</div>
-                <div className="text-xs text-slate-400 line-clamp-2 leading-relaxed">
+                <div className="font-bold text-foreground text-sm mb-0.5">{p.title}</div>
+                <div className="text-xs text-secondary font-medium mb-1.5">{p.subtitle}</div>
+                <div className="text-[11px] text-muted line-clamp-2 leading-relaxed">
                   {p.description}
                 </div>
-                <div className="mt-3 pt-2 border-t border-slate-800/60 flex items-center justify-between text-xs font-mono text-slate-300">
-                  <span>User: <strong className="text-white">{p.user}</strong></span>
-                  <span className="text-cyan-400 font-sans flex items-center gap-1 text-[11px]">
+                <div className="mt-3 pt-2 border-t border-border flex items-center justify-between text-xs font-mono text-secondary">
+                  <span>User: <strong className="text-foreground">{p.user}</strong></span>
+                  <span className="text-accent font-sans flex items-center gap-1 text-[11px] font-semibold">
                     Use Preset <ArrowRight className="w-3 h-3" />
                   </span>
                 </div>
@@ -152,28 +151,28 @@ export default function LoginPage() {
       </div>
 
       {/* Login Card */}
-      <div className="max-w-md mx-auto bg-slate-900/90 border border-slate-800 rounded-2xl p-6 sm:p-8 shadow-2xl backdrop-blur">
-        <div className="flex items-center space-x-2 text-white font-semibold mb-6 pb-3 border-b border-slate-800">
-          <KeyRound className="w-5 h-5 text-cyan-400" />
+      <div className="max-w-md mx-auto bg-card border border-border rounded-card p-6 sm:p-7 shadow-xs">
+        <div className="flex items-center space-x-2 text-foreground font-semibold mb-5 pb-3 border-b border-border text-sm">
+          <KeyRound className="w-4 h-4 text-accent" />
           <span>Enter Credentials</span>
         </div>
 
         {error && (
-          <div className="mb-6 p-3 bg-red-950/40 border border-red-800/80 rounded-lg flex items-start space-x-2 text-red-300 text-xs">
-            <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+          <div className="mb-5 p-3 bg-rose-blush border border-rose-med/30 rounded-btn flex items-start space-x-2 text-rose-deep text-xs shadow-xs">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-deep" />
             <span>{error}</span>
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="space-y-5">
+        <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1.5 flex items-center justify-between">
+            <label className="block text-xs font-medium text-foreground mb-1 flex items-center justify-between">
               <span>Username</span>
-              <span className="text-[11px] text-slate-500 font-mono">claimer / reviewer / admin</span>
+              <span className="text-[10px] text-muted font-mono">claimer / reviewer / admin</span>
             </label>
             <div className="relative">
-              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-500">
-                <User className="w-4 h-4" />
+              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-muted">
+                <User className="w-3.5 h-3.5" />
               </div>
               <input
                 type="text"
@@ -181,19 +180,19 @@ export default function LoginPage() {
                 onChange={(e) => setUsername(e.target.value)}
                 placeholder="Enter username"
                 required
-                className="w-full pl-10 pr-4 py-2.5 bg-slate-950 border border-slate-800 rounded-lg text-sm text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-colors"
+                className="w-full h-9 pl-9 pr-3 py-1.5 bg-card border border-border rounded-btn text-xs text-foreground placeholder:text-muted focus:outline-none focus:border-sky focus:ring-2 focus:ring-sky/30 shadow-xs transition-colors"
               />
             </div>
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1.5 flex items-center justify-between">
+            <label className="block text-xs font-medium text-foreground mb-1 flex items-center justify-between">
               <span>Password</span>
-              <span className="text-[11px] text-slate-500 font-mono">claimer123 / reviewer123 / admin123</span>
+              <span className="text-[10px] text-muted font-mono">claimer123 / reviewer123 / admin123</span>
             </label>
             <div className="relative">
-              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-500">
-                <Lock className="w-4 h-4" />
+              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-muted">
+                <Lock className="w-3.5 h-3.5" />
               </div>
               <input
                 type="password"
@@ -201,7 +200,7 @@ export default function LoginPage() {
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="Enter password"
                 required
-                className="w-full pl-10 pr-4 py-2.5 bg-slate-950 border border-slate-800 rounded-lg text-sm text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-colors"
+                className="w-full h-9 pl-9 pr-3 py-1.5 bg-card border border-border rounded-btn text-xs text-foreground placeholder:text-muted focus:outline-none focus:border-sky focus:ring-2 focus:ring-sky/30 shadow-xs transition-colors"
               />
             </div>
           </div>
@@ -209,24 +208,24 @@ export default function LoginPage() {
           <button
             type="submit"
             disabled={loading}
-            className="w-full py-2.5 px-4 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-sm font-semibold flex items-center justify-center space-x-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-md shadow-cyan-950"
+            className="w-full h-9 py-2 px-4 bg-[#397FA9] hover:bg-[#2C6688] text-white rounded-btn text-xs font-semibold flex items-center justify-center space-x-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-xs"
           >
             {loading ? (
               <>
-                <Loader2 className="w-4 h-4 animate-spin" />
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 <span>Authenticating...</span>
               </>
             ) : (
               <>
                 <span>Sign In to MediShield</span>
-                <ArrowRight className="w-4 h-4" />
+                <ArrowRight className="w-3.5 h-3.5" />
               </>
             )}
           </button>
         </form>
 
-        <div className="mt-6 pt-4 border-t border-slate-800/80 text-center">
-          <p className="text-[11px] text-slate-500">
+        <div className="mt-5 pt-3 border-t border-border text-center">
+          <p className="text-[11px] text-muted">
             Protected by MediShield RBAC & HIPAA Authentication Subsystem.
           </p>
         </div>
@@ -234,4 +233,3 @@ export default function LoginPage() {
     </div>
   );
 }
-

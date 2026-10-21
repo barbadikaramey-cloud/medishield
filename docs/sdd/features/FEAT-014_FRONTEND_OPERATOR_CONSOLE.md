@@ -58,4 +58,3 @@ Provides the human interface for operations reviewers and managers:
 3. **Validation Guards:** Enforces remarks length $\ge 10$ characters before allowing override submission.
 4. **Audit Verification:** Shows visual indicator of HMAC cryptographic chain intact status.
 5. **Clean Compilation:** Next.js application compiles with zero TypeScript errors.
-

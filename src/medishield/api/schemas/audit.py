@@ -28,6 +28,37 @@ class AuditExportResponse(BaseModel):
     events: list[AuditEventItem]
 
 
+class LLMStageTelemetryResponse(BaseModel):
+    calls_total: int
+    calls_success: int
+    calls_failed: int
+    latency_p50_ms: float | None = None
+    latency_p95_ms: float | None = None
+
+
+class LLMRuntimeTelemetryResponse(BaseModel):
+    scope: str
+    calls_total: int
+    calls_success: int
+    calls_failed: int
+    provider_attempts: int
+    provider_attempts_success: int
+    provider_attempts_failed: int
+    provider_failures: dict[str, int]
+    provider_failure_categories: dict[str, int]
+    stages: dict[str, LLMStageTelemetryResponse]
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    responses_with_token_usage: int
+    responses_without_token_usage: int
+    token_usage_complete: bool
+    latency_p50_ms: float | None = None
+    latency_p95_ms: float | None = None
+    provider_latency_p50_ms: float | None = None
+    provider_latency_p95_ms: float | None = None
+
+
 class OperationalMetricsResponse(BaseModel):
     """Operational telemetry & queue health metrics (Spec 08 § 5.1)."""
     timestamp: datetime
@@ -35,14 +66,19 @@ class OperationalMetricsResponse(BaseModel):
     cases_awaiting_human: int
     cases_awaiting_info: int
     completed_cases_24h: int
-    straight_through_processing_rate: float = Field(..., ge=0.0, le=1.0)
-    average_adjudication_latency_ms: float = Field(..., ge=0.0)
+    # Rates and latencies are null when no adjudicated data exists; they are never estimated.
+    straight_through_processing_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    average_adjudication_latency_ms: float | None = Field(default=None, ge=0.0)
+    latency_p50_ms: float | None = Field(default=None, ge=0.0)
+    latency_p95_ms: float | None = Field(default=None, ge=0.0)
     intake_queue_depth: int
     workflow_queue_depth: int
-    auto_approval_rate: float = Field(default=0.682, ge=0.0, le=1.0)
-    escalation_rate: float = Field(default=0.225, ge=0.0, le=1.0)
-    rejection_rate: float = Field(default=0.093, ge=0.0, le=1.0)
+    auto_approval_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    escalation_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    rejection_rate: float | None = Field(default=None, ge=0.0, le=1.0)
     total_adjudicated_cases: int = 0
+    insufficient_data: bool = True
+    llm_runtime: LLMRuntimeTelemetryResponse
     period_start: str | None = None
     period_end: str | None = None
 
@@ -71,7 +107,8 @@ class FraudBenchmarkCheck(BaseModel):
     test_name: str
     description: str
     status: str
-    score: float
+    fraud_review_required: bool = False
+    score: float = Field(..., description="Binary compatibility indicator (0.0 or 1.0), not fraud severity")
     details: str
 
 
@@ -87,5 +124,41 @@ class BenchmarkEvaluationResponse(BaseModel):
     last_run_timestamp: datetime
     execution_time_seconds: float
     suite_status: str
+
+
+class CalibrationBinSchema(BaseModel):
+    bin_index: int
+    lower_bound: float
+    upper_bound: float
+    mean_predicted_confidence: float
+    empirical_accuracy: float
+    sample_count: int
+    weight: float
+
+
+class SelectiveCoverageSchema(BaseModel):
+    confidence_threshold: float
+    coverage: float
+    selective_accuracy: float
+    accepted_samples: int
+
+
+class CalibrationMetricsResponse(BaseModel):
+    """Reliability curve and uncertainty metrics for Orchestrator decisions (ADR-017)."""
+    strategy: str
+    total_samples: int
+    brier_score: float
+    expected_calibration_error: float
+    maximum_calibration_error: float
+    raw_confidence_mean: float
+    calibrated_confidence_mean: float | None = None
+    calibrated_brier_score: float | None = None
+    calibrated_expected_calibration_error: float | None = None
+    calibration_method: str = "Platt Scaling"
+    bins: list[CalibrationBinSchema] = Field(default_factory=list)
+    calibrated_bins: list[CalibrationBinSchema] = Field(default_factory=list)
+    selective_risk_coverage: list[SelectiveCoverageSchema] = Field(default_factory=list)
+    interpretation: str
+
 
 

@@ -86,7 +86,7 @@ md.append("---")
 md.append("")
 md.append("## Master Benchmark Adjudication Roster")
 md.append("")
-md.append("| Case ID | Cluster | Patient Name | Policy Number | Rule Matched | System Verdict | Expected Ground Truth | Clinical Justification Summary |")
+md.append("| Case ID | Cluster | Patient Name | Policy Number | Rule Matched | System Verdict | Reviewed Adjudication Label | Clinical Justification Summary |")
 md.append("| :--- | :---: | :--- | :--- | :--- | :---: | :---: | :--- |")
 
 for res in diag["eval_results"]:
@@ -97,7 +97,7 @@ for res in diag["eval_results"]:
     pol = res["policy_number"]
     rule = res["rule_id_matched"]
     dec = res["final_decision"]
-    exp = res["expected_decision"]
+    exp = res.get("reviewed_adjudication_label") or "UNREVIEWED"
     case_str = f"CASE-{cid.replace('_', '')}-{pid.replace('_', '')}"
     dec_badge = "**`APPROVE`**" if dec == "APPROVE" else "**`REJECT`**" if dec == "REJECT" else "**`ESCALATE`**"
     emoji = "✅" if dec == "APPROVE" else "❌" if dec == "REJECT" else "⚠️"
@@ -118,8 +118,8 @@ for res in diag["eval_results"]:
     pol = res["policy_number"]
     rule = res["rule_id_matched"]
     dec = res["final_decision"]
-    exp = res["expected_decision"]
-    fraud_gt = res.get("is_fraud_ground_truth", False)
+    exp = res.get("reviewed_adjudication_label") or "UNREVIEWED"
+    fraud_label = res.get("fraud_metadata_label", False)
     case_str = f"CASE-{cid.replace('_', '')}-{pid.replace('_', '')}"
     anchor = f"case-{cid.lower().replace('_', '')}-{pid.lower().replace('_', '')}"
 
@@ -142,8 +142,8 @@ for res in diag["eval_results"]:
     md.append(f"- **Adjudication Verdict:** {dec_emoji} **`{dec}`** ({status_label})")
     md.append(f"- **Deterministic Rule Matched:** `{rule}`")
     md.append(f"- **Calibrated Confidence:** `{res.get('policy_confidence', 0.95)*100:.1f}%`")
-    md.append(f"- **Ground Truth Alignment:** Expected `{exp}` | Synthetic Fraud Label: `{fraud_gt}`")
-    md.append(f"- **Synthesis Engine:** `Groq LLM (gpt-oss-120b) / ADR-011 Clinical Decision Synthesizer`")
+    md.append(f"- **Reviewed Adjudication Label:** `{exp}` | Fraud Metadata Label (not decision truth): `{fraud_label}`")
+    md.append("- **Synthesis Engine:** `Groq LLM (gpt-oss-120b) / ADR-011 Clinical Decision Synthesizer`")
     md.append("")
 
     # Multi-Agent Scorecard

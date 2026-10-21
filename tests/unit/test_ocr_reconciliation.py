@@ -2,6 +2,9 @@
 
 
 import json
+from io import BytesIO
+
+from PIL import Image
 
 from medishield.agents.claims import ClaimsAgent
 from medishield.db.enums import AgentVerdict
@@ -14,7 +17,6 @@ from medishield.domain.contracts import (
 )
 from medishield.domain.provenance import ProvenanceType, ProvenanceValue
 from medishield.ocr.ocr_reconcile import (
-    SYNTHETIC_VALID_CPT_CODES,
     ArithmeticCheckStatus,
     ReconcileStatus,
     ResilientVisionClient,
@@ -23,8 +25,11 @@ from medishield.ocr.ocr_reconcile import (
     extract_cpt_codes_from_table,
     extract_money_value_geometrically,
     extract_service_lines_from_table,
+    find_unassigned_charge_anchors,
+    parse_money_amount,
     reconcile_field_reading,
 )
+from medishield.ocr.preprocessor import _recover_units_column_spans
 
 
 def _make_span(
@@ -59,6 +64,95 @@ def _make_doc(spans: list[OCRTextSpan], doc_id: str = "DOC-TEST-01") -> OCRDocum
             )
         ],
     )
+
+
+def test_ub04_units_column_recovery_preserves_service_line_provenance() -> None:
+    spans = [
+        _make_span("date-header", "45 SERVICE DATE", 0.4594, 0.2998, 0.5129, 0.3157),
+        _make_span("units-header", "UNITS", 0.5765, 0.3110, 0.6000, 0.3269),
+        _make_span("amount-header", "47 TOTAL CHARGES", 0.6241, 0.3014, 0.6841, 0.3149),
+        _make_span("rev", "0120", 0.0306, 0.3565, 0.0476, 0.3685),
+        _make_span("description", "Room and Board Semi-Private (3 days)", 0.0776, 0.3557, 0.1800, 0.3693),
+        _make_span("rate", "1250.00", 0.3371, 0.3557, 0.3624, 0.3693),
+        _make_span("date", "11/14/2025", 0.4600, 0.3557, 0.4947, 0.3693),
+        _make_span("amount", "$3,750.00", 0.6247, 0.3557, 0.6559, 0.3693),
+        _make_span("page-totals", "PAGE TOTALS", 0.0771, 0.5108, 0.1182, 0.5244),
+    ]
+    image_buffer = BytesIO()
+    Image.new("RGB", (1000, 1000), "white").save(image_buffer, format="PNG")
+
+    row_centers_scaled = [177.5, 367.5, 555.5, 747.5]
+
+    def fake_crop_ocr(_image):
+        results = []
+        for value, center_y in zip(("3", "1", "1", "1"), row_centers_scaled):
+            points = [
+                [10, center_y - 3],
+                [20, center_y - 3],
+                [20, center_y + 3],
+                [10, center_y + 3],
+            ]
+            results.append((points, value, 0.99))
+        return results, None
+
+    unit_spans = _recover_units_column_spans(
+        image_buffer.getvalue(), spans, page_num=1, engine=fake_crop_ocr
+    )
+    doc = _make_doc(spans + unit_spans, doc_id="claim_UB04_TEST")
+    lines = extract_service_lines_from_table(
+        [(doc, 1, span) for span in doc.pages[0].spans]
+    )
+
+    assert len(unit_spans) == 4
+    assert [line.units.value for line in lines] == [3.0]
+    assert lines[0].units.provenance is not None
+    assert lines[0].units.provenance.span_id == unit_spans[0].span_id
+
+
+def test_layout_adaptive_rows_recover_staggered_cells_and_room_days() -> None:
+    spans = [
+        _make_span("amount-header", "47 TOTAL CHARGES", 0.62, 0.30, 0.70, 0.32),
+        _make_span("rev-room", "0120", 0.03, 0.37, 0.06, 0.39),
+        _make_span("desc-room", "Room & Board Semi-Private (5 days)", 0.08, 0.35, 0.30, 0.37),
+        _make_span("rate-room", "1250.00", 0.33, 0.36, 0.37, 0.38),
+        _make_span("date-room", "12/15/2025", 0.46, 0.37, 0.51, 0.39),
+        _make_span("amount-room", "$6.250.00", 0.62, 0.38, 0.68, 0.40),
+        _make_span("noncovered-room", "$0.00", 0.75, 0.38, 0.79, 0.40),
+        _make_span("rev-therapy", "0490", 0.03, 0.40, 0.06, 0.42),
+        _make_span("desc-therapy", "Psychotherapy Session 60 min", 0.08, 0.40, 0.30, 0.42),
+        _make_span("code-therapy", "90837", 0.33, 0.41, 0.37, 0.43),
+        _make_span("date-therapy", "12/15/2025", 0.46, 0.41, 0.51, 0.43),
+        _make_span("amount-therapy", "$250.00", 0.62, 0.42, 0.68, 0.44),
+        _make_span("noncovered-therapy", "$0.00", 0.75, 0.42, 0.79, 0.44),
+        _make_span("rev-ecg", "0490", 0.03, 0.44, 0.06, 0.46),
+        _make_span("desc-ecg", "Electrocardiogram routine ECG", 0.08, 0.44, 0.30, 0.46),
+        _make_span("code-ecg", "93000", 0.33, 0.45, 0.37, 0.47),
+        _make_span("date-ecg", "12/15/2025", 0.46, 0.46, 0.51, 0.48),
+        _make_span("amount-ecg", "$95.00", 0.62, 0.47, 0.68, 0.49),
+        _make_span("noncovered-ecg", "$0.00", 0.75, 0.47, 0.79, 0.49),
+        _make_span("page-totals", "PAGE TOTALS", 0.08, 0.49, 0.18, 0.51),
+        _make_span("page-total-amount", "$6,595.00", 0.62, 0.51, 0.68, 0.53),
+    ]
+    doc = _make_doc(spans, doc_id="claim_UB04_LAYOUT_VARIANT")
+    doc_spans = [(doc, 1, span) for span in spans]
+
+    lines = extract_service_lines_from_table(doc_spans)
+
+    assert [(line.hcpcs.value, line.amount.value) for line in lines] == [
+        (None, 6250.0),
+        ("90837", 250.0),
+        ("93000", 95.0),
+    ]
+    assert lines[0].rev_code.value == "0120"
+    assert lines[0].units.value == 5.0
+    assert sum(line.amount.value for line in lines) == 6595.0
+    assert find_unassigned_charge_anchors(doc_spans, lines) == []
+    assert [span.text_content for span in find_unassigned_charge_anchors(doc_spans, lines[:2])] == ["$95.00"]
+
+
+def test_ocr_confused_thousands_separator_is_normalized_conservatively() -> None:
+    assert parse_money_amount("$6.250.00") == 6250.0
+    assert parse_money_amount("6.250.00") is None
 
 
 # ── Test 1: "48 NON-COV CHARGES" gives no amount ─────────────────────────────
@@ -119,7 +213,7 @@ def test_cpt_extraction_excludes_zip_codes_and_identifiers() -> None:
     doc = _make_doc(spans)
     spans_with_doc = [(doc, 1, s) for s in spans]
 
-    extracted_cpts = extract_cpt_codes_from_table(spans_with_doc, SYNTHETIC_VALID_CPT_CODES)
+    extracted_cpts = extract_cpt_codes_from_table(spans_with_doc)
     extracted_values = [c.value for c in extracted_cpts]
 
     # Must contain legitimate clinical CPT codes
@@ -326,12 +420,12 @@ def test_extract_cpt_codes_preserves_unsupported_codes() -> None:
     assert "99999" in extracted_values
     assert "99213" in extracted_values
 
-    # Supported codes get high confidence, unsupported codes get calibrated candidate confidence
+    # Supported codes in catalog get high confidence, unsupported codes get calibrated candidate confidence
     val_map = {p.value: p for p in extracted}
     assert val_map["99213"].confidence == 0.96
-    assert val_map["59400"].confidence == 0.70
-    assert val_map["27447"].confidence == 0.70
-    assert val_map["99999"].confidence == 0.70
+    assert val_map["27447"].confidence == 0.96  # Valid catalog surgical CPT (TKA)
+    assert val_map["59400"].confidence == 0.70  # Unsupported code
+    assert val_map["99999"].confidence == 0.70  # Experimental / unlisted code
 
 
 
@@ -735,6 +829,87 @@ def test_groq_vision_client_rate_limit_cascades_to_fallback_model() -> None:
         model1 = mock_post.call_args_list[0][1]["json"]["model"]
         model2 = mock_post.call_args_list[1][1]["json"]["model"]
         assert model1 != model2
+
+
+def test_is_plausible_revenue_code_format_and_catalog() -> None:
+    """Verifies that revenue code validation relies on UB-04 format and catalog repository (Rule 1)."""
+    from medishield.db.catalog import InMemoryCodeCatalogRepository
+    from medishield.ocr.ocr_reconcile import is_plausible_revenue_code
+
+    # Standard 3-4 digit UB-04 codes (e.g. 0250 Pharmacy, 0100 Room & Board, 0300 Laboratory)
+    for code in ["0250", "0100", "0200", "0300", "0360", "0960", "250", "100"]:
+        assert is_plausible_revenue_code(code) is True
+
+    # Invalid code formats
+    for bad_code in ["", "99999", "12", "INVALID", "PHARMACY_WORD"]:
+        assert is_plausible_revenue_code(bad_code) is False
+
+    # Catalog-driven verification
+    repo = InMemoryCodeCatalogRepository()
+    assert is_plausible_revenue_code("0250", repo) is True
+
+
+def test_extract_service_lines_with_institutional_revenue_codes() -> None:
+    """Verifies that itemized lines with standard UB-04 revenue codes are properly extracted and grounded."""
+    from medishield.ocr.ocr_reconcile import extract_service_lines_from_table
+
+    spans = [
+        _make_span("sp-1", "1", 0.05, 0.30, 0.08, 0.33),
+        _make_span("sp-2", "Total Knee Replacement", 0.12, 0.30, 0.40, 0.33),
+        _make_span("sp-3", "27447", 0.42, 0.30, 0.50, 0.33),
+        _make_span("sp-4", "1", 0.60, 0.30, 0.65, 0.33),
+        _make_span("sp-5", "70000.00", 0.80, 0.30, 0.90, 0.33),
+        # Row 2: Standard Pharmacy Revenue Code 0250
+        _make_span("sp-6", "2", 0.05, 0.35, 0.08, 0.38),
+        _make_span("sp-7", "0250", 0.12, 0.35, 0.20, 0.38),
+        _make_span("sp-8", "Pharmacy Supplies", 0.22, 0.35, 0.45, 0.38),
+        _make_span("sp-9", "1", 0.60, 0.35, 0.65, 0.38),
+        _make_span("sp-10", "4600.00", 0.80, 0.35, 0.90, 0.38),
+        # Row 3: Standard Room & Board Revenue Code 0100
+        _make_span("sp-11", "3", 0.05, 0.40, 0.08, 0.43),
+        _make_span("sp-12", "0100", 0.12, 0.40, 0.20, 0.43),
+        _make_span("sp-13", "Room and Board Ward", 0.22, 0.40, 0.45, 0.43),
+        _make_span("sp-14", "1", 0.60, 0.40, 0.65, 0.43),
+        _make_span("sp-15", "4800.00", 0.80, 0.40, 0.90, 0.43),
+    ]
+    doc = _make_doc(spans)
+    spans_with_doc = [(doc, 1, s) for s in spans]
+
+    service_lines = extract_service_lines_from_table(spans_with_doc)
+    assert len(service_lines) == 3
+
+    # Row 1 has CPT 27447
+    assert service_lines[0].hcpcs.value == "27447"
+
+    # Row 2 has revenue code 0250
+    assert service_lines[1].rev_code.value == "0250"
+    assert "Pharmacy" in service_lines[1].description.value
+    assert float(service_lines[1].amount.value) == 4600.00
+
+    # Row 3 has revenue code 0100
+    assert service_lines[2].rev_code.value == "0100"
+    assert "Room and Board" in service_lines[2].description.value
+    assert float(service_lines[2].amount.value) == 4800.00
+
+
+def test_semantic_total_label_synonyms() -> None:
+    """Verifies that money value extraction handles multi-lingual and regional synonyms for total claim amount."""
+    from medishield.ocr.ocr_reconcile import extract_money_value_geometrically
+
+    for label in ["Gross Amount", "Net Payable", "Bill Total", "Amount Due", "कुल राशि", "देय राशि", "Importe Total", "Monto Total"]:
+        spans = [
+            _make_span("sp-lbl", label, 0.10, 0.70, 0.40, 0.73),
+            _make_span("sp-val", "₹79,400.00", 0.60, 0.70, 0.85, 0.73),
+        ]
+        doc = _make_doc(spans)
+        spans_with_doc = [(doc, 1, s) for s in spans]
+
+        pv, amt, found = extract_money_value_geometrically(spans_with_doc)
+        assert found is True, f"Failed for label '{label}'"
+        assert amt == 79400.00, f"Expected 79400.00 for label '{label}', got {amt}"
+        assert pv is not None
+        assert "79,400.00" in pv.provenance.text_content
+
 
 
 

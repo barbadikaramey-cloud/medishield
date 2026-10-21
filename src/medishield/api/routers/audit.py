@@ -1,8 +1,9 @@
 """Cryptographic Audit Export & Operational Telemetry Router (Spec 08 § 5, FEAT-012)."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from medishield.api.deps import (
@@ -17,15 +18,28 @@ from medishield.api.schemas.audit import (
     AuditEventItem,
     AuditExportResponse,
     BenchmarkEvaluationResponse,
+    CalibrationBinSchema,
+    CalibrationMetricsResponse,
+    LLMRuntimeTelemetryResponse,
     OperationalMetricsResponse,
+    SelectiveCoverageSchema,
 )
 from medishield.benchmarks.evaluator import run_benchmark_evaluation
+from medishield.core.llm import llm_runtime_telemetry
 from medishield.core.tracing import trace_span
 from medishield.db.audit import GENESIS_HASH, verify_audit_chain
-from medishield.db.enums import BusinessDecision, WorkflowState
-from medishield.db.models import AuditEvent, Case
+from medishield.db.enums import ActorType, BusinessDecision, WorkflowState
+from medishield.db.models import AgentRun, AuditEvent, Case, Decision
 
 router = APIRouter(tags=["audit-and-metrics"])
+
+
+def _percentile(sorted_values: list[float], pct: float) -> float | None:
+    """Nearest-rank percentile over an ascending list; None when empty."""
+    if not sorted_values:
+        return None
+    rank = max(1, -(-len(sorted_values) * int(pct) // 100))
+    return round(sorted_values[min(rank, len(sorted_values)) - 1], 1)
 
 
 @router.get(
@@ -105,37 +119,94 @@ def get_operational_metrics(
     Operational queue monitoring and Straight-Through Processing (STP) tracking (Spec 08 § 5.1).
     Restricted to OPERATIONS_MANAGER and ADMINISTRATOR.
     """
+    now = datetime.now(UTC)
     total_cases = db.query(Case).count()
     awaiting_human = db.query(Case).filter(Case.workflow_state == WorkflowState.AWAITING_HUMAN).count()
     awaiting_info = db.query(Case).filter(Case.workflow_state == WorkflowState.AWAITING_INFO).count()
     completed = db.query(Case).filter(Case.workflow_state == WorkflowState.COMPLETED).count()
+    intake_depth = db.query(Case).filter(Case.workflow_state == WorkflowState.RECEIVED).count()
+    completed_24h = (
+        db.query(Case)
+        .filter(Case.workflow_state == WorkflowState.COMPLETED, Case.updated_at >= now - timedelta(hours=24))
+        .count()
+    )
 
+    adjudicated = db.query(Case).filter(Case.current_decision.isnot(None)).count()
     approved_count = db.query(Case).filter(Case.current_decision == BusinessDecision.APPROVE).count()
     escalated_count = db.query(Case).filter(Case.current_decision == BusinessDecision.ESCALATE).count()
     rejected_count = db.query(Case).filter(Case.current_decision == BusinessDecision.REJECT).count()
 
-    # STP rate: Percentage of completed cases resolved without manual human intervention
-    stp_rate = (completed / total_cases) if total_cases > 0 else 0.724
-    auto_approval_rate = (approved_count / total_cases) if total_cases > 0 else 0.682
-    escalation_rate = (escalated_count / total_cases) if total_cases > 0 else 0.225
-    rejection_rate = (rejected_count / total_cases) if total_cases > 0 else 0.093
+    # Straight-through = APPROVE/REJECT whose active decision was issued by the system, not a human.
+    stp_count = (
+        db.query(Decision.case_id)
+        .filter(
+            Decision.is_active.is_(True),
+            Decision.actor_type == ActorType.SYSTEM,
+            Decision.decision.in_([BusinessDecision.APPROVE, BusinessDecision.REJECT]),
+        )
+        .distinct()
+        .count()
+    )
 
-    now = datetime.now(UTC)
+    # Execution span avoids overstating duration when specialist agents run concurrently.
+    latest_exec = (
+        db.query(
+            AgentRun.case_id,
+            AgentRun.execution_id,
+            func.row_number()
+            .over(partition_by=AgentRun.case_id, order_by=AgentRun.started_at.desc())
+            .label("run_rank"),
+        )
+        .subquery()
+    )
+    latest_execution = (
+        db.query(latest_exec.c.case_id, latest_exec.c.execution_id)
+        .filter(latest_exec.c.run_rank == 1)
+        .subquery()
+    )
+    execution_rows = (
+        db.query(
+            AgentRun.case_id,
+            func.min(AgentRun.started_at).label("started_at"),
+            func.max(AgentRun.completed_at).label("completed_at"),
+        )
+        .join(
+            latest_execution,
+            (AgentRun.case_id == latest_execution.c.case_id)
+            & (AgentRun.execution_id == latest_execution.c.execution_id),
+        )
+        .group_by(AgentRun.case_id)
+        .all()
+    )
+    latencies = sorted(
+        max(0.0, (completed_at - started_at).total_seconds() * 1000)
+        for _case_pk, started_at, completed_at in execution_rows
+        if started_at is not None and completed_at is not None
+    )
+
+    def _rate(count: int) -> float | None:
+        return round(count / adjudicated, 3) if adjudicated > 0 else None
+
+    first_case = db.query(func.min(Case.created_at)).scalar()
     return OperationalMetricsResponse(
         timestamp=now,
         active_cases=total_cases - completed,
         cases_awaiting_human=awaiting_human,
         cases_awaiting_info=awaiting_info,
-        completed_cases_24h=completed,
-        straight_through_processing_rate=round(stp_rate, 3),
-        average_adjudication_latency_ms=1250.0,
-        intake_queue_depth=0,
+        completed_cases_24h=completed_24h,
+        straight_through_processing_rate=_rate(stp_count),
+        average_adjudication_latency_ms=round(sum(latencies) / len(latencies), 1) if latencies else None,
+        latency_p50_ms=_percentile(latencies, 50),
+        latency_p95_ms=_percentile(latencies, 95),
+        intake_queue_depth=intake_depth,
         workflow_queue_depth=awaiting_human + awaiting_info,
-        auto_approval_rate=round(auto_approval_rate, 3),
-        escalation_rate=round(escalation_rate, 3),
-        rejection_rate=round(rejection_rate, 3),
-        total_adjudicated_cases=total_cases if total_cases > 0 else 1482,
-        period_start="2026-10-01T00:00:00Z",
+        auto_approval_rate=_rate(approved_count),
+        escalation_rate=_rate(escalated_count),
+        rejection_rate=_rate(rejected_count),
+        total_adjudicated_cases=adjudicated,
+        insufficient_data=adjudicated == 0,
+        llm_runtime=LLMRuntimeTelemetryResponse(**llm_runtime_telemetry.snapshot()),
+        period_start=first_case.isoformat() if first_case else None,
         period_end=now.isoformat(),
     )
 
@@ -169,5 +240,98 @@ def trigger_benchmark_evaluation(
     """
     res = run_benchmark_evaluation(force=True)
     return BenchmarkEvaluationResponse(**res)
+
+
+@router.get(
+    "/metrics/calibration",
+    response_model=CalibrationMetricsResponse,
+    summary="Orchestrator Confidence Calibration & Reliability Metrics (ADR-017)",
+)
+def get_calibration_metrics(
+    strategy: str = "equal_width",
+    bins_count: int = 10,
+    current_user: AuthUser = Depends(require_role(ROLE_REVIEWER, ROLE_MANAGER, ROLE_ADMIN)),
+    db: Session = Depends(get_db),
+) -> CalibrationMetricsResponse:
+    """
+    Evaluates Orchestrator decision confidence calibration against ground truth accuracy.
+    Computes Brier Score, Expected Calibration Error (ECE), reliability diagram bins,
+    and Platt-calibrated probabilities on a strictly held-out evaluation dataset split.
+    """
+    from medishield.eval.calibration import (
+        PlattCalibrator,
+        compute_brier_score,
+        compute_expected_calibration_error,
+        generate_reliability_diagram_data,
+    )
+    from medishield.eval.generator import SyntheticDatasetGenerator
+    from medishield.eval.harness import BenchmarkHarness
+
+    # 1. Generate versioned evaluation dataset (44 cases across 11 standard categories)
+    gen = SyntheticDatasetGenerator(base_seed=42)
+    all_cases = gen.generate_tier_2_dataset()
+
+    # 2. Split 50/50 into calibration fit set and held-out test evaluation set (Prevent data leakage)
+    split_idx = len(all_cases) // 2
+    cal_cases = all_cases[:split_idx]
+    test_cases = all_cases[split_idx:]
+
+    harness = BenchmarkHarness()
+    _, cal_preds = harness.run_benchmark(cal_cases)
+    _, test_preds = harness.run_benchmark(test_cases)
+
+    # 3. Fit Platt Calibrator strictly on calibration split
+    y_cal_true = [1 if p.actual_decision == c.expected_business_decision else 0 for p, c in zip(cal_preds, cal_cases, strict=False)]
+    y_cal_conf = [p.decision_confidence for p in cal_preds]
+
+    calibrator = PlattCalibrator()
+    calibrator.fit(y_cal_conf, y_cal_true)
+
+    # 4. Evaluate raw vs calibrated on held-out test split
+    y_test_true = [1 if p.actual_decision == c.expected_business_decision else 0 for p, c in zip(test_preds, test_cases, strict=False)]
+    y_test_raw_conf = [p.decision_confidence for p in test_preds]
+    y_test_cal_conf = calibrator.predict_proba(y_test_raw_conf).tolist()
+
+    valid_strategy = "equal_frequency" if strategy == "equal_frequency" else "equal_width"
+    n_bins = max(3, min(20, bins_count))
+
+    raw_data = generate_reliability_diagram_data(
+        y_true=y_test_true,
+        y_prob=y_test_raw_conf,
+        calibrated_prob=y_test_cal_conf,
+        n_bins=n_bins,
+        strategy=valid_strategy,
+    )
+
+    cal_brier = compute_brier_score(y_test_true, y_test_cal_conf)
+    cal_ece, _, cal_bins = compute_expected_calibration_error(
+        y_true=y_test_true,
+        y_prob=y_test_cal_conf,
+        n_bins=n_bins,
+        strategy=valid_strategy,
+    )
+
+    interpretation = (
+        "Points below diagonal indicate model overconfidence (predicted confidence > empirical accuracy); "
+        "points above indicate underconfidence. Platt scaling applies parametric logistic correction to align scores."
+    )
+
+    return CalibrationMetricsResponse(
+        strategy=valid_strategy,
+        total_samples=raw_data.total_samples,
+        brier_score=raw_data.brier_score,
+        expected_calibration_error=raw_data.expected_calibration_error,
+        maximum_calibration_error=raw_data.maximum_calibration_error,
+        raw_confidence_mean=raw_data.raw_confidence_mean,
+        calibrated_confidence_mean=raw_data.calibrated_confidence_mean,
+        calibrated_brier_score=round(float(cal_brier), 4),
+        calibrated_expected_calibration_error=round(float(cal_ece), 4),
+        calibration_method="Platt Scaling (Logistic Sigmoid)",
+        bins=[CalibrationBinSchema(**b.to_dict()) for b in raw_data.bins],
+        calibrated_bins=[CalibrationBinSchema(**b.to_dict()) for b in cal_bins],
+        selective_risk_coverage=[SelectiveCoverageSchema(**c) for c in raw_data.selective_risk_coverage],
+        interpretation=interpretation,
+    )
+
 
 

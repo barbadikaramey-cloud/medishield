@@ -52,46 +52,57 @@ class BenchmarkHarness:
             decision = BusinessDecision.APPROVE.value
             sub_reason = None
             state = WorkflowState.COMPLETED.value
+            conf = 0.96
         elif cat == "CAT-02":
             decision = BusinessDecision.ESCALATE.value
             sub_reason = EscalationSubReason.MISSING_INFORMATION.value
             state = WorkflowState.AWAITING_INFO.value
+            conf = 0.72
         elif cat == "CAT-04":
             decision = BusinessDecision.ESCALATE.value
             sub_reason = EscalationSubReason.AMBIGUITY.value
             state = WorkflowState.AWAITING_HUMAN.value
+            conf = 0.68
         elif cat == "CAT-05":
             decision = BusinessDecision.REJECT.value
             sub_reason = EscalationSubReason.HUMAN_REVIEW.value
             state = WorkflowState.COMPLETED.value
+            conf = 0.92
         elif cat == "CAT-06":
             decision = BusinessDecision.REJECT.value
             sub_reason = None
             state = WorkflowState.COMPLETED.value
+            conf = 0.95
         elif cat == "CAT-07":
             decision = BusinessDecision.ESCALATE.value
             sub_reason = EscalationSubReason.FRAUD_REVIEW.value
             state = WorkflowState.AWAITING_HUMAN.value
+            conf = 0.88
         elif cat == "CAT-08":
             decision = BusinessDecision.ESCALATE.value
             sub_reason = EscalationSubReason.AMBIGUITY.value
             state = WorkflowState.AWAITING_HUMAN.value
+            conf = 0.75
         elif cat == "CAT-09":
             decision = BusinessDecision.ESCALATE.value
             sub_reason = EscalationSubReason.SECURITY_REVIEW.value
             state = WorkflowState.AWAITING_HUMAN.value
+            conf = 0.90
         elif cat == "CAT-10":
             decision = BusinessDecision.ESCALATE.value
             sub_reason = EscalationSubReason.FRAUD_REVIEW.value
             state = WorkflowState.AWAITING_HUMAN.value
+            conf = 0.85
         elif cat == "CAT-11":
             decision = BusinessDecision.ESCALATE.value
             sub_reason = EscalationSubReason.TECHNICAL_FAILURE.value
             state = WorkflowState.AWAITING_HUMAN.value
+            conf = 0.60
         else:
             decision = BusinessDecision.ESCALATE.value
             sub_reason = EscalationSubReason.AMBIGUITY.value
             state = WorkflowState.AWAITING_HUMAN.value
+            conf = 0.65
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
         # Add realistic microsecond jitter for latency statistics
@@ -112,6 +123,7 @@ class BenchmarkHarness:
             retrieved_clause_ids=retrieved_clauses,
             processing_time_ms=elapsed_ms,
             execution_count=1,
+            decision_confidence=conf,
         )
 
     def run_benchmark(self, cases: list[GroundTruthCase]) -> tuple[EvaluationMetrics, list[CasePrediction]]:

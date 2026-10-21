@@ -58,6 +58,8 @@ class CasePrediction:
     retrieved_clause_ids: list[str] = field(default_factory=list)
     processing_time_ms: float = 0.0
     execution_count: int = 1
+    decision_confidence: float = 0.90
+    calibrated_confidence: float | None = None
     error_message: str | None = None
 
 

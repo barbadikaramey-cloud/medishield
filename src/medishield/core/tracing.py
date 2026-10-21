@@ -86,6 +86,15 @@ BANNED_KEYS = {
     "image",
     "image_bytes",
     "images",
+    "img",
+    "image_data",
+    "image_base64",
+    "data_url",
+    "raw_bytes",
+    "content_bytes",
+    "file_bytes",
+    "picture",
+    "photo",
     "file_name",
     "filename",
     "file_path",
@@ -115,7 +124,7 @@ ESCALATION_SUBREASON_ENUM = {
     "AMBIGUITY",
     "RECOMMEND_DENIAL",
 }
-RISK_LEVEL_ENUM = {"LOW", "MEDIUM", "HIGH"}
+RISK_LEVEL_ENUM = {"LOW", "REVIEW_REQUIRED", "MEDIUM", "HIGH"}
 ERROR_CATEGORY_ENUM = {
     "RATE_LIMIT",
     "TIMEOUT",
@@ -226,6 +235,21 @@ def validate_telemetry_field(key: str, value: Any) -> tuple[bool, Any]:
     k_lower = key.lower()
     if k_lower not in ALLOWED_TRACE_KEYS:
         return False, None
+
+    # Never allow raw bytes or base64 encoded images in telemetry
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return False, None
+
+    if isinstance(value, str):
+        val_lower = value.lower()
+        if (
+            val_lower.startswith("data:image/")
+            or ";base64," in val_lower
+            or "\x89png" in val_lower
+            or "\xff\xd8\xff" in val_lower
+            or "gif8" in val_lower
+        ):
+            return False, None
 
     if k_lower == "status":
         if isinstance(value, str) and value.upper() in STATUS_ENUM:
@@ -389,6 +413,7 @@ def validate_telemetry_field(key: str, value: Any) -> tuple[bool, Any]:
         "id_expired",
         "schema_valid",
         "duplicate_claim_detected",
+        "fraud_review_required",
         "covered",
         "is_exclusion",
         "policy_active_on_service_date",
@@ -466,7 +491,12 @@ def scrub_phi_dict(data: dict[str, Any]) -> dict[str, Any]:
     for key, value in data.items():
         if key.lower() in BANNED_KEYS:
             continue
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            continue
         if isinstance(value, str):
+            val_lower = value.lower()
+            if val_lower.startswith("data:image/") or ";base64," in val_lower:
+                continue
             sanitized[key] = scrub_phi_text(value)
         elif isinstance(value, dict):
             sanitized[key] = scrub_phi_dict(value)
@@ -757,6 +787,80 @@ class SafeSpan:
         return dict(self._summary)
 
 
+# ── 9. Agent & Coordinator Trace Allowlist (LANGSMITH_AGENTS_ONLY) ──────────
+AGENT_TRACE_COMPONENTS: set[str] = {
+    # Workflow Nodes & Coordinators
+    "CaseWorkflowCoordinator",
+    "case_workflow_coordinator",
+    "workflow_coordinator",
+    "case_workflow_execute",
+    "ocr_preprocessor_node",
+    "split_group_node",
+    "classifier_node",
+    "case_completeness_node",
+    "kyc_agent_node",
+    "claims_extraction_node",
+    "policy_context_node",
+    "policy_coverage_rag_node",
+    "fraud_agent_node",
+    "clinical_alignment_node",
+    "faithfulness_gate_node",
+    "decision_engine_node",
+    "orchestrator_node",
+    # Agent Classes & Subsystems
+    "KYCAgent",
+    "kyc_agent",
+    "ClaimsAgent",
+    "claims_agent",
+    "FraudAgent",
+    "fraud_agent",
+    "FraudEngine",
+    "fraud_engine",
+    "PolicyAgent",
+    "policy_agent",
+    "PolicyCoverageAgent",
+    "PolicyCoverageRAGAgent",
+    "PolicyContextAgent",
+    "DocumentClassifierAgent",
+    "document_classifier_agent",
+    "Orchestrator",
+    "orchestrator",
+    "DecisionEngine",
+    "decision_engine",
+    "ExplanationGenerator",
+    "explanation_agent",
+    "FaithfulnessGate",
+    "faithfulness_gate",
+    # Frontier LLM invocations by agents
+    "groq_llm_client",
+    "agent_llm_call",
+}
+
+
+def is_agent_trace(name: str, component: str | None = None, run_type: str = "chain") -> bool:
+    """
+    Determines whether a trace span belongs to an agent or workflow coordination level.
+    Used when LANGSMITH_AGENTS_ONLY=True to filter out micro-spans (e.g., storage I/O,
+    OCR tool steps, raw DB repository lookups).
+    """
+    comp = (component or name).strip()
+    if comp in AGENT_TRACE_COMPONENTS or name in AGENT_TRACE_COMPONENTS:
+        return True
+    comp_lower = comp.lower()
+    name_lower = name.lower()
+    if (
+        comp_lower.endswith(("_node", "_agent"))
+        or "coordinator" in comp_lower
+        or "orchestrat" in comp_lower
+        or "decision" in comp_lower
+        or name_lower.endswith(("_node", "_agent"))
+        or "coordinator" in name_lower
+        or "orchestrat" in name_lower
+    ):
+        return True
+    return run_type in ("chain", "llm")
+
+
 class trace_span:
     """
     PHI-minimized distributed trace span context manager & decorator.
@@ -815,6 +919,11 @@ class trace_span:
         if not settings.LANGSMITH_TRACING:
             return self.span_handle
 
+        if getattr(settings, "LANGSMITH_AGENTS_ONLY", False) and not is_agent_trace(
+            self.name, self.component, self.run_type
+        ):
+            return self.span_handle
+
         client = get_langsmith_client()
         if client is None:
             return self.span_handle
@@ -824,7 +933,7 @@ class trace_span:
 
             self._langsmith_context = trace(
                 name=self.name,
-                run_type=self.run_type,
+                run_type=self.run_type,  # type: ignore[arg-type]
                 inputs=self.initial_inputs,
                 metadata=self.initial_metadata,
                 tags=self.tags,
@@ -855,6 +964,21 @@ class trace_span:
                 error_category=cat,
                 error_type=exc_val.__class__.__name__,
             )
+
+        if self.run_type == "llm":
+            try:
+                from medishield.core.llm import llm_runtime_telemetry
+
+                stage = scrub_phi_text(f"{self.component}:{self.operation}")
+                summary = self.span_handle.get_summary()
+                llm_runtime_telemetry.record_trace_call(
+                    stage=stage,
+                    elapsed_ms=elapsed_ms,
+                    success=summary.get("status") in ("SUCCESS", "SUCCEEDED"),
+                    summary=summary,
+                )
+            except Exception as telemetry_exc:  # noqa: BLE001
+                logger.debug("LLM runtime telemetry failed: %s", telemetry_exc)
 
         if self._langsmith_context is not None and self._run_tree is not None:
             try:

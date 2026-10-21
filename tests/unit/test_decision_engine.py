@@ -241,6 +241,32 @@ class TestDeterministicDecisionEngine:
         assert output.escalation_sub_reason == EscalationSubReason.FRAUD_REVIEW
         assert output.rule_id_matched == RULE_P4_HIGH_FRAUD
 
+    def test_rule_p4_single_binary_factor_triggers_fraud_review(
+        self, engine: DeterministicDecisionEngine
+    ) -> None:
+        context = DecisionInputContext(
+            case_id="CASE-P4-SINGLE-FACTOR",
+            execution_id="EXEC-P4-SINGLE-FACTOR",
+            present_document_types=[DocumentType.CLAIM_FORM, DocumentType.ID_DOCUMENT],
+            kyc_output=KYCAgentOutput(verdict=AgentVerdict.PASS, confidence=0.95, latency_ms=10),
+            claims_output=make_claims_output(AgentVerdict.PASS, confidence=0.95),
+            policy_output=make_policy_output(AgentVerdict.PASS, confidence=0.95),
+            fraud_output=FraudAgentOutput(
+                verdict=AgentVerdict.INDETERMINATE,
+                confidence=1.0,
+                fraud_score=1.0,
+                fraud_review_required=True,
+                risk_level=RiskLevel.REVIEW_REQUIRED,
+                anomalies=["Single factor detected"],
+                latency_ms=1,
+            ),
+        )
+        output = engine.evaluate(context)
+        assert output.decision == BusinessDecision.ESCALATE
+        assert output.escalation_sub_reason == EscalationSubReason.FRAUD_REVIEW
+        assert output.rule_id_matched == RULE_P4_HIGH_FRAUD
+        assert "one deterministic fraud factor" in output.justification.lower()
+
     def test_rule_p5_hard_reject(self, engine: DeterministicDecisionEngine) -> None:
         context = DecisionInputContext(
             case_id="CASE-P5",
@@ -344,7 +370,7 @@ class TestDeterministicDecisionEngine:
         assert output.is_auto_decided is True
         assert output.rule_id_matched == RULE_P6_CLEAN_PASS
 
-    def test_rule_p7_borderline_fraud_review(self, engine: DeterministicDecisionEngine) -> None:
+    def test_rule_p7_nonfraud_inadmissible_case(self, engine: DeterministicDecisionEngine) -> None:
         context = DecisionInputContext(
             case_id="CASE-P7",
             execution_id="EXEC-P7",
@@ -361,8 +387,8 @@ class TestDeterministicDecisionEngine:
                 agent_name="fraud",
                 verdict=AgentVerdict.PASS,
                 confidence=0.9,
-                fraud_score=0.45,
-                risk_level=RiskLevel.MEDIUM,
+                fraud_score=0.0,
+                risk_level=RiskLevel.LOW,
                 latency_ms=100,
             ),
         )

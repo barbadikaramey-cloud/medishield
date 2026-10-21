@@ -11,6 +11,7 @@ from medishield.db.enums import (
     BusinessDecision,
     DocumentType,
     EscalationSubReason,
+    IndeterminateReason,
     WorkflowState,
 )
 from medishield.domain.contracts import (
@@ -41,8 +42,6 @@ RULE_P8_CATCH_ALL = "RULE-P8-CATCH-ALL"
 SECURITY_TAMPER_THRESHOLD = 0.80
 CONFIDENCE_PASS_THRESHOLD = 0.70
 CLINICAL_CONFIDENCE_THRESHOLD = 0.75
-FRAUD_HIGH_THRESHOLD = 0.70
-FRAUD_LOW_THRESHOLD = 0.30
 
 # Mandatory Intake Document Types
 REQUIRED_INTAKE_DOCUMENTS = {DocumentType.CLAIM_FORM, DocumentType.ID_DOCUMENT}
@@ -58,6 +57,14 @@ class DecisionInputContext(BaseModel):
     policy_output: PolicyCoverageOutput | None = None
     fraud_output: FraudAgentOutput | None = None
     clinical_output: ClinicalAlignmentOutput | None = None
+    clinical_support_approval_min_ratio: float | None = Field(
+        default=None,
+        description="Fully supported line ratio above which clinical-only INDETERMINATE does not escalate; None disables",
+    )
+    clinical_uncertainty_approval_enabled: bool = Field(
+        default=False,
+        description="Allow P6 for non-contradictory clinical INDETERMINATE findings with an explicit discrepancy notice",
+    )
     consistency_report: ConsistencyCheckReport | None = Field(
         default=None,
         description="Cross-document consistency check report",
@@ -84,6 +91,20 @@ class DecisionInputContext(BaseModel):
     created_at: datetime | None = None
 
 
+def fraud_review_is_required(output: FraudAgentOutput | None) -> bool:
+    """Use the explicit binary flag, with legacy output compatibility."""
+    if output is None:
+        return False
+    return bool(
+        output.fraud_review_required
+        or output.duplicate_claim_detected
+        or output.verdict == AgentVerdict.FAIL
+        or output.risk_level in (RiskLevel.REVIEW_REQUIRED, RiskLevel.MEDIUM, RiskLevel.HIGH)
+        or any(feature.detected for feature in output.features)
+        or output.anomalies
+    )
+
+
 def build_agent_summaries_snapshot(context: DecisionInputContext) -> dict[str, Any]:
     """Serializes a consolidated snapshot of specialist findings for audit history."""
     snapshot: dict[str, Any] = {
@@ -99,8 +120,17 @@ def build_agent_summaries_snapshot(context: DecisionInputContext) -> dict[str, A
             "verdict": context.kyc_output.verdict.value,
             "confidence": context.kyc_output.confidence,
             "member_db_matched": context.kyc_output.member_db_matched,
+            "dob_matched": context.kyc_output.dob_matched,
+            "id_expired": context.kyc_output.id_expired,
+            "policy_active_on_service_date": context.kyc_output.policy_active_on_service_date,
             "tamper_detected": context.kyc_output.tamper_detected,
             "tamper_score": context.kyc_output.tamper_score,
+            "forensic_status": context.kyc_output.forensic_status,
+            "flags": list(context.kyc_output.flags or []),
+            "tamper_signals": [
+                s.model_dump() if hasattr(s, "model_dump") else s
+                for s in (context.kyc_output.tamper_signals or [])
+            ],
         }
     if context.claims_output:
         snapshot["claims"] = {
@@ -109,6 +139,8 @@ def build_agent_summaries_snapshot(context: DecisionInputContext) -> dict[str, A
             "schema_valid": context.claims_output.schema_valid,
             "line_items_sum_valid": context.claims_output.line_items_sum_valid,
             "calculated_lines_sum": context.claims_output.calculated_lines_sum,
+            "validation_errors": list(context.claims_output.validation_errors or []),
+            "reason_codes": [r.value for r in context.claims_output.reason_codes],
         }
     if context.policy_output:
         snapshot["policy"] = {
@@ -119,18 +151,21 @@ def build_agent_summaries_snapshot(context: DecisionInputContext) -> dict[str, A
             "exclusions": context.policy_output.identified_exclusions,
             "exclusion_clause_verified": context.policy_output.exclusion_clause_verified,
             "applicable_service_codes": context.policy_output.applicable_service_codes,
+            "reason_codes": [r.value for r in context.policy_output.reason_codes],
         }
     if context.fraud_output:
         snapshot["fraud"] = {
             "verdict": context.fraud_output.verdict.value,
             "confidence": context.fraud_output.confidence,
             "fraud_score": context.fraud_output.fraud_score,
+            "fraud_review_required": fraud_review_is_required(context.fraud_output),
             "risk_level": context.fraud_output.risk_level.value,
             "duplicate_claim_detected": context.fraud_output.duplicate_claim_detected,
             "anomalies": context.fraud_output.anomalies,
+            "features": [feature.model_dump() for feature in context.fraud_output.features],
         }
     if context.clinical_output:
-        snapshot["clinical_alignment"] = {
+        clin_data = {
             "verdict": context.clinical_output.verdict.value,
             "confidence": context.clinical_output.confidence,
             "total_lines_assessed": context.clinical_output.total_lines_assessed,
@@ -142,12 +177,16 @@ def build_agent_summaries_snapshot(context: DecisionInputContext) -> dict[str, A
             "unsupported_billed_amount": context.clinical_output.unsupported_billed_amount,
             "assessment_sufficient": context.clinical_output.assessment_sufficient,
             "blocking_discrepancies": context.clinical_output.blocking_discrepancies,
+            "reason_codes": [r.value for r in context.clinical_output.reason_codes],
         }
+        snapshot["clinical_alignment"] = clin_data
+        snapshot["clinical"] = clin_data
     if context.consistency_report:
         snapshot["consistency"] = {
             "is_consistent": context.consistency_report.is_consistent,
             "doctor_signature_verified": context.consistency_report.doctor_signature_verified,
             "patient_signature_verified": context.consistency_report.patient_signature_verified,
+            "officer_signature_verified": getattr(context.consistency_report, "officer_signature_verified", True),
             "npi_verified": context.consistency_report.npi_verified,
             "prior_authorization_verified": context.consistency_report.prior_authorization_verified,
             "procedure_codes_verified": getattr(context.consistency_report, "procedure_codes_verified", True),
@@ -158,6 +197,41 @@ def build_agent_summaries_snapshot(context: DecisionInputContext) -> dict[str, A
         }
 
     return snapshot
+
+
+def is_clinical_support_exempt(context: DecisionInputContext) -> bool:
+    clinical = context.clinical_output
+    threshold = context.clinical_support_approval_min_ratio
+    if (
+        clinical is None
+        or clinical.verdict != AgentVerdict.INDETERMINATE
+        or (threshold is None and not context.clinical_uncertainty_approval_enabled)
+    ):
+        return False
+    if clinical.total_lines_assessed <= 0:
+        return False
+    if clinical.lines_contradicted_count or clinical.lines_failed_necessity_count or clinical.lines_unavailable_count:
+        return False
+    if not (clinical.schema_valid and clinical.ocr_quality_sufficient):
+        return False
+    if (
+        clinical.bed_day_reconciliation is not None
+        and clinical.bed_day_reconciliation.reconciliation_verdict == AgentVerdict.CONFLICT
+    ):
+        return False
+    if context.clinical_uncertainty_approval_enabled:
+        approvable_reasons = {
+            IndeterminateReason.PERFORMANCE_NOT_DOCUMENTED,
+            IndeterminateReason.NO_DOCUMENTED_INDICATION,
+            IndeterminateReason.DIAGNOSIS_VALIDATION_UNAVAILABLE,
+            IndeterminateReason.GUIDELINE_UNAVAILABLE,
+            IndeterminateReason.MISSING_EVIDENCE_SPANS,
+        }
+        return bool(clinical.reason_codes) and set(clinical.reason_codes).issubset(approvable_reasons)
+    return (
+        threshold is not None
+        and clinical.lines_fully_supported_count / clinical.total_lines_assessed > threshold
+    )
 
 
 class DeterministicDecisionEngine:
@@ -271,6 +345,25 @@ class DeterministicDecisionEngine:
                 created_at=now,
             )
 
+        # ── PRIORITY 4: Any detected fraud factor requires human review ───────
+        fraud_review_required = fraud_review_is_required(context.fraud_output)
+        if fraud_review_required and context.fraud_output is not None:
+            return OrchestratorOutput(
+                case_id=context.case_id,
+                execution_id=context.execution_id,
+                decision=BusinessDecision.ESCALATE,
+                escalation_sub_reason=EscalationSubReason.FRAUD_REVIEW,
+                decision_confidence=context.fraud_output.confidence,
+                rule_id_matched=RULE_P4_HIGH_FRAUD,
+                justification=(
+                    "Fraud Review Required (P4): At least one deterministic fraud factor was detected. "
+                    f"Indicators: {'; '.join(context.fraud_output.anomalies) or 'See factor details.'}"
+                ),
+                agent_summaries=agent_summaries,
+                is_auto_decided=True,
+                created_at=now,
+            )
+
         # ── PRIORITY 3: Material Ambiguity / Conflict (P3) ────────────────────
         core_outputs = [
             a for a in (context.kyc_output, context.claims_output, context.policy_output)
@@ -290,17 +383,7 @@ class DeterministicDecisionEngine:
             if a.verdict == AgentVerdict.PASS and a.confidence < CONFIDENCE_PASS_THRESHOLD
         ]
 
-        # Check if High Fraud or Confirmed Hard Reject is present so clinical misalignment
-        # does not pre-empt Rule P4 (Fraud) or Rule P5 (Confirmed Incurable Exclusion / Identity Fail)
-        is_high_fraud = (
-            context.fraud_output is not None
-            and (
-                context.fraud_output.fraud_score >= FRAUD_HIGH_THRESHOLD
-                or context.fraud_output.risk_level == RiskLevel.HIGH
-                or context.fraud_output.verdict == AgentVerdict.FAIL
-                or context.fraud_output.duplicate_claim_detected
-            )
-        )
+        # Confirmed hard rejects should not be masked by clinical findings.
         is_hard_reject = bool(
             (context.kyc_output and context.kyc_output.verdict == AgentVerdict.FAIL)
             or (context.claims_output and context.claims_output.verdict == AgentVerdict.FAIL)
@@ -311,7 +394,8 @@ class DeterministicDecisionEngine:
                 and context.policy_output.applicable_service_codes
             )
         )
-        has_upstream_terminal = is_high_fraud or is_hard_reject
+        has_upstream_terminal = is_hard_reject
+        clinical_support_exempt = is_clinical_support_exempt(context)
 
         clinical_conflict = (
             not has_upstream_terminal
@@ -320,6 +404,7 @@ class DeterministicDecisionEngine:
         )
         clinical_indeterminate = (
             not has_upstream_terminal
+            and not clinical_support_exempt
             and context.clinical_output is not None
             and context.clinical_output.verdict == AgentVerdict.INDETERMINATE
         )
@@ -381,6 +466,7 @@ class DeterministicDecisionEngine:
                 and (
                     not context.consistency_report.doctor_signature_verified
                     or not context.consistency_report.patient_signature_verified
+                    or not getattr(context.consistency_report, "officer_signature_verified", True)
                     or not context.consistency_report.npi_verified
                 )
             )
@@ -401,31 +487,6 @@ class DeterministicDecisionEngine:
                 is_auto_decided=True,
                 created_at=now,
             )
-
-        # ── PRIORITY 4: High Fraud Risk (P4) ──────────────────────────────────
-        if context.fraud_output is not None:
-            is_high_fraud = (
-                context.fraud_output.fraud_score >= FRAUD_HIGH_THRESHOLD
-                or context.fraud_output.risk_level == RiskLevel.HIGH
-                or context.fraud_output.verdict == AgentVerdict.FAIL
-                or context.fraud_output.duplicate_claim_detected
-            )
-            if is_high_fraud:
-                return OrchestratorOutput(
-                    case_id=context.case_id,
-                    execution_id=context.execution_id,
-                    decision=BusinessDecision.ESCALATE,
-                    escalation_sub_reason=EscalationSubReason.FRAUD_REVIEW,
-                    decision_confidence=context.fraud_output.confidence,
-                    rule_id_matched=RULE_P4_HIGH_FRAUD,
-                    justification=(
-                        f"Billing Pattern Escalation: High anomaly pattern detected (score: {context.fraud_output.fraud_score:.2f}). "
-                        f"Anomalies: {'; '.join(context.fraud_output.anomalies) or 'None'}."
-                    ),
-                    agent_summaries=agent_summaries,
-                    is_auto_decided=True,
-                    created_at=now,
-                )
 
         # ── PRIORITY 5: Confirmed Hard Failure (P5, ADR-002) ──────────────────
         hard_failures: list[str] = []
@@ -584,12 +645,11 @@ class DeterministicDecisionEngine:
         fraud_admissible = (
             context.fraud_output is not None
             and context.fraud_output.verdict == AgentVerdict.PASS
-            and context.fraud_output.fraud_score < FRAUD_LOW_THRESHOLD
-            and not context.fraud_output.duplicate_claim_detected
+            and not fraud_review_is_required(context.fraud_output)
         )
 
         # Admissibility Check 4: Clinical alignment verification passed with calibrated confidence >= CLINICAL_CONFIDENCE_THRESHOLD
-        clinical_admissible = (
+        clinical_admissible = clinical_support_exempt or (
             context.clinical_output is not None
             and context.clinical_output.verdict == AgentVerdict.PASS
             and context.clinical_output.confidence is not None
@@ -603,6 +663,7 @@ class DeterministicDecisionEngine:
                 context.consistency_report.is_consistent
                 and context.consistency_report.doctor_signature_verified
                 and context.consistency_report.patient_signature_verified
+                and getattr(context.consistency_report, "officer_signature_verified", True)
                 and context.consistency_report.npi_verified
                 and context.consistency_report.prior_authorization_verified
                 and getattr(context.consistency_report, "procedure_codes_verified", True)
@@ -620,7 +681,24 @@ class DeterministicDecisionEngine:
             and consistency_admissible
             and high_confidence
         ):
-            fraud_score_val = context.fraud_output.fraud_score if context.fraud_output else 0.0
+            clinical_note = ""
+            if clinical_support_exempt and context.clinical_output:
+                clinical = context.clinical_output
+                if context.clinical_uncertainty_approval_enabled:
+                    discrepancy_summary = "; ".join(clinical.blocking_discrepancies)
+                    clinical_note = (
+                        f" Clinical discrepancy notice: {clinical.lines_fully_supported_count}/"
+                        f"{clinical.total_lines_assessed} billed lines fully supported; unresolved clinical findings "
+                        f"remain without a verified contradiction, failed line, unavailable result, poor OCR, or "
+                        f"bed-day conflict. This notice does not independently verify service performance. "
+                        f"Findings: {discrepancy_summary or clinical.clinical_summary}"
+                    )
+                else:
+                    clinical_note = (
+                        f" Clinical alignment supported {clinical.lines_fully_supported_count}/"
+                        f"{clinical.total_lines_assessed} billed lines above the configured threshold "
+                        "with no contradicted, failed, or unavailable lines."
+                    )
             return OrchestratorOutput(
                 case_id=context.case_id,
                 execution_id=context.execution_id,
@@ -630,8 +708,8 @@ class DeterministicDecisionEngine:
                 rule_id_matched=RULE_P6_CLEAN_PASS,
                 justification=(
                     "Clean Straight-Through Pass (P6): All identity, claims arithmetic, and policy coverage criteria "
-                    f"passed with low fraud risk (score: {fraud_score_val:.2f}) "
-                    f"and calibrated confidence >= {CONFIDENCE_PASS_THRESHOLD}."
+                    "passed with no detected fraud indicators "
+                    f"and calibrated confidence >= {CONFIDENCE_PASS_THRESHOLD}.{clinical_note}"
                 ),
                 agent_summaries=agent_summaries,
                 is_auto_decided=True,
@@ -639,10 +717,6 @@ class DeterministicDecisionEngine:
             )
 
         # ── PRIORITY 7: Borderline / Nuanced Case (P7) ────────────────────────
-        is_medium_fraud = (
-            context.fraud_output is not None
-            and FRAUD_LOW_THRESHOLD <= context.fraud_output.fraud_score < FRAUD_HIGH_THRESHOLD
-        )
         low_confidence_pass = all_core_pass and (min_confidence < CONFIDENCE_PASS_THRESHOLD)
         clinical_borderline = (
             context.clinical_output is not None
@@ -653,10 +727,8 @@ class DeterministicDecisionEngine:
             claims_admissible and policy_admissible and fraud_admissible and clinical_admissible and consistency_admissible
         )
 
-        if is_medium_fraud or low_confidence_pass or inadmissible_core_pass or clinical_borderline:
+        if low_confidence_pass or inadmissible_core_pass or clinical_borderline:
             nuance_reasons: list[str] = []
-            if is_medium_fraud and context.fraud_output:
-                nuance_reasons.append(f"medium fraud risk tier (score: {context.fraud_output.fraud_score:.2f})")
             if low_confidence_pass:
                 nuance_reasons.append(f"borderline extraction confidence ({min_confidence:.2f} < {CONFIDENCE_PASS_THRESHOLD})")
             if clinical_borderline and context.clinical_output:
@@ -817,7 +889,7 @@ def build_decision_diagnostics(
 
     if rule_id == RULE_P4_HIGH_FRAUD:
         return (
-            "Fraud escalation: High fraud risk tier or duplicate claim pattern detected.",
+            "Fraud escalation: One or more deterministic fraud indicators require human review.",
             "fraud",
             1,
         )
@@ -847,8 +919,6 @@ def build_decision_diagnostics(
 
     if rule_id == RULE_P7_BORDERLINE_REVIEW:
         nuance = []
-        if context.fraud_output and FRAUD_LOW_THRESHOLD <= context.fraud_output.fraud_score < FRAUD_HIGH_THRESHOLD:
-            nuance.append("fraud")
         if context.claims_output and (not context.claims_output.line_items_sum_valid or not context.claims_output.schema_valid):
             nuance.append("claims")
         if context.policy_output and not context.policy_output.covered:
@@ -860,7 +930,7 @@ def build_decision_diagnostics(
             nuance.append("clinical_alignment")
         decisive = ",".join(nuance) if nuance else "review"
         return (
-            "Borderline escalation: Medium fraud risk, borderline confidence, or incomplete coding requiring human adjudication.",
+            "Borderline escalation: Borderline confidence or incomplete coding requiring human adjudication.",
             decisive,
             len(nuance) or 1,
         )

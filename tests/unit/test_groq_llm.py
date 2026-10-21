@@ -9,14 +9,18 @@ import pytest
 from medishield.agents.claims import ClaimsAgent
 from medishield.agents.classifier import DocumentClassifierAgent
 from medishield.agents.policy import PolicyCoverageAgent
+from medishield.core.config import settings
 from medishield.core.llm import (
     UNTRUSTED_CONTENT_END,
     UNTRUSTED_CONTENT_START,
     GroqLLMClient,
     GroqLLMError,
     GroqUnavailableError,
+    LLMRuntimeTelemetry,
+    llm_runtime_telemetry,
     wrap_untrusted_content,
 )
+from medishield.core.tracing import trace_span
 from medishield.db.enums import AgentVerdict, DocumentType
 from medishield.domain.contracts import (
     OCRDocumentPayload,
@@ -40,6 +44,73 @@ def test_groq_client_unconfigured_availability() -> None:
     assert client.is_available() is False
     with pytest.raises(GroqUnavailableError, match="not configured"):
         client.generate_json("hello")
+
+
+def test_llm_runtime_telemetry_tracks_calls_tokens_failures_and_percentiles() -> None:
+    telemetry = LLMRuntimeTelemetry(sample_limit=8)
+
+    successful_attempt = telemetry.start_attempt("groq")
+    telemetry.finish_attempt("groq", successful_attempt, success=True)
+    no_usage_attempt = telemetry.start_attempt("gemini")
+    telemetry.finish_attempt("gemini", no_usage_attempt, success=True)
+    telemetry.record_trace_call(
+        "claims:extract",
+        elapsed_ms=10.0,
+        success=True,
+        summary={"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+    )
+    telemetry.record_trace_call("policy:coverage", elapsed_ms=20.0, success=True, summary={})
+
+    failed_attempt = telemetry.start_attempt("cerebras")
+    telemetry.finish_attempt(
+        "cerebras",
+        failed_attempt,
+        success=False,
+        error=httpx.ConnectError("test connection failure"),
+    )
+    telemetry.record_trace_call("ocr:transcribe", elapsed_ms=40.0, success=False, summary={"status": "FAILURE"})
+
+    snapshot = telemetry.snapshot()
+    assert snapshot["calls_total"] == 3
+    assert snapshot["calls_success"] == 2
+    assert snapshot["calls_failed"] == 1
+    assert snapshot["provider_attempts"] == 3
+    assert snapshot["provider_attempts_success"] == 2
+    assert snapshot["provider_attempts_failed"] == 1
+    assert snapshot["provider_failures"] == {"cerebras": 1}
+    assert snapshot["provider_failure_categories"] == {"CONNECTION": 1}
+    assert snapshot["prompt_tokens"] == 11
+    assert snapshot["completion_tokens"] == 7
+    assert snapshot["total_tokens"] == 18
+    assert snapshot["token_usage_complete"] is False
+    assert snapshot["responses_with_token_usage"] == 1
+    assert snapshot["responses_without_token_usage"] == 1
+    assert snapshot["latency_p50_ms"] is not None
+    assert snapshot["latency_p95_ms"] is not None
+    assert snapshot["provider_latency_p50_ms"] is not None
+    assert snapshot["provider_latency_p95_ms"] is not None
+    assert snapshot["stages"]["claims:extract"]["calls_success"] == 1
+    assert snapshot["stages"]["ocr:transcribe"]["latency_p95_ms"] == 40.0
+
+
+def test_llm_trace_span_updates_process_telemetry(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "LANGSMITH_TRACING", False)
+    before = llm_runtime_telemetry.snapshot()
+    with trace_span(
+        name="telemetry_unit_test",
+        run_type="llm",
+        component="test_component",
+        operation="test_operation",
+    ) as span:
+        span.set_summary(prompt_tokens=3, completion_tokens=2, total_tokens=5)
+
+    after = llm_runtime_telemetry.snapshot()
+    assert after["calls_total"] - before["calls_total"] == 1
+    assert after["calls_success"] - before["calls_success"] == 1
+    assert after["total_tokens"] - (before["total_tokens"] or 0) == 5
+    stage = after["stages"]["test_component:test_operation"]
+    assert stage["calls_total"] == 1
+    assert stage["latency_p50_ms"] is not None
 
 
 def test_wrap_untrusted_content_demarcation() -> None:
@@ -562,3 +633,137 @@ def test_groq_client_cascades_to_qwen_on_double_rate_limit() -> None:
         assert mock_post.call_args_list[0][1]["json"]["model"] == "openai/gpt-oss-120b"
         assert mock_post.call_args_list[1][1]["json"]["model"] == "openai/gpt-oss-20b"
         assert mock_post.call_args_list[2][1]["json"]["model"] == "qwen/qwen3.8-27b"
+
+
+def test_groq_client_cross_account_key_failover() -> None:
+    """Proves that when Account 1 hits 429, GroqLLMClient seamlessly fails over to Account 2's key."""
+    client = GroqLLMClient(
+        api_key="gsk_account_one_key",
+        fallback_api_keys=["gsk_account_two_key"],
+        model="openai/gpt-oss-120b",
+        fallback_models=["openai/gpt-oss-20b"],
+    )
+
+    resp_429 = MagicMock(spec=httpx.Response, status_code=429, text="Account 1 rate limit reached")
+    resp_200 = MagicMock(
+        spec=httpx.Response,
+        status_code=200,
+        json=lambda: {
+            "choices": [{"message": {"role": "assistant", "content": json.dumps({"account_two_success": True})}}],
+            "usage": {"total_tokens": 42},
+        },
+    )
+
+    err1 = httpx.HTTPStatusError("429", request=MagicMock(), response=resp_429)
+
+    with patch("httpx.Client.post", side_effect=[err1, resp_200]) as mock_post:
+        res = client.generate_json("Prompt with key failover")
+
+        assert res == {"account_two_success": True}
+        assert client.last_used_model == "openai/gpt-oss-120b"
+        assert client.last_used_api_key == "gsk_account_two_key"
+        assert client.fallback_used is True
+        assert mock_post.call_count == 2
+        # Check that request 1 used Account 1 key and request 2 used Account 2 key
+        assert mock_post.call_args_list[0][1]["headers"]["Authorization"] == "Bearer gsk_account_one_key"
+        assert mock_post.call_args_list[1][1]["headers"]["Authorization"] == "Bearer gsk_account_two_key"
+        # Primary model was retried with Account 2 rather than unnecessarily downgrading
+        assert mock_post.call_args_list[1][1]["json"]["model"] == "openai/gpt-oss-120b"
+
+
+@pytest.mark.asyncio
+async def test_groq_client_async_cross_account_key_failover() -> None:
+    """Proves async GroqLLMClient fails over to Account 2's key upon rate limit."""
+    client = GroqLLMClient(
+        api_key="gsk_account_one_key",
+        fallback_api_keys=["gsk_account_two_key"],
+        model="openai/gpt-oss-120b",
+        fallback_models=["openai/gpt-oss-20b"],
+    )
+
+    resp_429 = MagicMock(spec=httpx.Response, status_code=429, text="Account 1 rate limit reached")
+    resp_200 = MagicMock(
+        spec=httpx.Response,
+        status_code=200,
+        json=lambda: {
+            "choices": [{"message": {"role": "assistant", "content": json.dumps({"async_key_success": True})}}],
+            "usage": {"total_tokens": 42},
+        },
+    )
+
+    err1 = httpx.HTTPStatusError("429", request=MagicMock(), response=resp_429)
+
+    with patch("httpx.AsyncClient.post", side_effect=[err1, resp_200]) as mock_post:
+        res = await client.generate_json_async("Async prompt with key failover")
+
+        assert res == {"async_key_success": True}
+        assert client.last_used_model == "openai/gpt-oss-120b"
+        assert client.last_used_api_key == "gsk_account_two_key"
+        assert client.fallback_used is True
+        assert mock_post.call_count == 2
+        assert mock_post.call_args_list[0][1]["headers"]["Authorization"] == "Bearer gsk_account_one_key"
+        assert mock_post.call_args_list[1][1]["headers"]["Authorization"] == "Bearer gsk_account_two_key"
+
+
+def test_groq_client_alternating_key_rotation_and_cooldown_skipping() -> None:
+    """Proves that requests alternate keys, and that a key in 429 cooldown is completely skipped."""
+    client = GroqLLMClient(
+        api_key="gsk_key_A",
+        fallback_api_keys=["gsk_key_B"],
+        model="openai/gpt-oss-120b",
+    )
+
+    resp_200 = MagicMock(
+        spec=httpx.Response,
+        status_code=200,
+        json=lambda: {
+            "choices": [{"message": {"role": "assistant", "content": json.dumps({"ok": True})}}],
+            "usage": {"total_tokens": 10},
+        },
+    )
+    resp_429 = MagicMock(spec=httpx.Response, status_code=429, text="Rate limit key A")
+    err_429 = httpx.HTTPStatusError("429", request=MagicMock(), response=resp_429)
+
+    # Call 1: Key A succeeds
+    with patch("httpx.Client.post", return_value=resp_200) as mock_post:
+        client.generate_json("Request 1")
+        assert mock_post.call_args_list[0][1]["headers"]["Authorization"] == "Bearer gsk_key_A"
+
+    # Call 2: Alternates to Key B
+    with patch("httpx.Client.post", return_value=resp_200) as mock_post:
+        client.generate_json("Request 2")
+        assert mock_post.call_args_list[0][1]["headers"]["Authorization"] == "Bearer gsk_key_B"
+
+    # Call 3: Alternates back to Key A, but Key A returns 429 -> immediate failover to Key B
+    with patch("httpx.Client.post", side_effect=[err_429, resp_200]) as mock_post:
+        client.generate_json("Request 3")
+        assert mock_post.call_args_list[0][1]["headers"]["Authorization"] == "Bearer gsk_key_A"
+        assert mock_post.call_args_list[1][1]["headers"]["Authorization"] == "Bearer gsk_key_B"
+
+    # Call 4: Key A is in 10s cooldown! Key A is SKIPPED and Key B is used directly on first attempt!
+    with patch("httpx.Client.post", return_value=resp_200) as mock_post:
+        client.generate_json("Request 4")
+        assert mock_post.call_count == 1
+        assert mock_post.call_args_list[0][1]["headers"]["Authorization"] == "Bearer gsk_key_B"
+
+
+def test_groq_client_aborts_immediately_when_all_keys_are_throttled() -> None:
+    """Proves that when all available keys are in 429 cooldown, client halts immediately without hammering (ADR-020)."""
+    client = GroqLLMClient(
+        api_key="gsk_key_1",
+        fallback_api_keys=["gsk_key_2"],
+        model="openai/gpt-oss-120b",
+        fallback_models=["openai/gpt-oss-20b", "qwen/qwen3.8-27b"],
+    )
+
+    resp_429_1 = MagicMock(spec=httpx.Response, status_code=429, text="Rate limit key 1")
+    err_429_1 = httpx.HTTPStatusError("429", request=MagicMock(), response=resp_429_1)
+    resp_429_2 = MagicMock(spec=httpx.Response, status_code=429, text="Rate limit key 2")
+    err_429_2 = httpx.HTTPStatusError("429", request=MagicMock(), response=resp_429_2)
+
+    with patch("httpx.Client.post", side_effect=[err_429_1, err_429_2]) as mock_post:
+        with pytest.raises(GroqLLMError):
+            client.generate_json("Test prompt")
+        # Must halt after trying each key once; must NEVER repeatedly hammer cooled-down keys
+        assert mock_post.call_count == 2
+

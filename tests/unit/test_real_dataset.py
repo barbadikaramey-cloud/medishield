@@ -5,8 +5,11 @@ fraud detection, and case workflow adjudication using real files from dataset/.
 """
 
 import json
-from datetime import date
+import random
+from datetime import date, timedelta
 from pathlib import Path
+
+import pytest
 
 from medishield.agents.classifier import DocumentClassifierAgent
 from medishield.agents.kyc import SqlMemberRepository
@@ -16,6 +19,7 @@ from medishield.domain.contracts import ClaimsAgentOutput, KYCAgentOutput
 from medishield.domain.fraud import FraudDetectionEngine, FraudEvaluationContext
 from medishield.domain.provenance import ProvenanceValue
 from medishield.ocr.preprocessor import DefaultOCREngine
+from scripts.scripts import generate_docs
 
 DATASET_ROOT = Path(__file__).resolve().parent.parent.parent / "dataset"
 METADATA_PATH = DATASET_ROOT / "metadata.json"
@@ -41,6 +45,46 @@ def test_dataset_inventory_and_metadata_integrity() -> None:
         assert cat_dir.exists(), f"Category directory {cat} does not exist"
         files = list(cat_dir.glob("*.png"))
         assert len(files) >= 30, f"Expected at least 30 files in {cat}, found {len(files)}"
+
+
+def test_seeded_generator_fraud_fixtures_are_renderable_and_consistent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(generate_docs, "rng", random.Random(42))
+    clusters, _ = generate_docs.generate_patient_clusters(30)
+    for cluster in clusters:
+        generate_docs._prepare_stay_dates(cluster)
+    by_reason = {cluster["fraud_reason"]: cluster for cluster in clusters if cluster["fraud_reason"]}
+
+    mismatch = by_reason["name_mismatch"]
+    assert mismatch["id_display_name"] != mismatch["name"]
+    tampered = [cluster for cluster in clusters if "tampered_id" in cluster["edge_flags"]]
+    assert len(tampered) == 3
+
+    calls: list[dict[str, object]] = []
+
+    def capture_id_render(c: dict[str, object], **kwargs: object) -> None:
+        calls.append(kwargs)
+
+    for id_type in {mismatch["id_type"], *(cluster["id_type"] for cluster in tampered)}:
+        monkeypatch.setitem(generate_docs._ID_GENERATORS, id_type, capture_id_render)
+    generate_docs.generate_id_document(mismatch)
+    for cluster in tampered:
+        generate_docs.generate_id_document(cluster)
+    assert calls[0]["display_name"] == mismatch["id_display_name"]
+    assert all(call["tampered"] is True for call in calls[1:])
+
+    low_total = by_reason["amount_under_10k"]
+    room_charge = 1250.0 * low_total["los"] if low_total["claim_type"] == "UB04" else 0.0
+    assert round(sum(item[2] for item in low_total["cpt_list"]) + room_charge, 2) == 9875.0
+
+    for cluster in clusters:
+        assert cluster["discharge_date"] - cluster["admit_date"] == timedelta(days=cluster["los"])
+
+    readmission = by_reason["readmission_30d"]
+    assert readmission["discharge_date"] - readmission["admit_date"] == timedelta(days=readmission["los"])
+    assert readmission["prior_admit_date"] < readmission["prior_discharge_date"] < readmission["admit_date"]
+    assert (readmission["admit_date"] - readmission["prior_discharge_date"]).days <= 30
 
 
 def test_real_dataset_classification_accuracy() -> None:
@@ -138,7 +182,8 @@ def test_fraud_engine_detects_dataset_duplicate_claim() -> None:
     context = FraudEvaluationContext(duplicate_claim_match_id="CLAIM-EXISTING-001")
     res_dup = FraudDetectionEngine.evaluate(claims_output=claims, context=context)
 
-    assert res_dup.fraud_score >= 0.30
+    assert res_dup.fraud_score == 1.0
+    assert res_dup.fraud_review_required is True
     assert res_dup.duplicate_claim_detected is True
     assert any("collision" in a.lower() for a in res_dup.anomalies)
 
@@ -168,6 +213,7 @@ def test_fraud_engine_detects_tamper_and_inconsistency() -> None:
     context = FraudEvaluationContext(submission_date=date(2025, 10, 1))
     res = FraudDetectionEngine.evaluate(claims_output=claims, kyc_output=kyc, context=context)
 
-    assert res.fraud_score >= 0.20
+    assert res.fraud_score == 1.0
+    assert res.fraud_review_required is True
     assert any("tamper" in a.lower() for a in res.anomalies)
     assert any("future service date" in a.lower() for a in res.anomalies)

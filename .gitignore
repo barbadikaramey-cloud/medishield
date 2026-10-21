@@ -72,3 +72,10 @@ list_models.py
 **/.DS_Store
 
 
+
+# Generated run outputs and local archives (not source)
+Assignment2_datagen_scripts.zip
+scripts/full_workflow_*.json
+scripts/diagnostic_summary_*.json
+scripts/fast_eval_results.json
+scripts/diagnostic_summary.json

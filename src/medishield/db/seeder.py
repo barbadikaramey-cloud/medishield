@@ -14,11 +14,16 @@ from sqlalchemy.orm import Session
 
 from medishield.db.enums import CodingSystem
 from medishield.db.models import (
+    ClinicalGuideline,
+    DiagnosisIndication,
     Enrollment,
+    EnrollmentRiderApplication,
+    GuidelineCriterion,
     MedicalCode,
     Member,
     Policy,
     PolicyChunk,
+    PolicyRider,
     PolicyVersion,
 )
 from medishield.db.session import get_sqlite_session_factory
@@ -62,6 +67,7 @@ def seed_medical_codes(session: Session) -> int:
         {"code": "36415", "coding_system": CodingSystem.CPT, "short_description": "Routine venipuncture for blood specimen collection", "category": "Pathology and Laboratory", "standard_charge": Decimal("25.00"), "requires_prior_auth": False},
         {"code": "86849", "coding_system": CodingSystem.CPT, "short_description": "Unlisted immunology procedure", "category": "Pathology and Laboratory", "standard_charge": Decimal("150.00"), "requires_prior_auth": False},
         {"code": "90837", "coding_system": CodingSystem.CPT, "short_description": "Psychotherapy, 60 minutes with patient", "category": "Behavioral Health", "standard_charge": Decimal("210.00"), "requires_prior_auth": False},
+        {"code": "59400", "coding_system": CodingSystem.CPT, "short_description": "Obstetric care and vaginal delivery", "category": "Maternity"},
 
         # Surgical Procedures (Requiring Prior Auth)
         {"code": "27447", "coding_system": CodingSystem.CPT, "short_description": "Arthroplasty, knee, condyle and plateau (TKA)", "category": "Surgery / Musculoskeletal", "standard_charge": Decimal("42000.00"), "requires_prior_auth": True},
@@ -91,6 +97,25 @@ def seed_medical_codes(session: Session) -> int:
         {"code": "0200", "coding_system": CodingSystem.REV_CODE, "short_description": "Intensive Care Unit (ICU) - General", "category": "Intensive Care", "standard_charge": Decimal("3500.00"), "requires_prior_auth": False},
         {"code": "0250", "coding_system": CodingSystem.REV_CODE, "short_description": "Pharmacy - General", "category": "Pharmacy", "standard_charge": Decimal("200.00"), "requires_prior_auth": False},
         {"code": "0270", "coding_system": CodingSystem.REV_CODE, "short_description": "Medical/Surgical Supplies and Devices", "category": "Supplies", "standard_charge": Decimal("350.00"), "requires_prior_auth": False},
+
+        # ICD-10-CM diagnosis codes (billable codes only; no charge or prior-auth semantics)
+        {"code": "E11.9", "coding_system": CodingSystem.ICD10_CM, "short_description": "Type 2 diabetes mellitus without complications", "category": "Endocrine"},
+        {"code": "F32.1", "coding_system": CodingSystem.ICD10_CM, "short_description": "Major depressive disorder, single episode, moderate", "category": "Mental and Behavioral"},
+        {"code": "G43.909", "coding_system": CodingSystem.ICD10_CM, "short_description": "Migraine, unspecified, not intractable, without status migrainosus", "category": "Nervous System"},
+        {"code": "M54.50", "coding_system": CodingSystem.ICD10_CM, "short_description": "Low back pain, unspecified", "category": "Musculoskeletal"},
+        {"code": "M54.51", "coding_system": CodingSystem.ICD10_CM, "short_description": "Vertebrogenic low back pain", "category": "Musculoskeletal"},
+        {"code": "M54.59", "coding_system": CodingSystem.ICD10_CM, "short_description": "Other low back pain", "category": "Musculoskeletal"},
+        {"code": "I10", "coding_system": CodingSystem.ICD10_CM, "short_description": "Essential (primary) hypertension", "category": "Circulatory"},
+        {"code": "I25.10", "coding_system": CodingSystem.ICD10_CM, "short_description": "Atherosclerotic heart disease of native coronary artery without angina pectoris", "category": "Circulatory"},
+        {"code": "J01.90", "coding_system": CodingSystem.ICD10_CM, "short_description": "Acute sinusitis, unspecified", "category": "Respiratory"},
+        {"code": "J18.9", "coding_system": CodingSystem.ICD10_CM, "short_description": "Pneumonia, unspecified organism", "category": "Respiratory"},
+        {"code": "K35.80", "coding_system": CodingSystem.ICD10_CM, "short_description": "Unspecified acute appendicitis", "category": "Digestive"},
+        {"code": "K21.00", "coding_system": CodingSystem.ICD10_CM, "short_description": "GERD with esophagitis, without bleeding", "category": "Digestive"},
+        {"code": "K21.01", "coding_system": CodingSystem.ICD10_CM, "short_description": "GERD with esophagitis, with bleeding", "category": "Digestive"},
+        {"code": "M17.11", "coding_system": CodingSystem.ICD10_CM, "short_description": "Unilateral primary osteoarthritis, right knee", "category": "Musculoskeletal"},
+        {"code": "M75.100", "coding_system": CodingSystem.ICD10_CM, "short_description": "Unspecified rotator cuff tear or rupture of unspecified shoulder, not specified as traumatic", "category": "Musculoskeletal"},
+        {"code": "N39.0", "coding_system": CodingSystem.ICD10_CM, "short_description": "Urinary tract infection, site not specified", "category": "Genitourinary"},
+        {"code": "S52.501A", "coding_system": CodingSystem.ICD10_CM, "short_description": "Unspecified fracture of the lower end of right radius, initial encounter for closed fracture", "category": "Injury"},
     ]
 
     seeded = 0
@@ -106,8 +131,8 @@ def seed_medical_codes(session: Session) -> int:
                 coding_system=c_sys,
                 short_description=str(c["short_description"]),
                 category=str(c["category"]),
-                standard_charge=Decimal(str(c["standard_charge"])),
-                requires_prior_auth=bool(c["requires_prior_auth"]),
+                standard_charge=Decimal(str(c["standard_charge"])) if c.get("standard_charge") is not None else None,
+                requires_prior_auth=bool(c.get("requires_prior_auth", False)),
                 is_active=True,
                 created_at=now,
                 updated_at=now,
@@ -119,6 +144,364 @@ def seed_medical_codes(session: Session) -> int:
     session.flush()
     logger.info("Successfully seeded %d medical codes into catalog", seeded)
     return seeded
+
+
+def seed_clinical_guidelines_and_indications(session: Session) -> tuple[int, int]:
+    """
+    Seeds authoritative clinical practice guidelines (LCDs/NCDs) and diagnosis indication
+    rules into relational tables (clinical_guidelines, guideline_criteria, diagnosis_indications)
+    for PostgreSQL & SQLite (ADR-015, ADR-016).
+    """
+    now = datetime.now(UTC)
+    seeded_guidelines = 0
+    seeded_indications = 0
+
+    existing_guideline_ids = {
+        row[0] for row in session.query(ClinicalGuideline.guideline_id).all()
+    }
+    existing_indications = {
+        row[0] for row in session.query(DiagnosisIndication.service_code).all()
+    }
+
+    # 1. 18 Authoritative Clinical Guidelines (LCDs)
+    guideline_definitions: list[dict[str, Any]] = [
+        {
+            "service_code": "99214",
+            "guideline_id": "LCD-99214-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Evaluation and Management Services - Level 4 Established Patient",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "criteria": [
+                {"criterion_id": "CRIT-99214-01", "description": "Documented moderate complexity medical decision making or >= 30 minutes visit time", "is_mandatory": True},
+            ],
+        },
+        {
+            "service_code": "99213",
+            "guideline_id": "LCD-99213-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Evaluation and Management Services - Level 3 Established Patient",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "criteria": [
+                {"criterion_id": "CRIT-99213-01", "description": "Documented low complexity medical decision making or >= 20 minutes visit time", "is_mandatory": True},
+            ],
+        },
+        {
+            "service_code": "93000",
+            "guideline_id": "LCD-93000-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Diagnostic Electrocardiogram (ECG/EKG) with Interpretation and Report",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "criteria": [
+                {"criterion_id": "CRIT-93000-01", "description": "Documented cardiac symptoms, rhythm disturbance, or baseline pre-operative assessment", "is_mandatory": True},
+            ],
+        },
+        {
+            "service_code": "44970",
+            "guideline_id": "LCD-44970-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Laparoscopic Appendectomy",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "criteria": [
+                {"criterion_id": "CRIT-44970-01", "description": "Clinical, laboratory, or imaging evidence of acute or suspected appendicitis", "is_mandatory": True},
+            ],
+        },
+        {
+            "service_code": "80053",
+            "guideline_id": "LCD-80053-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Comprehensive Metabolic Panel (CMP)",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "criteria": [
+                {"criterion_id": "CRIT-80053-01", "description": "Documented medical indication for electrolyte, renal, or hepatic assessment", "is_mandatory": True},
+            ],
+        },
+        {
+            "service_code": "70553",
+            "guideline_id": "LCD-70553-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Magnetic Resonance Imaging (MRI) Brain With and Without Contrast",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": True,
+            "criteria": [
+                {"criterion_id": "CRIT-70553-01", "description": "Documented focal neurological signs, intractable headache, seizure, or intracranial lesion", "is_mandatory": True},
+            ],
+        },
+        {
+            "service_code": "27447",
+            "guideline_id": "LCD-27447-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Total Knee Arthroplasty (TKA)",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "criteria": [
+                {"criterion_id": "CRIT-27447-CONSERVATIVE", "description": "Documented failure of non-surgical conservative therapy for >= 6 weeks", "is_mandatory": True},
+                {"criterion_id": "CRIT-27447-RADIOGRAPHIC", "description": "Severe advanced joint disease demonstrated radiographically (Kellgren-Lawrence Grade 3 or 4)", "is_mandatory": True},
+            ],
+        },
+        {
+            "service_code": "47562",
+            "guideline_id": "LCD-47562-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Laparoscopic Cholecystectomy",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "criteria": [
+                {"criterion_id": "CRIT-47562-01", "description": "Documented symptomatic cholelithiasis, acute cholecystitis, or biliary dyskinesia", "is_mandatory": True},
+            ],
+        },
+        {
+            "service_code": "71045",
+            "guideline_id": "LCD-71045-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Chest Radiography Single View",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "criteria": [
+                {"criterion_id": "CRIT-71045-01", "description": "Documented respiratory symptoms, pulmonary evaluation, or chest trauma", "is_mandatory": True},
+            ],
+        },
+        {
+            "service_code": "49000",
+            "guideline_id": "LCD-49000-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Exploratory Laparotomy",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "criteria": [
+                {"criterion_id": "CRIT-49000-01", "description": "Documented acute abdomen, blunt/penetrating abdominal trauma, or hemoperitoneum", "is_mandatory": True},
+            ],
+        },
+        {
+            "service_code": "0120",
+            "guideline_id": "LCD-REV-0120",
+            "guideline_version": "2026.1",
+            "guideline_title": "Inpatient Room and Board - Semi-Private Two Bed",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "criteria": [
+                {"criterion_id": "CRIT-REV-01", "description": "Documented formal physician inpatient admission order and continuous nursing care", "is_mandatory": True},
+            ],
+        },
+        {
+            "service_code": "33533",
+            "guideline_id": "LCD-33533-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Coronary Artery Bypass Graft (CABG)",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "criteria": [
+                {"criterion_id": "CRIT-33533-01", "description": "Documented coronary artery disease, multivessel disease, or angina pectoris", "is_mandatory": True},
+            ],
+        },
+        {
+            "service_code": "36415",
+            "guideline_id": "LCD-36415-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Routine Venipuncture for Laboratory Specimen Collection",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "criteria": [
+                {"criterion_id": "CRIT-36415-01", "description": "Documented physician order for blood specimen or diagnostic laboratory workup", "is_mandatory": True},
+            ],
+        },
+        {
+            "service_code": "43239",
+            "guideline_id": "LCD-43239-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Esophagogastroduodenoscopy (EGD) with Biopsy",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "criteria": [
+                {"criterion_id": "CRIT-43239-01", "description": "Documented dyspepsia, GERD, abdominal pain, gastrointestinal bleeding, or ulcer evaluation", "is_mandatory": True},
+            ],
+        },
+        {
+            "service_code": "90837",
+            "guideline_id": "LCD-90837-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Psychotherapy Services - 60 Minutes",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "criteria": [
+                {"criterion_id": "CRIT-90837-01", "description": "Documented psychiatric evaluation, depressive disorder, anxiety, or behavioral health management", "is_mandatory": True},
+            ],
+        },
+        {
+            "service_code": "71046",
+            "guideline_id": "LCD-71046-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Chest Radiography Two Views",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "criteria": [
+                {"criterion_id": "CRIT-71046-01", "description": "Documented respiratory symptoms, pulmonary evaluation, or chest trauma", "is_mandatory": True},
+            ],
+        },
+        {
+            "service_code": "93306",
+            "guideline_id": "LCD-93306-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Transthoracic Echocardiography with Doppler",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "criteria": [
+                {"criterion_id": "CRIT-93306-01", "description": "Documented cardiac symptoms, murmur, heart failure, or ischemic heart disease assessment", "is_mandatory": True},
+            ],
+        },
+        {
+            "service_code": "99215",
+            "guideline_id": "LCD-99215-01",
+            "guideline_version": "2026.1",
+            "guideline_title": "Evaluation and Management Services - Level 5 Established Patient",
+            "effective_date": date(2025, 1, 1),
+            "requires_prior_auth": False,
+            "criteria": [
+                {"criterion_id": "CRIT-99215-01", "description": "Documented high complexity medical decision making or >= 40 minutes visit time", "is_mandatory": True},
+            ],
+        },
+    ]
+
+    for g_def in guideline_definitions:
+        g_id = g_def["guideline_id"]
+        if g_id in existing_guideline_ids:
+            continue
+
+        g_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, f"guideline_{g_id}")
+        guideline = ClinicalGuideline(
+            id=g_uuid,
+            guideline_id=g_id,
+            service_code=g_def["service_code"],
+            guideline_version=g_def.get("guideline_version", "2026.1"),
+            guideline_title=g_def["guideline_title"],
+            effective_date=g_def["effective_date"],
+            expiration_date=g_def.get("expiration_date"),
+            requires_prior_auth=g_def.get("requires_prior_auth", False),
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(guideline)
+        existing_guideline_ids.add(g_id)
+        seeded_guidelines += 1
+
+        for c_def in g_def["criteria"]:
+            c_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, f"crit_{g_id}_{c_def['criterion_id']}")
+            crit = GuidelineCriterion(
+                id=c_uuid,
+                guideline_id=g_uuid,
+                criterion_id=c_def["criterion_id"],
+                description=c_def["description"],
+                is_mandatory=c_def.get("is_mandatory", True),
+                created_at=now,
+            )
+            session.add(crit)
+
+    # 2. 9 Authoritative Diagnosis-to-Procedure Indications & Anatomical Rules
+    indication_definitions: list[dict[str, Any]] = [
+        {
+            "service_code": "27447",
+            "procedure_name": "Total Knee Arthroplasty (TKA)",
+            "anatomy": "Knee Joint",
+            "valid_icd_prefixes": ["M17", "M25.56", "M23", "M84.56", "M05", "M06"],
+            "contraindicated_prefixes": ["S52", "S62", "F32", "F33", "J01"],
+            "keywords": ["knee", "osteoarthritis", "arthroplasty", "joint disease", "gonarthrosis", "condyle", "m17"],
+        },
+        {
+            "service_code": "44970",
+            "procedure_name": "Laparoscopic Appendectomy",
+            "anatomy": "Appendix / Lower Right Abdomen",
+            "valid_icd_prefixes": ["K35", "K36", "K37", "R10.31"],
+            "contraindicated_prefixes": ["F32", "F33", "F41", "S52", "S62", "M17"],
+            "keywords": ["appendectomy", "appendix", "appendicitis", "lower right abdominal", "rlq", "k35"],
+        },
+        {
+            "service_code": "47562",
+            "procedure_name": "Laparoscopic Cholecystectomy",
+            "anatomy": "Gallbladder / Biliary Tract",
+            "valid_icd_prefixes": ["K80", "K81", "K82", "R10.13"],
+            "contraindicated_prefixes": ["F32", "F33", "J01", "S52"],
+            "keywords": ["cholecystectomy", "cholecystitis", "gallbladder", "cholelithiasis", "biliary", "k80", "k81"],
+        },
+        {
+            "service_code": "33533",
+            "procedure_name": "Coronary Artery Bypass Graft (CABG)",
+            "anatomy": "Coronary Arteries / Cardiovascular",
+            "valid_icd_prefixes": ["I25", "I20", "I21"],
+            "contraindicated_prefixes": ["S52", "F32", "M17"],
+            "keywords": ["coronary", "cad", "angina", "myocardial", "ischemic heart", "bypass", "i25"],
+        },
+        {
+            "service_code": "43239",
+            "procedure_name": "Esophagogastroduodenoscopy (EGD) with Biopsy",
+            "anatomy": "Upper Gastrointestinal Tract / Esophagus / Stomach",
+            "valid_icd_prefixes": ["K21", "K29", "K25", "K26", "K27", "R10", "K92", "K30"],
+            "contraindicated_prefixes": ["S52", "M17"],
+            "keywords": ["endoscopy", "egd", "gastritis", "dyspepsia", "gerd", "ulcer", "upper gi", "biopsy", "k21"],
+        },
+        {
+            "service_code": "90837",
+            "procedure_name": "Psychotherapy 60 min",
+            "anatomy": "Mental / Behavioral Health",
+            "valid_icd_prefixes": ["F32", "F33", "F41", "F43", "F31", "F10", "F90"],
+            "contraindicated_prefixes": ["S52", "M17"],
+            "keywords": ["psychotherapy", "depression", "depressive", "anxiety", "mental health", "behavioral", "f32"],
+        },
+        {
+            "service_code": "93306",
+            "procedure_name": "Transthoracic Echocardiography",
+            "anatomy": "Heart / Cardiovascular",
+            "valid_icd_prefixes": ["I25", "I50", "I20", "I21", "I48", "I34", "I35", "R00", "R01", "R07"],
+            "contraindicated_prefixes": ["S52", "M17"],
+            "keywords": ["echocardiography", "echo", "heart failure", "murmur", "doppler"],
+        },
+        {
+            "service_code": "36415",
+            "procedure_name": "Venipuncture for Specimen Collection",
+            "anatomy": "Venous System / Diagnostic Workup",
+            "valid_icd_prefixes": ["I", "E", "K", "J", "M", "N", "R", "F", "S", "G"],
+            "contraindicated_prefixes": [],
+            "keywords": ["venipuncture", "blood draw", "lab specimen"],
+        },
+        {
+            "service_code": "71046",
+            "procedure_name": "Chest Radiography 2 Views",
+            "anatomy": "Thorax / Lungs",
+            "valid_icd_prefixes": ["J", "R05", "R06", "R07", "I25", "I50"],
+            "contraindicated_prefixes": [],
+            "keywords": ["x-ray", "chest", "lungs", "radiography"],
+        },
+    ]
+
+    for ind_def in indication_definitions:
+        sc = ind_def["service_code"]
+        if sc in existing_indications:
+            continue
+
+        ind_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, f"indication_{sc}")
+        ind = DiagnosisIndication(
+            id=ind_uuid,
+            service_code=sc,
+            procedure_name=ind_def["procedure_name"],
+            anatomy=ind_def["anatomy"],
+            valid_icd_prefixes=ind_def["valid_icd_prefixes"],
+            contraindicated_prefixes=ind_def["contraindicated_prefixes"],
+            keywords=ind_def["keywords"],
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(ind)
+        existing_indications.add(sc)
+        seeded_indications += 1
+
+    session.flush()
+    logger.info("Successfully seeded %d clinical guidelines and %d diagnosis indications", seeded_guidelines, seeded_indications)
+    return seeded_guidelines, seeded_indications
 
 # Baseline default test members (preserving full backwards compatibility with unit tests)
 BASELINE_MEMBERS: list[dict[str, Any]] = [
@@ -146,6 +529,14 @@ BASELINE_MEMBERS: list[dict[str, Any]] = [
         "ssn_last4": "7658",
         "policy_id": "MED-GLD-3592974",
     },
+    {
+        "member_id": "MSH-EN-004",
+        "first_name": "Kavita",
+        "last_name": "Rao",
+        "dob": "04/18/1992",
+        "ssn_last4": "0004",
+        "policy_id": "POL-CORP-2026",
+    },
 ]
 
 
@@ -162,7 +553,7 @@ def _load_clusters_from_generator() -> list[dict[str, Any]]:
 
         import random
 
-        import generate_docs  # type: ignore[import-not-found]
+        import generate_docs
 
         generate_docs.rng = random.Random(42)
         clusters, _ = generate_docs.generate_patient_clusters(30)
@@ -170,6 +561,62 @@ def _load_clusters_from_generator() -> list[dict[str, Any]]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not dynamically import generate_patient_clusters: %s; using static fallback", exc)
         return []
+
+
+def _load_gold_policy_rider_terms() -> list[tuple[Any, ...]]:
+    """Loads the shared Gold policy rider catalog as relational seed input."""
+    import json
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parent.parent.parent.parent
+    catalog_path = repo_root / "data" / "config" / "policy_riders_gold.json"
+    with catalog_path.open(encoding="utf-8") as catalog_file:
+        return json.load(catalog_file)
+
+
+def _seed_policy_riders(
+    session: Session,
+    policy_version_id: uuid.UUID,
+    policy_code: str,
+    rider_terms: list[dict[str, Any]],
+) -> dict[str, uuid.UUID]:
+    """Upserts generator-defined rider terms for a policy version."""
+    policy_rider_ids: dict[str, uuid.UUID] = {}
+    for term in rider_terms:
+        rider_code = term["rider_code"]
+        section_number = term["section_number"]
+        rider_id = uuid.uuid5(
+            uuid.NAMESPACE_DNS, f"policy_rider_{policy_code}_{rider_code}"
+        )
+        rider = session.query(PolicyRider).filter_by(id=rider_id).first()
+        if rider is None:
+            source_text = (
+                f"{section_number} {term['name']}. "
+                f"Benefit limit: {term['benefit_limit_text']}. "
+                f"Waiting period: {term['waiting_period_text']}. "
+                f"Covered services: {' '.join(term['covered_services'])} "
+                f"Exclusions: {' '.join(term['exclusions'])}"
+            )
+            rider = PolicyRider(
+                id=rider_id,
+                policy_version_id=policy_version_id,
+                rider_code=rider_code,
+                name=term["name"],
+                waiting_period_value=term["waiting_period_value"],
+                waiting_period_unit=term["waiting_period_unit"],
+                waiting_period_start_event=term["waiting_period_start_event"],
+                benefit_limit_text=term["benefit_limit_text"],
+                covered_services=term["covered_services"],
+                exclusions=term["exclusions"],
+                source_section=section_number,
+                source_page=6,
+                source_pdf_key="gold_policy/medishield_gold_plan.pdf",
+                source_text=source_text,
+                source_verified=False,
+            )
+            session.add(rider)
+        policy_rider_ids[rider_code] = rider_id
+    return policy_rider_ids
 
 
 # Fallback static definition for all 30 benchmark clusters if Pillow/generator unavailable
@@ -224,6 +671,7 @@ def seed_benchmark_dataset(session: Session) -> int:
     Returns the number of seeded members. Idempotent: checks for existence before adding.
     """
     seed_medical_codes(session)
+    seed_clinical_guidelines_and_indications(session)
     seeded_count = 0
     seen_member_ids: set[str] = {
         row[0].upper() for row in session.query(Member.member_id).all()
@@ -240,6 +688,7 @@ def seed_benchmark_dataset(session: Session) -> int:
     clusters = _load_clusters_from_generator()
     if not clusters:
         clusters = FALLBACK_CLUSTERS
+    rider_terms = _load_gold_policy_rider_terms()
 
     # 2. Seed Baseline Members
     for b in BASELINE_MEMBERS:
@@ -302,13 +751,13 @@ def seed_benchmark_dataset(session: Session) -> int:
             )
             session.add(enr)
         else:
-            pv_uuid = policy_version_map.get(pol_clean)
-            if pv_uuid:
+            matched_pv_uuid = policy_version_map.get(pol_clean)
+            if matched_pv_uuid:
                 enr_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, f"enr_{b['member_id']}_{pol_id_str}")
                 enr = Enrollment(
                     id=enr_uuid,
                     member_id=m_id,
-                    policy_version_id=pv_uuid,
+                    policy_version_id=matched_pv_uuid,
                     coverage_start_date=date(2025, 1, 1),
                     coverage_end_date=date(2026, 12, 31),
                     status="ACTIVE",
@@ -435,18 +884,67 @@ def seed_benchmark_dataset(session: Session) -> int:
             )
             session.add(enr)
         else:
-            pv_uuid = policy_version_map.get(pol_clean)
-            if pv_uuid:
+            fallback_pv_uuid = policy_version_map.get(pol_clean)
+            if fallback_pv_uuid:
                 enr_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, f"enr_{patient_id}_{policy_code}")
                 enr = Enrollment(
                     id=enr_uuid,
                     member_id=m_uuid,
-                    policy_version_id=pv_uuid,
+                    policy_version_id=fallback_pv_uuid,
                     coverage_start_date=date(2025, 1, 1),
                     coverage_end_date=date(2026, 12, 31),
                     status="ACTIVE",
                 )
                 session.add(enr)
+
+    # Backfill rider catalog and pending applications for both new and existing seed rows.
+    for c in clusters:
+        patient_id = c["patient_id"]
+        member = session.query(Member).filter_by(member_id=patient_id).first()
+        policy_code = c["policy"]
+        policy_version_id = policy_version_map.get(policy_code.upper())
+        if member is None or policy_version_id is None:
+            continue
+
+        enrollment = (
+            session.query(Enrollment)
+            .filter_by(member_id=member.id, policy_version_id=policy_version_id)
+            .first()
+        )
+        if enrollment is None:
+            continue
+
+        policy_rider_ids = _seed_policy_riders(
+            session, policy_version_id, policy_code, rider_terms
+        )
+        rider_request_code = c.get("rider_request_code")
+        policy_rider_id = policy_rider_ids.get(rider_request_code)
+        if not rider_request_code or not policy_rider_id:
+            continue
+
+        application_id = uuid.uuid5(
+            uuid.NAMESPACE_DNS, f"rider_application_{patient_id}_{rider_request_code}"
+        )
+        if session.query(EnrollmentRiderApplication).filter_by(id=application_id).first() is not None:
+            continue
+
+        requested_on_value = c.get("treatment_date")
+        requested_on = (
+            requested_on_value.date()
+            if isinstance(requested_on_value, datetime)
+            else requested_on_value
+        )
+        session.add(
+            EnrollmentRiderApplication(
+                id=application_id,
+                enrollment_id=enrollment.id,
+                policy_rider_id=policy_rider_id,
+                status="REQUESTED",
+                requested_on=requested_on,
+                requested_effective_date=requested_on,
+                source_document_ref=f"amend_{patient_id}",
+            )
+        )
 
     session.commit()
     logger.info("Successfully seeded %d benchmark members into database", seeded_count)
@@ -607,7 +1105,7 @@ def seed_benchmark_cluster_cases(session: Session) -> int:
     now = datetime.now(UTC)
     seeded = 0
 
-    benchmark_cases = [
+    benchmark_cases: list[dict[str, Any]] = [
         {
             "case_id": "CASE-C001-PT19116",
             "state": WorkflowState.COMPLETED,
@@ -750,7 +1248,7 @@ def seed_benchmark_cluster_cases(session: Session) -> int:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    session_factory = get_sqlite_session_factory()
+    session_factory = get_sqlite_session_factory()  # type: ignore[no-untyped-call]
     with session_factory() as sess:
         count = seed_benchmark_dataset(sess)
         demo_count = seed_demo_cases_if_empty(sess)

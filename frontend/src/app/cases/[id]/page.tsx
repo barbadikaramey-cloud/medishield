@@ -21,6 +21,7 @@ import {
   Layers,
   Lock,
   RefreshCw,
+  RotateCcw,
   Scale,
   Send,
   ShieldAlert,
@@ -28,15 +29,20 @@ import {
   Sparkles,
   Stethoscope,
   Unlock,
+  UserCheck,
   XCircle,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import {
   ClinicalExplanationViewer,
   formatRuleLabel,
   formatSubReason,
 } from "@/components/ClinicalExplanationViewer";
+import { LiveAgentTimeline } from "@/components/LiveAgentTimeline";
 import {
   acquireReviewLock,
+  downloadCaseReport,
   explainCase,
   fetchDocumentOcr,
   fetchDocumentImage,
@@ -51,6 +57,7 @@ import {
   CaseDetailResponse,
   ReviewLockResponse,
 } from "@/lib/api";
+import { formatDateTime, formatRelativeTime } from "@/lib/date";
 import { useAuth } from "@/lib/auth";
 
 export default function CaseDetailPage() {
@@ -69,6 +76,20 @@ export default function CaseDetailPage() {
   const [docImageUrl, setDocImageUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [overlayMode, setOverlayMode] = useState<"key_fields" | "all_ocr" | "none">("key_fields");
+  const [zoomLevel, setZoomLevel] = useState<number>(1.0);
+  const [downloadingReport, setDownloadingReport] = useState(false);
+
+  const handleZoomIn = () => {
+    setZoomLevel((prev) => Math.min(3.0, Math.round((prev + 0.25) * 100) / 100));
+  };
+
+  const handleZoomOut = () => {
+    setZoomLevel((prev) => Math.max(0.5, Math.round((prev - 0.25) * 100) / 100));
+  };
+
+  const handleResetZoom = () => {
+    setZoomLevel(1.0);
+  };
 
   // Review Override Modal State
   const [isOverrideModalOpen, setIsOverrideModalOpen] = useState(false);
@@ -77,6 +98,7 @@ export default function CaseDetailPage() {
   const [remarks, setRemarks] = useState("");
   const [submittingAction, setSubmittingAction] = useState(false);
   const [rerunning, setRerunning] = useState(false);
+  const [pipelineAwaitingReveal, setPipelineAwaitingReveal] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
   // Request Info Modal State
@@ -96,6 +118,20 @@ export default function CaseDetailPage() {
     navigator.clipboard.writeText(text);
     setCopiedExplanation(true);
     setTimeout(() => setCopiedExplanation(false), 2000);
+  };
+
+  const openOverrideModal = (suggestedDecision?: string) => {
+    setActionError(null);
+    if (suggestedDecision) {
+      setOverrideDecision(suggestedDecision);
+    } else if (caseData?.current_decision === "APPROVE") {
+      setOverrideDecision("REJECT");
+    } else if (caseData?.current_decision === "REJECT") {
+      setOverrideDecision("APPROVE");
+    } else {
+      setOverrideDecision("APPROVE");
+    }
+    setIsOverrideModalOpen(true);
   };
 
   const handleGenerateExplanation = async () => {
@@ -136,6 +172,13 @@ export default function CaseDetailPage() {
     }
   }, [caseId]);
 
+  const handlePipelineComplete = useCallback(() => {
+    void loadData();
+    if (rerunning) {
+      setPipelineAwaitingReveal(true);
+    }
+  }, [loadData, rerunning]);
+
   useEffect(() => {
     loadData();
   }, [loadData]);
@@ -143,6 +186,7 @@ export default function CaseDetailPage() {
   const selectedDocId = caseData?.documents?.[selectedDocIndex]?.document_id;
 
   useEffect(() => {
+    setZoomLevel(1.0);
     if (!caseId || !selectedDocId) {
       setOcrPayload(null);
       if (docImageUrl) URL.revokeObjectURL(docImageUrl);
@@ -218,16 +262,24 @@ export default function CaseDetailPage() {
   const handleOverrideSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!caseData) return;
-    if (remarks.trim().length < 10) {
-      setActionError("Remarks must be at least 10 characters long.");
+    if (remarks.trim().length < 5) {
+      setActionError("Reviewer feedback remarks must be at least 5 characters long.");
       return;
     }
     setSubmittingAction(true);
     setActionError(null);
     try {
+      const latestCase = await getCaseDetail(caseId);
+      if (latestCase.version !== caseData.version) {
+        setCaseData(latestCase);
+        setActionError(
+          `This case changed from version ${caseData.version} to ${latestCase.version}. The latest case has been loaded; review it before submitting another decision.`,
+        );
+        return;
+      }
       await submitOverride({
         case_id: caseId,
-        expected_case_version: caseData.version,
+        expected_case_version: latestCase.version,
         new_decision: overrideDecision,
         reason_code: reasonCode,
         remarks: remarks.trim(),
@@ -237,7 +289,13 @@ export default function CaseDetailPage() {
       setRemarks("");
       await loadData();
     } catch (err: unknown) {
-      setActionError(err instanceof Error ? err.message : "Override submission failed.");
+      const message = err instanceof Error ? err.message : "Override submission failed.";
+      if (message.includes("Optimistic lock conflict")) {
+        await loadData();
+        setActionError("The case changed while you were reviewing it. The latest version is loaded; verify its current decision before submitting another override.");
+      } else {
+        setActionError(message);
+      }
     } finally {
       setSubmittingAction(false);
     }
@@ -273,10 +331,11 @@ export default function CaseDetailPage() {
   const handleRerunCase = async () => {
     if (!caseId) return;
     setRerunning(true);
+    setPipelineAwaitingReveal(false);
     setActionError(null);
     try {
       await rerunCase(caseId);
-      await loadData();
+      setPipelineAwaitingReveal(true);
     } catch (err: unknown) {
       setActionError(err instanceof Error ? err.message : "Workflow rerun failed.");
     } finally {
@@ -284,19 +343,39 @@ export default function CaseDetailPage() {
     }
   };
 
+  const handleDownloadReport = async () => {
+    if (!caseId || downloadingReport) return;
+    setDownloadingReport(true);
+    try {
+      const blob = await downloadCaseReport(caseId);
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = downloadUrl;
+      a.download = `MediShield_Case_${caseId}_Report.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(downloadUrl);
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "PDF report download failed.");
+    } finally {
+      setDownloadingReport(false);
+    }
+  };
+
   if (!authLoading && user?.role === "CLAIMER") {
     return (
       <div className="max-w-2xl mx-auto py-16 text-center">
-        <div className="p-4 bg-cyan-950/40 border border-cyan-800/80 rounded-2xl mb-6 inline-block">
-          <ShieldAlert className="w-12 h-12 text-cyan-400 mx-auto" />
+        <div className="p-4 bg-status-info/10 border border-status-info/20 rounded-card mb-6 inline-block">
+          <ShieldAlert className="w-12 h-12 text-status-info mx-auto" />
         </div>
-        <h2 className="text-2xl font-bold text-white mb-2">Claimer Account Restricted</h2>
-        <p className="text-sm text-slate-400 mb-6 max-w-lg mx-auto leading-relaxed">
+        <h2 className="text-2xl font-bold text-foreground mb-2">Claimer Account Restricted</h2>
+        <p className="text-sm text-secondary mb-6 max-w-lg mx-auto leading-relaxed">
           The Operational Case Workbench contains adjustor-only tools and fraud analytics. Under MediShield RBAC, please track your claim status using your dedicated Claimer Portal.
         </p>
         <Link
           href={`/claimer?case_id=${caseId}`}
-          className="inline-flex items-center space-x-2 px-5 py-2.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg font-semibold text-sm transition-colors shadow-lg shadow-cyan-950"
+          className="inline-flex items-center space-x-2 px-5 py-2.5 bg-accent hover:bg-accent-hover text-accent-fg rounded-btn font-semibold text-sm transition shadow-xs"
         >
           <span>Track Claim in Claimer Portal</span>
         </Link>
@@ -306,8 +385,8 @@ export default function CaseDetailPage() {
 
   if (loading && !caseData) {
     return (
-      <div className="py-24 text-center text-slate-500 space-y-3">
-        <RefreshCw className="w-8 h-8 animate-spin mx-auto text-cyan-400" />
+      <div className="py-24 text-center text-muted space-y-3">
+        <RefreshCw className="w-8 h-8 animate-spin mx-auto text-accent" />
         <p className="text-sm">Loading Case {caseId} from control plane...</p>
       </div>
     );
@@ -316,12 +395,12 @@ export default function CaseDetailPage() {
   if (error || !caseData) {
     return (
       <div className="py-12 max-w-lg mx-auto text-center space-y-4">
-        <AlertTriangle className="w-12 h-12 text-rose-400 mx-auto" />
-        <h2 className="text-lg font-bold text-white">Error Loading Case</h2>
-        <p className="text-xs text-rose-300">{error || "Case not found."}</p>
+        <AlertTriangle className="w-12 h-12 text-status-danger mx-auto" />
+        <h2 className="text-lg font-bold text-foreground">Error Loading Case</h2>
+        <p className="text-xs text-status-danger">{error || "Case not found."}</p>
         <Link
           href="/"
-          className="inline-flex items-center space-x-1.5 px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200"
+          className="inline-flex items-center space-x-1.5 px-4 py-2 rounded-btn bg-card hover:bg-card-inner border border-border text-xs text-foreground transition shadow-xs"
         >
           <ArrowLeft className="w-3.5 h-3.5" />
           <span>Back to Queue</span>
@@ -330,7 +409,7 @@ export default function CaseDetailPage() {
     );
   }
 
-  const selectedDoc = caseData.documents[selectedDocIndex];
+  const selectedDoc = (caseData.documents || [])[selectedDocIndex];
   const isAwaitingHuman = caseData.workflow_state === "AWAITING_HUMAN";
   const hasLock = Boolean(lockData);
 
@@ -447,127 +526,162 @@ export default function CaseDetailPage() {
   return (
     <div className="space-y-6">
       {/* Top Breadcrumb & Lock Control Bar */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-800">
-        <div className="flex items-center space-x-4">
+      <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 p-4 rounded-card bg-card border border-border shadow-xs">
+        <div className="flex items-center space-x-3 min-w-0">
           <Link
             href="/"
-            className="p-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-800 transition"
+            className="h-8 w-8 inline-flex items-center justify-center rounded-btn bg-card hover:bg-pink-hover text-secondary hover:text-pink-deep border border-border hover:border-pink-border transition-all duration-180 shadow-xs active:scale-[0.98] shrink-0"
+            title="Back to Operations Queue"
           >
             <ArrowLeft className="w-4 h-4" />
           </Link>
-          <div>
-            <div className="flex items-center space-x-3">
-              <h1 className="text-xl font-bold font-mono text-white tracking-tight">
+          <div className="min-w-0">
+            <div className="flex items-center space-x-2.5 flex-wrap">
+              <h1 className="text-xl font-bold font-mono text-foreground tracking-tight">
                 {caseData.case_id}
               </h1>
-              <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-slate-400 border border-slate-700">
+              <span className="h-5 inline-flex items-center px-2 rounded text-[10px] font-mono bg-card-inner text-secondary border border-border font-medium">
                 v{caseData.version}
               </span>
               <span
-                className={`px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wide border ${
+                className={`h-5 inline-flex items-center px-2.5 rounded-full text-[10px] font-semibold tracking-wide border ${
                   caseData.workflow_state === "AWAITING_HUMAN"
-                    ? "bg-amber-950/80 text-amber-300 border-amber-700"
+                    ? "bg-warning-bg text-warning border-warning-border"
                     : caseData.workflow_state === "AWAITING_INFO"
-                    ? "bg-blue-950/80 text-blue-300 border-blue-700"
+                    ? "bg-sky-soft text-sky-deep border-sky/30"
                     : caseData.workflow_state === "COMPLETED"
-                    ? "bg-emerald-950/80 text-emerald-300 border-emerald-700"
-                    : "bg-slate-800 text-slate-300 border-slate-700"
+                    ? "bg-success-bg text-success border-success-border"
+                    : "bg-card-inner text-secondary border-border"
                 }`}
               >
                 {caseData.workflow_state}
               </span>
             </div>
-            <p className="text-xs text-slate-400 mt-0.5">
-              Workflow Engine: <span className="font-mono text-cyan-400">{caseData.workflow_version}</span> &bull; Submitted: {new Date(caseData.created_at).toLocaleString()}
+            <p className="text-xs text-secondary mt-0.5 truncate">
+              Workflow Engine: <span className="font-mono text-foreground font-medium">{caseData.workflow_version}</span> &bull; Submitted: {formatDateTime(caseData.created_at)} ({formatRelativeTime(caseData.created_at)})
             </p>
           </div>
         </div>
 
-        {/* Lock Acquisition / Countdown */}
-        <div className="flex items-center space-x-3">
-          {auditData && (
-            <div
-              className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border text-xs ${
-                auditData.chain_intact
-                  ? "bg-emerald-950/40 border-emerald-800 text-emerald-300"
-                  : "bg-rose-950/60 border-rose-800 text-rose-300"
-              }`}
-            >
-              {auditData.chain_intact ? (
-                <ShieldCheck className="w-4 h-4 text-emerald-400" />
-              ) : (
-                <ShieldAlert className="w-4 h-4 text-rose-400" />
-              )}
-              <span>{auditData.chain_intact ? "HMAC Audit Chain Intact" : "Audit Chain Compromised"}</span>
-            </div>
-          )}
+        {/* Lock Acquisition / Actions */}
+        <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+          {/* Status Indicators Cluster */}
+          <div className="flex items-center gap-2">
+            {auditData && (
+              <div
+                className={`h-8 inline-flex items-center space-x-1.5 px-3 rounded-full border text-xs font-medium shadow-xs ${
+                  auditData.chain_intact
+                    ? "bg-success-bg border-success-border text-success"
+                    : "bg-danger-bg border-danger-border text-danger"
+                }`}
+              >
+                {auditData.chain_intact ? (
+                  <ShieldCheck className="w-3.5 h-3.5 text-success shrink-0" />
+                ) : (
+                  <ShieldAlert className="w-3.5 h-3.5 text-danger shrink-0" />
+                )}
+                <span className="text-[11px] font-medium">{auditData.chain_intact ? "Audit Chain Intact" : "Audit Compromised"}</span>
+              </div>
+            )}
 
-          {isAwaitingHuman && (
-            <>
-              {hasLock ? (
-                <div className="flex items-center space-x-2 bg-amber-950/60 border border-amber-800 px-3 py-1.5 rounded-lg text-xs text-amber-300">
-                  <Lock className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Lock Active (15m TTL)</span>
+            {isAwaitingHuman && (
+              <>
+                {hasLock ? (
+                  <div className="h-8 inline-flex items-center space-x-2 bg-warning-bg border border-warning-border px-2.5 rounded-btn text-xs text-warning font-medium shadow-xs">
+                    <Lock className="w-3.5 h-3.5 shrink-0" />
+                    <span className="text-[11px]">Lock Active (15m)</span>
+                    <button
+                      type="button"
+                      onClick={handleReleaseLock}
+                      className="ml-1 h-5 px-1.5 rounded bg-card hover:bg-pink-hover text-secondary hover:text-pink-deep border border-border hover:border-pink-border text-[10px] font-medium transition-all duration-180 active:scale-[0.98]"
+                    >
+                      Release
+                    </button>
+                  </div>
+                ) : (
                   <button
-                    onClick={handleReleaseLock}
-                    className="ml-2 px-2 py-0.5 rounded bg-slate-900 hover:bg-slate-800 text-slate-300 text-[10px]"
+                    type="button"
+                    onClick={handleAcquireLock}
+                    className="h-8 inline-flex items-center space-x-1.5 px-3 rounded-btn bg-[#397FA9] hover:bg-[#2C6688] text-white text-xs font-semibold shadow-xs transition-all duration-180 active:scale-[0.98]"
                   >
-                    Release
+                    <Unlock className="w-3.5 h-3.5" />
+                    <span>Acquire Review Lock</span>
                   </button>
-                </div>
-              ) : (
-                <button
-                  onClick={handleAcquireLock}
-                  className="flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-slate-950 text-xs font-bold transition shadow"
-                >
-                  <Unlock className="w-3.5 h-3.5" />
-                  <span>Acquire Review Lock</span>
-                </button>
-              )}
-            </>
+                )}
+              </>
+            )}
+          </div>
+
+          {/* Clean Divider between Status and Actions */}
+          {(auditData || isAwaitingHuman) && (
+            <div className="hidden sm:block h-5 w-px bg-border mx-0.5" />
           )}
 
-          {/* Rerun Pipeline Button */}
-          <button
-            onClick={handleRerunCase}
-            disabled={rerunning}
-            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-indigo-950/70 hover:bg-indigo-900/90 text-indigo-300 border border-indigo-700/80 text-xs font-semibold transition shadow disabled:opacity-50"
-            title="Re-execute claims adjudication workflow pipeline with latest models & rules"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${rerunning ? "animate-spin text-indigo-400" : ""}`} />
-            <span>{rerunning ? "Rerunning..." : "Rerun Pipeline"}</span>
-          </button>
+          {/* Action Toolbar Cluster */}
+          <div className="flex items-center gap-2">
+            {/* Rerun Pipeline Button */}
+            <button
+              type="button"
+              onClick={handleRerunCase}
+              disabled={rerunning}
+              className="h-8 inline-flex items-center space-x-1.5 px-3 rounded-btn bg-card hover:bg-pink-hover text-secondary hover:text-foreground border border-border hover:border-pink-border text-xs font-medium transition-all duration-180 shadow-xs disabled:opacity-50 active:scale-[0.98]"
+              title="Re-execute claims adjudication workflow pipeline with latest models & rules"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${rerunning ? "animate-spin text-sky-deep" : "text-muted"}`} />
+              <span>{rerunning ? "Rerunning..." : "Rerun Pipeline"}</span>
+            </button>
+
+            {/* Download PDF Case Report Button */}
+            <button
+              type="button"
+              onClick={handleDownloadReport}
+              disabled={downloadingReport}
+              className="h-8 inline-flex items-center space-x-1.5 px-3 rounded-btn bg-sky-soft hover:bg-pink-hover text-sky-deep hover:text-pink-deep border border-sky/30 hover:border-pink-border text-xs font-semibold transition-all duration-180 shadow-xs active:scale-[0.98] disabled:opacity-50"
+              title="Download immutable audit-ready PDF case adjudication report"
+            >
+              <FileText className={`w-3.5 h-3.5 text-sky-deep ${downloadingReport ? "animate-pulse" : ""}`} />
+              <span>{downloadingReport ? "Generating PDF..." : "Download Report"}</span>
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* Main Grid: Document Viewer on Left (7 cols), Decision Console on Right (5 cols) */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+      {/* Real-Time Agent Execution Stream (ADR-017 Feature 2) */}
+      <LiveAgentTimeline
+        caseId={caseData.case_id}
+        isComplete={caseData.is_complete && !rerunning && !pipelineAwaitingReveal}
+        isRerunning={rerunning}
+        onPipelineComplete={handlePipelineComplete}
+      />
+
+      {/* Main Grid: Document Viewer on Left (6 cols), Decision Console on Right (6 cols) */}
+      <div className="grid min-w-0 grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Left Column: Multi-Document Roster & Viewer */}
-        <div className="lg:col-span-7 space-y-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg">
-            <div className="bg-slate-950/80 px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+        <div className="min-w-0 lg:col-span-6 space-y-4">
+          <div className="bg-card border border-border rounded-card overflow-hidden shadow-xs transition-colors">
+            <div className="bg-card-inner px-4 py-3 border-b border-border flex items-center justify-between">
               <div className="flex items-center space-x-2">
-                <FileText className="w-4 h-4 text-cyan-400" />
-                <span className="text-xs font-bold text-slate-200 uppercase tracking-wider">
-                  Submitted Documents ({caseData.documents.length})
+                <FileText className="w-4 h-4 text-muted" />
+                <span className="text-xs font-bold text-foreground uppercase tracking-wider">
+                  Submitted Documents ({(caseData.documents || []).length})
                 </span>
               </div>
             </div>
 
             {/* Document Tabs */}
-            <div className="flex overflow-x-auto border-b border-slate-800 bg-slate-950/40 p-2 gap-2">
-              {caseData.documents.map((doc, idx) => (
+            <div className="flex overflow-x-auto border-b border-border bg-card-inner p-2 gap-2">
+              {(caseData.documents || []).map((doc, idx) => (
                 <button
                   key={doc.document_id}
                   onClick={() => setSelectedDocIndex(idx)}
-                  className={`px-3 py-2 rounded-lg text-xs font-mono transition text-left flex-shrink-0 border ${
+                  className={`px-3.5 py-2 rounded-btn text-xs font-mono transition-all duration-180 text-left flex-shrink-0 border active:scale-[0.98] ${
                     selectedDocIndex === idx
-                      ? "bg-slate-800 text-cyan-400 border-cyan-800 font-semibold"
-                      : "bg-slate-900/60 text-slate-400 border-slate-800 hover:text-slate-200"
+                      ? "bg-sky-soft text-sky-deep border-sky-med/60 font-bold shadow-xs"
+                      : "bg-card hover:bg-pink-hover text-secondary hover:text-pink-deep border-border hover:border-pink-border"
                   }`}
                 >
-                  <div className="truncate max-w-[140px]">{doc.file_name}</div>
-                  <div className="text-[10px] text-slate-500">{doc.doc_type || "UNKNOWN"}</div>
+                  <div className="truncate max-w-[160px] font-semibold text-foreground group-hover:text-pink-deep">{doc.file_name}</div>
+                  <div className="text-[10px] text-muted">{doc.doc_type || "UNKNOWN"}</div>
                 </button>
               ))}
             </div>
@@ -575,187 +689,280 @@ export default function CaseDetailPage() {
             {/* Document Inspector Panel */}
             {selectedDoc ? (
               <div className="p-4 space-y-4">
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-slate-950 p-3 rounded-lg border border-slate-800/80 text-[11px] font-mono">
-                  <div>
-                    <span className="text-slate-500 block">Doc ID:</span>
-                    <span className="text-slate-200">{selectedDoc.document_id}</span>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-card-inner p-3 rounded-card border border-border text-[11px] font-mono shadow-xs">
+                  <div className="min-w-0">
+                    <span className="text-muted block text-[10px] uppercase tracking-wider">Doc ID:</span>
+                    <span className="text-foreground font-semibold truncate block" title={selectedDoc.document_id}>
+                      {selectedDoc.document_id}
+                    </span>
                   </div>
-                  <div>
-                    <span className="text-slate-500 block">MIME Type:</span>
-                    <span className="text-slate-200">{selectedDoc.mime_type}</span>
+                  <div className="min-w-0">
+                    <span className="text-muted block text-[10px] uppercase tracking-wider">MIME Type:</span>
+                    <span className="text-foreground truncate block">{selectedDoc.mime_type}</span>
                   </div>
-                  <div>
-                    <span className="text-slate-500 block">File Size:</span>
-                    <span className="text-slate-200">{(selectedDoc.size_bytes / 1024).toFixed(1)} KB</span>
+                  <div className="min-w-0">
+                    <span className="text-muted block text-[10px] uppercase tracking-wider">File Size:</span>
+                    <span className="text-foreground font-mono truncate block">{((selectedDoc.size_bytes || 0) / 1024).toFixed(1)} KB</span>
                   </div>
-                  <div>
-                    <span className="text-slate-500 block">SHA-256:</span>
-                    <span className="text-slate-400 truncate block" title={selectedDoc.checksum}>
-                      {selectedDoc.checksum.substring(0, 10)}...
+                  <div className="min-w-0">
+                    <span className="text-muted block text-[10px] uppercase tracking-wider">SHA-256:</span>
+                    <span className="text-secondary truncate block font-mono" title={selectedDoc.checksum || ""}>
+                      {(selectedDoc.checksum || "").substring(0, 10)}...
                     </span>
                   </div>
                 </div>
 
                 {/* Visual Provenance Viewer */}
-                <div className="bg-slate-950 rounded-lg border border-slate-800 p-4 space-y-3">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-slate-400 border-b border-slate-800/60 pb-2">
+                <div className="bg-card-inner rounded-card border border-border p-4 space-y-3 shadow-xs">
+                  <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 text-xs text-secondary border-b border-border pb-2.5">
                     <div className="flex items-center space-x-2">
-                      <span className="font-semibold text-slate-300">Extracted Visual Provenance</span>
-                      <span className="text-[10px] bg-slate-900 px-2 py-0.5 rounded border border-slate-700 text-slate-400 font-mono">
+                      <span className="font-semibold text-foreground">Extracted Visual Provenance</span>
+                      <span className="text-[10px] bg-card px-2 py-0.5 rounded-btn border border-border text-secondary font-mono shadow-xs">
                         {displayedSpans.length} visible
                       </span>
                     </div>
 
-                    {/* Overlay Mode Switcher */}
-                    <div className="flex items-center space-x-1 bg-slate-900 p-1 rounded-lg border border-slate-800 text-[10px]">
-                      <button
-                        type="button"
-                        onClick={() => setOverlayMode("key_fields")}
-                        className={`px-2 py-0.5 rounded transition flex items-center space-x-1 ${
-                          overlayMode === "key_fields"
-                            ? "bg-cyan-600 text-white font-semibold shadow"
-                            : "text-slate-400 hover:text-slate-200"
-                        }`}
-                      >
-                        <CheckSquare className="w-3 h-3" />
-                        <span>Key Fields ({criticalSpans.length})</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setOverlayMode("all_ocr")}
-                        className={`px-2 py-0.5 rounded transition flex items-center space-x-1 ${
-                          overlayMode === "all_ocr"
-                            ? "bg-amber-600 text-slate-950 font-bold shadow"
-                            : "text-slate-400 hover:text-slate-200"
-                        }`}
-                      >
-                        <Layers className="w-3 h-3" />
-                        <span>All OCR Tokens ({allOcrSpans.length})</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setOverlayMode("none")}
-                        className={`px-2 py-0.5 rounded transition ${
-                          overlayMode === "none"
-                            ? "bg-slate-700 text-slate-200 font-semibold"
-                            : "text-slate-400 hover:text-slate-200"
-                        }`}
-                      >
-                        Hide
-                      </button>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {/* Zoom Toolbar & Presets */}
+                      <div className="h-8 inline-flex items-center space-x-1 bg-card px-2 rounded-btn border border-border text-[10px] shadow-xs">
+                        <button
+                          type="button"
+                          onClick={handleZoomOut}
+                          disabled={zoomLevel <= 0.5}
+                          className="h-6 w-6 inline-flex items-center justify-center rounded-btn hover:bg-pink-hover text-secondary hover:text-pink-deep disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-180"
+                          title="Zoom Out (Min 50%)"
+                        >
+                          <ZoomOut className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleResetZoom}
+                          className="h-6 px-2 inline-flex items-center font-mono text-[11px] font-semibold text-foreground hover:bg-pink-hover hover:text-pink-deep rounded-btn transition-all duration-180"
+                          title="Reset to 100%"
+                        >
+                          {Math.round(zoomLevel * 100)}%
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleZoomIn}
+                          disabled={zoomLevel >= 3.0}
+                          className="h-6 w-6 inline-flex items-center justify-center rounded-btn hover:bg-pink-hover text-secondary hover:text-pink-deep disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-180"
+                          title="Zoom In (Max 300%)"
+                        >
+                          <ZoomIn className="w-3.5 h-3.5" />
+                        </button>
+                        <div className="w-px h-3.5 bg-border mx-0.5" />
+                        <button
+                          type="button"
+                          onClick={() => setZoomLevel(1.5)}
+                          className={`h-6 px-1.5 inline-flex items-center rounded-btn font-mono text-[10px] transition-all duration-180 ${
+                            zoomLevel === 1.5
+                              ? "bg-sky-soft text-sky-deep font-semibold"
+                              : "text-muted hover:text-pink-deep hover:bg-pink-hover"
+                          }`}
+                          title="150% Inspection Scale"
+                        >
+                          150%
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setZoomLevel(2.0)}
+                          className={`h-6 px-1.5 inline-flex items-center rounded-btn font-mono text-[10px] transition-all duration-180 ${
+                            zoomLevel === 2.0
+                              ? "bg-sky-soft text-sky-deep font-semibold"
+                              : "text-muted hover:text-pink-deep hover:bg-pink-hover"
+                          }`}
+                          title="200% High-Detail Scale"
+                        >
+                          200%
+                        </button>
+                        <div className="w-px h-3.5 bg-border mx-0.5" />
+                        <button
+                          type="button"
+                          onClick={handleResetZoom}
+                          className="h-6 w-6 inline-flex items-center justify-center rounded-btn hover:bg-pink-hover text-secondary hover:text-pink-deep transition-all duration-180"
+                          title="Reset View (100%)"
+                        >
+                          <RotateCcw className="w-3 h-3" />
+                        </button>
+                      </div>
+
+                      {/* Overlay Mode Switcher */}
+                      <div className="h-8 inline-flex items-center space-x-1 bg-card p-0.5 rounded-btn border border-border text-[10px] shadow-xs">
+                        <button
+                          type="button"
+                          onClick={() => setOverlayMode("key_fields")}
+                          className={`h-7 px-2.5 inline-flex items-center space-x-1 rounded-btn transition-all duration-180 active:scale-[0.98] ${
+                            overlayMode === "key_fields"
+                              ? "bg-sky-soft text-sky-deep font-semibold border border-sky/40 shadow-xs"
+                              : "text-muted hover:text-pink-deep hover:bg-pink-hover"
+                          }`}
+                        >
+                          <CheckSquare className="w-3 h-3 text-sky-deep" />
+                          <span>Key Fields ({criticalSpans.length})</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setOverlayMode("all_ocr")}
+                          className={`h-7 px-2.5 inline-flex items-center space-x-1 rounded-btn transition-all duration-180 active:scale-[0.98] ${
+                            overlayMode === "all_ocr"
+                              ? "bg-sky-soft text-sky-deep font-semibold border border-sky/40 shadow-xs"
+                              : "text-muted hover:text-pink-deep hover:bg-pink-hover"
+                          }`}
+                        >
+                          <Layers className="w-3 h-3 text-sky-deep" />
+                          <span>All OCR Tokens ({allOcrSpans.length})</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setOverlayMode("none")}
+                          className={`h-7 px-2.5 inline-flex items-center rounded-btn transition-all duration-180 active:scale-[0.98] ${
+                            overlayMode === "none"
+                              ? "bg-sky-soft text-sky-deep font-semibold border border-sky/40 shadow-xs"
+                              : "text-muted hover:text-pink-deep hover:bg-pink-hover"
+                          }`}
+                        >
+                          Hide
+                        </button>
+                      </div>
                     </div>
                   </div>
                   
-                  <div className="relative border border-slate-800 rounded overflow-hidden bg-slate-900" style={{ minHeight: "400px" }}>
-                    {docImageUrl ? (
-                      <img 
-                        src={docImageUrl} 
-                        alt="Document Context"
-                        className="w-full h-auto object-contain opacity-85"
-                      />
+                  {/* Stable, Fixed-Size Document Viewport with Scrollable Zoom Canvas */}
+                  <div 
+                    className={`relative border border-border rounded-card bg-[#F4F8FB] dark:bg-card-inner shadow-xs overflow-auto h-[560px] p-3 select-none flex ${
+                      zoomLevel > 1.0 ? "items-start justify-start" : "items-start justify-center"
+                    }`}
+                  >
+                    {!docImageUrl ? (
+                      <div className="w-full h-full min-h-[400px] flex flex-col items-center justify-center text-muted text-xs space-y-2">
+                        <RefreshCw className="w-6 h-6 animate-spin text-sky-deep" />
+                        <span>Loading document image...</span>
+                      </div>
                     ) : (
-                      <div className="w-full h-64 flex items-center justify-center text-slate-500 text-xs">
-                        Loading document image...
+                      <div 
+                        className="relative transition-[width] duration-150 ease-out origin-top shadow-sm bg-white dark:bg-card rounded border border-border/60 shrink-0"
+                        style={{
+                          width: `${Math.round(zoomLevel * 100)}%`,
+                          maxWidth: zoomLevel <= 1.0 ? "100%" : "none",
+                        }}
+                      >
+                        <img 
+                          src={docImageUrl} 
+                          alt="Document Context"
+                          className="w-full h-auto block rounded select-none pointer-events-none"
+                          draggable={false}
+                        />
+                        
+                        {displayedSpans.filter((span) => span.bbox).map((span, idx) => {
+                          const isKey = overlayMode === "key_fields";
+                          return (
+                            <div
+                              key={idx}
+                              className={`absolute border transition-colors cursor-crosshair group ${
+                                isKey
+                                  ? "border-pink-accent/80 bg-pink-blush/30 hover:bg-pink-hover/80"
+                                  : "border-border bg-sky-soft/40 hover:bg-sky-soft/70"
+                              }`}
+                              style={{
+                                left: `${span.bbox.x0 * 100}%`,
+                                top: `${span.bbox.y0 * 100}%`,
+                                width: `${Math.max(0.005, span.bbox.x1 - span.bbox.x0) * 100}%`,
+                                height: `${Math.max(0.005, span.bbox.y1 - span.bbox.y0) * 100}%`,
+                              }}
+                            >
+                              <div className="absolute hidden group-hover:block bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border text-foreground text-[11px] p-2 rounded-btn shadow-xl z-20 font-mono whitespace-nowrap min-w-[140px] text-left pointer-events-none">
+                                <div className="flex items-center justify-between border-b border-border pb-1 mb-1">
+                                  <span className="text-foreground font-bold">
+                                    {isKey ? span.key : span.span_id}
+                                  </span>
+                                  {span.confidence !== undefined && (
+                                    <span className="text-[9px] text-muted">
+                                      {(span.confidence * 100).toFixed(0)}%
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-secondary text-xs truncate max-w-[240px]">
+                                  {isKey ? span.value : span.text}
+                                </div>
+                                <div className="text-[9px] text-muted mt-1">
+                                  [{span.bbox.x0.toFixed(3)}, {span.bbox.y0.toFixed(3)}, {span.bbox.x1.toFixed(3)}, {span.bbox.y1.toFixed(3)}]
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
-                    
-                    {displayedSpans.filter((span) => span.bbox).map((span, idx) => {
-                      const isKey = overlayMode === "key_fields";
-                      return (
-                        <div
-                          key={idx}
-                          className={`absolute border-2 transition-colors cursor-crosshair group ${
-                            isKey
-                              ? "border-cyan-400 bg-cyan-400/20 hover:bg-cyan-400/40"
-                              : "border-amber-400/80 bg-amber-400/15 hover:bg-amber-400/35"
-                          }`}
-                          style={{
-                            left: `${span.bbox.x0 * 100}%`,
-                            top: `${span.bbox.y0 * 100}%`,
-                            width: `${Math.max(0.005, span.bbox.x1 - span.bbox.x0) * 100}%`,
-                            height: `${Math.max(0.005, span.bbox.y1 - span.bbox.y0) * 100}%`,
-                          }}
-                        >
-                          <div className="absolute hidden group-hover:block bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-slate-900/95 backdrop-blur text-slate-200 text-[11px] p-2 rounded shadow-2xl z-20 border border-slate-700 font-mono whitespace-nowrap min-w-[140px] text-left pointer-events-none">
-                            <div className="flex items-center justify-between border-b border-slate-800 pb-1 mb-1">
-                              <span className={isKey ? "text-cyan-400 font-bold" : "text-amber-400 font-bold"}>
-                                {isKey ? span.key : span.span_id}
-                              </span>
-                              {span.confidence !== undefined && (
-                                <span className="text-[9px] text-slate-400">
-                                  {(span.confidence * 100).toFixed(0)}%
-                                </span>
-                              )}
-                            </div>
-                            <div className="text-white text-xs truncate max-w-[240px]">
-                              {isKey ? span.value : span.text}
-                            </div>
-                            <div className="text-[9px] text-slate-500 mt-1">
-                              [{span.bbox.x0.toFixed(3)}, {span.bbox.y0.toFixed(3)}, {span.bbox.x1.toFixed(3)}, {span.bbox.y1.toFixed(3)}]
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
                   </div>
 
-                  {displayedSpans.length === 0 && overlayMode !== "none" && (
-                    <div className="text-slate-500 italic py-2 text-center text-xs">
-                      No coordinates matched for this display mode.
-                    </div>
-                  )}
+                  {/* Viewport Status & Pan Instructions Footer */}
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between text-[11px] text-secondary gap-1 px-1">
+                    <span>
+                      {zoomLevel > 1.0
+                        ? `Zoomed ${Math.round(zoomLevel * 100)}% • Use scrollbars or trackpad to pan fine details`
+                        : `Viewing at ${Math.round(zoomLevel * 100)}% scale • Viewport fixed`}
+                    </span>
+                    {displayedSpans.length === 0 && overlayMode !== "none" ? (
+                      <span className="text-muted italic">No coordinates matched for this display mode.</span>
+                    ) : (
+                      <span className="font-mono text-[10px] text-muted">
+                        Resolution: {zoomLevel > 1.0 ? "Enlarged Inspection Mode" : "Standard Fit"}
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 {/* Extracted vs Expected / Reconciled Adjudication Comparison Panel */}
-                <div className="bg-slate-950 rounded-lg border border-slate-800 p-4 space-y-3">
-                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
-                    <div className="flex items-center space-x-2">
-                      <Scale className="w-4 h-4 text-cyan-400" />
-                      <span className="font-semibold text-xs text-slate-200 uppercase tracking-wider">
+                <div className="bg-card-inner rounded-card border border-border p-4 space-y-3 shadow-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-2">
+                    <div className="flex min-w-0 items-center space-x-2">
+                      <Scale className="w-4 h-4 text-muted" />
+                      <span className="font-semibold text-xs text-foreground uppercase tracking-wider">
                         Extracted Findings vs. Adjudication Comparison
                       </span>
                     </div>
-                    <span className="text-[10px] font-mono text-cyan-400">Cross-Document Reconciled</span>
+                    <span className="shrink-0 text-[10px] font-mono text-muted">Cross-Document Reconciled</span>
                   </div>
 
                   {/* Financial Totals Comparison Grid */}
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                    <div className="p-3 bg-slate-900 border border-slate-800 rounded-lg">
-                      <span className="text-[10px] text-slate-500 uppercase font-semibold block">Declared Header Total</span>
-                      <div className="text-base font-bold font-mono text-white mt-1">
-                        ${(caseData.agent_findings?.claims?.claim_amount?.value ?? 0).toFixed(2)}
+                  <div className="grid min-w-0 grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-3">
+                    <div className="flex min-h-[112px] min-w-0 flex-col rounded-card border border-border bg-card p-3 shadow-xs transition-all duration-180 hover:border-sky/40 hover:shadow-sm">
+                      <span className="block min-h-8 text-[10px] font-semibold uppercase leading-4 text-muted">Declared Header Total</span>
+                      <div className="mt-1 break-all font-mono text-base font-bold tabular-nums text-foreground">
+                        ${Number(caseData.agent_findings?.claims?.claim_amount?.value ?? 0).toFixed(2)}
                       </div>
-                      <div className="text-[10px] text-slate-400 mt-0.5">
+                      <div className="mt-auto pt-1 text-[10px] text-muted">
                         Conf: {((caseData.agent_findings?.claims?.claim_amount?.confidence ?? 0) * 100).toFixed(0)}%
                       </div>
                     </div>
 
-                    <div className="p-3 bg-slate-900 border border-slate-800 rounded-lg">
-                      <span className="text-[10px] text-slate-500 uppercase font-semibold block">Calculated Line Sum</span>
-                      <div className="text-base font-bold font-mono text-cyan-400 mt-1">
-                        ${(caseData.agent_findings?.claims?.calculated_lines_sum ?? 0).toFixed(2)}
+                    <div className="flex min-h-[112px] min-w-0 flex-col rounded-card border border-border bg-card p-3 shadow-xs transition-all duration-180 hover:border-sky/40 hover:shadow-sm">
+                      <span className="block min-h-8 text-[10px] font-semibold uppercase leading-4 text-muted">Calculated Line Sum</span>
+                      <div className="mt-1 break-all font-mono text-base font-bold tabular-nums text-foreground">
+                        ${Number(caseData.agent_findings?.claims?.calculated_lines_sum ?? 0).toFixed(2)}
                       </div>
-                      <div className="text-[10px] text-slate-400 mt-0.5">
+                      <div className="mt-auto pt-1 text-[10px] text-muted">
                         From {caseData.agent_findings?.claims?.service_lines?.length ?? 0} itemized lines
                       </div>
                     </div>
 
-                    <div className="p-3 bg-slate-900 border border-slate-800 rounded-lg flex flex-col justify-between">
-                      <span className="text-[10px] text-slate-500 uppercase font-semibold block">Arithmetic Validation</span>
-                      <div className="mt-1">
+                    <div className="flex min-h-[112px] min-w-0 flex-col rounded-card border border-border bg-card p-3 shadow-xs transition-all duration-180 hover:border-sky/40 hover:shadow-sm">
+                      <span className="block min-h-8 text-[10px] font-semibold uppercase leading-4 text-muted">Arithmetic Validation</span>
+                      <div className="mt-1 min-w-0">
                         {caseData.agent_findings?.claims?.line_items_sum_valid ? (
-                          <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-800">
-                            <CheckCircle className="w-3.5 h-3.5" />
-                            <span>MATCH (Exact)</span>
+                          <span className="inline-flex max-w-full flex-wrap items-center gap-1 rounded border border-status-success/20 bg-status-success/10 px-2 py-0.5 text-[11px] font-bold text-status-success">
+                            <CheckCircle className="h-3.5 w-3.5 shrink-0" />
+                            <span className="break-words">MATCH (Exact)</span>
                           </span>
                         ) : (
-                          <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded text-[11px] font-bold bg-amber-950 text-amber-300 border border-amber-800">
-                            <AlertTriangle className="w-3.5 h-3.5" />
-                            <span>ARITHMETIC_MISMATCH</span>
+                          <span className="inline-flex max-w-full flex-wrap items-center gap-1 rounded border border-status-warning/20 bg-status-warning/10 px-2 py-0.5 text-[11px] font-bold text-status-warning">
+                            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                            <span className="break-all">ARITHMETIC_MISMATCH</span>
                           </span>
                         )}
                       </div>
-                      <div className="text-[9px] text-slate-500 mt-0.5">
+                      <div className="mt-auto pt-1 text-[9px] text-muted">
                         Rule 11 Deterministic Check
                       </div>
                     </div>
@@ -763,16 +970,16 @@ export default function CaseDetailPage() {
 
                   {/* Extracted CPT Procedural Codes */}
                   {caseData.agent_findings?.claims?.cpt_codes && caseData.agent_findings.claims.cpt_codes.length > 0 && (
-                    <div className="p-3 bg-slate-900 border border-slate-800 rounded-lg space-y-1.5">
+                    <div className="p-3 bg-card border border-border rounded-card space-y-1.5 shadow-xs">
                       <div className="flex items-center justify-between">
-                        <span className="text-[10px] text-slate-400 uppercase font-semibold">Extracted Procedure Codes (CPT)</span>
-                        <span className="text-[10px] text-slate-500">Table-Isolated Extraction</span>
+                        <span className="text-[10px] text-muted uppercase font-semibold">Extracted Procedure Codes (CPT)</span>
+                        <span className="text-[10px] text-muted">Table-Isolated Extraction</span>
                       </div>
                       <div className="flex flex-wrap gap-2 pt-1">
                         {caseData.agent_findings.claims.cpt_codes.map((cpt: any, i: number) => (
-                          <div key={i} className="px-2.5 py-1 rounded bg-slate-950 border border-cyan-800 text-xs font-mono text-cyan-300 flex items-center space-x-1.5">
+                          <div key={i} className="px-2.5 py-1 rounded bg-card-inner border border-border text-xs font-mono text-foreground flex items-center space-x-1.5">
                             <span className="font-bold">{cpt.value}</span>
-                            <span className="text-[9px] text-slate-500">({(cpt.confidence * 100).toFixed(0)}%)</span>
+                            <span className="text-[9px] text-muted">({(cpt.confidence * 100).toFixed(0)}%)</span>
                           </div>
                         ))}
                       </div>
@@ -781,9 +988,9 @@ export default function CaseDetailPage() {
 
                   {/* Itemized Service Lines Table */}
                   {caseData.agent_findings?.claims?.service_lines && caseData.agent_findings.claims.service_lines.length > 0 && (
-                    <div className="overflow-x-auto rounded-lg border border-slate-800 bg-slate-900">
+                    <div className="overflow-x-auto rounded-card border border-border bg-card shadow-xs">
                       <table className="w-full text-left text-[11px] font-mono">
-                        <thead className="bg-slate-950 text-slate-400 uppercase text-[9px] border-b border-slate-800">
+                        <thead className="bg-card-inner text-muted uppercase text-[9px] border-b border-border">
                           <tr>
                             <th className="py-2 px-3">#</th>
                             <th className="py-2 px-3">CPT</th>
@@ -794,21 +1001,21 @@ export default function CaseDetailPage() {
                             <th className="py-2 px-3 text-right">Total ($)</th>
                           </tr>
                         </thead>
-                        <tbody className="divide-y divide-slate-800/60 text-slate-300">
+                        <tbody className="divide-y divide-border text-secondary">
                           {caseData.agent_findings.claims.service_lines.map((line: any, i: number) => {
                             const cptVal = line.cpt_code?.value || line.hcpcs?.value || "—";
                             const amtVal = typeof line.total_charge?.value === "number" ? line.total_charge.value : (typeof line.amount?.value === "number" ? line.amount.value : null);
                             const unitVal = typeof line.unit_charge?.value === "number" ? line.unit_charge.value : amtVal;
                             const qtyVal = line.quantity?.value || line.units?.value || 1;
                             return (
-                              <tr key={i} className="hover:bg-slate-800/40">
+                              <tr key={i} className="hover:bg-pink-hover/40 transition-colors duration-150">
                                 <td className="py-1.5 px-3">{line.line_number}</td>
-                                <td className="py-1.5 px-3 text-cyan-300 font-bold">{cptVal}</td>
+                                <td className="py-1.5 px-3 text-foreground font-semibold">{cptVal}</td>
                                 <td className="py-1.5 px-3 truncate max-w-[160px]">{line.description?.value || "—"}</td>
-                                <td className="py-1.5 px-3 text-slate-400">{line.service_date?.value || "—"}</td>
+                                <td className="py-1.5 px-3 text-muted">{line.service_date?.value || "—"}</td>
                                 <td className="py-1.5 px-3 text-right">{qtyVal}</td>
                                 <td className="py-1.5 px-3 text-right">{unitVal != null ? `$${unitVal.toFixed(2)}` : "—"}</td>
-                                <td className="py-1.5 px-3 text-right font-bold text-white">{amtVal != null ? `$${amtVal.toFixed(2)}` : "—"}</td>
+                                <td className="py-1.5 px-3 text-right font-bold text-foreground">{amtVal != null ? `$${amtVal.toFixed(2)}` : "—"}</td>
                               </tr>
                             );
                           })}
@@ -820,14 +1027,14 @@ export default function CaseDetailPage() {
 
                 {/* VLM Extraction Display */}
                 {ocrPayload?.vlm_extraction && Object.keys(ocrPayload.vlm_extraction).length > 0 && (
-                  <div className="bg-slate-950 rounded-lg border border-indigo-900 p-4 space-y-2">
-                    <div className="flex items-center justify-between text-xs text-indigo-300 border-b border-indigo-900/60 pb-2">
+                  <div className="bg-card-inner rounded-btn border border-border p-4 space-y-2">
+                    <div className="flex items-center justify-between text-xs text-secondary border-b border-border pb-2">
                       <div className="flex items-center space-x-2">
                         <span className="font-semibold">VLM Semantic Extraction (Fallback)</span>
                       </div>
-                      <span className="text-[10px] font-mono text-indigo-400">Policy Intelligence</span>
+                      <span className="text-[10px] font-mono text-muted">Policy Intelligence</span>
                     </div>
-                    <div className="p-3 bg-indigo-950/20 rounded font-mono text-xs text-indigo-200 whitespace-pre-wrap leading-relaxed">
+                    <div className="p-3 bg-card rounded font-mono text-xs text-foreground border border-border whitespace-pre-wrap leading-relaxed shadow-xs">
                       <pre className="m-0 overflow-x-auto">
                         {JSON.stringify(ocrPayload.vlm_extraction, null, 2)}
                       </pre>
@@ -836,27 +1043,66 @@ export default function CaseDetailPage() {
                 )}
               </div>
             ) : (
-              <div className="p-8 text-center text-slate-500 text-xs">No documents uploaded.</div>
+              <div className="p-8 text-center text-muted text-xs">No documents uploaded.</div>
             )}
           </div>
         </div>
 
         {/* Right Column: Adjudication Decision & Operator Console */}
-        <div className="lg:col-span-5 space-y-4">
-          {/* Adjudication Decision Card */}
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 sm:p-5 space-y-4 shadow-lg">
-            {/* Top Header */}
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <div className="flex items-center space-x-2">
-                <Sparkles className="w-4 h-4 text-cyan-400" />
-                <h2 className="text-xs font-bold text-slate-200 uppercase tracking-wider">
+        <div className="min-w-0 lg:col-span-6 space-y-4">
+          {pipelineAwaitingReveal || rerunning ? (
+            <div className="bg-card border border-border rounded-card p-6 sm:p-8 space-y-4 shadow-xs text-center animate-in fade-in duration-200">
+              <div className="w-12 h-12 rounded-full bg-accent/10 border border-accent/20 flex items-center justify-center mx-auto text-accent">
+                <RefreshCw className={`w-6 h-6 ${rerunning ? "animate-spin" : ""}`} />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-sm font-bold text-foreground">
+                  {rerunning ? "Adjudication Pipeline Running..." : "Pipeline Complete — Decision Ready"}
+                </h3>
+                <p className="text-xs text-secondary max-w-sm mx-auto">
+                  {rerunning
+                    ? "Multi-agent graph is actively processing documents, verifying identity, cross-checking policies, and auditing math."
+                    : "The adjudication pipeline has finished execution. You can return to the Case Queue to review the case in queue order, or reveal the decision here."}
+                </p>
+              </div>
+              {!rerunning && (
+                <div className="pt-2 flex flex-col sm:flex-row items-center justify-center gap-2.5">
+                  <Link
+                    href="/"
+                    className="inline-flex items-center space-x-1.5 px-3.5 py-2 rounded-btn bg-card-inner hover:bg-border text-foreground border border-border text-xs font-semibold transition"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5" />
+                    <span>Back to Case Queue</span>
+                  </Link>
+                  <button
+                    onClick={async () => {
+                      setPipelineAwaitingReveal(false);
+                      await loadData();
+                    }}
+                    className="inline-flex items-center space-x-1.5 px-3.5 py-2 rounded-btn bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold transition shadow-xs"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>Reveal Results Now</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <>
+              {/* Adjudication Decision Card */}
+              <div className="bg-card border border-border rounded-card p-4 sm:p-5 space-y-4 shadow-xs transition-colors">
+              {/* Top Header */}
+            <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-border">
+              <div className="flex min-w-0 items-center space-x-2">
+                <Sparkles className="w-4 h-4 text-muted" />
+                <h2 className="text-xs font-bold text-foreground uppercase tracking-wider">
                   Adjudication Decision
                 </h2>
               </div>
-              <div className="flex items-center space-x-2">
-                <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-full text-[10px] font-mono bg-slate-800 text-cyan-300 border border-slate-700">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block" />
-                  <span>
+              <div className="flex max-w-full flex-wrap items-center justify-end gap-2">
+                <span className="inline-flex h-7 max-w-full min-w-0 items-center space-x-1 rounded-full border border-border bg-card-inner px-2.5 text-[10px] font-mono text-secondary shadow-xs">
+                  <span className="w-1.5 h-1.5 rounded-full bg-status-success animate-pulse inline-block" />
+                  <span className="max-w-[10rem] truncate">
                     {(modelSource || (caseData.agent_findings?.explanation_model as string) || "Groq LLM")
                       .replace(/\s*\/\s*ADR-\d+\s*Engine/gi, "")
                       .replace(/Clinical Review Standard/gi, "")
@@ -867,27 +1113,27 @@ export default function CaseDetailPage() {
                   type="button"
                   onClick={handleGenerateExplanation}
                   disabled={explaining}
-                  className="flex items-center space-x-1 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-[10px] font-medium transition border border-slate-700 disabled:opacity-50"
+                  className="h-7 inline-flex items-center space-x-1 px-2.5 rounded-btn bg-card hover:bg-pink-hover text-secondary hover:text-pink-deep border border-border hover:border-pink-border text-[10px] font-medium transition-all duration-180 disabled:opacity-50 shadow-xs active:scale-[0.98]"
                   title="Synthesize fresh clinical narrative via Groq LLM"
                 >
-                  <RefreshCw className={`w-3 h-3 ${explaining ? "animate-spin text-cyan-400" : "text-slate-400"}`} />
+                  <RefreshCw className={`w-3 h-3 ${explaining ? "animate-spin text-accent" : "text-muted"}`} />
                   <span>{explaining ? "Updating..." : "Refresh"}</span>
                 </button>
                 {(caseData.detailed_explanation || caseData.justification) && (
                   <button
                     type="button"
                     onClick={() => handleCopyExplanation(caseData.detailed_explanation || caseData.justification || "")}
-                    className="flex items-center space-x-1 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-[10px] font-mono transition border border-slate-700"
+                    className="h-7 inline-flex items-center space-x-1 px-2.5 rounded-btn bg-card hover:bg-pink-hover text-secondary hover:text-pink-deep border border-border hover:border-pink-border text-[10px] font-mono transition-all duration-180 shadow-xs active:scale-[0.98]"
                     title="Copy explanation markdown"
                   >
                     {copiedExplanation ? (
                       <>
-                        <Check className="w-3 h-3 text-emerald-400" />
-                        <span className="text-emerald-400 font-sans">Copied</span>
+                        <Check className="w-3 h-3 text-status-success" />
+                        <span className="text-status-success font-sans">Copied</span>
                       </>
                     ) : (
                       <>
-                        <Copy className="w-3 h-3 text-slate-400" />
+                        <Copy className="w-3 h-3 text-muted" />
                         <span className="font-sans">Copy</span>
                       </>
                     )}
@@ -896,32 +1142,87 @@ export default function CaseDetailPage() {
               </div>
             </div>
 
+            {/* Authoritative Human Reviewer Override Card */}
+            {(caseData.latest_human_review || (caseData.agent_findings?.override_action === "OVERRIDE")) && (
+              <div className="bg-sky-soft border border-sky/40 rounded-card p-4 space-y-3 shadow-xs animate-in fade-in duration-200">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2.5 border-b border-sky/20">
+                  <div className="flex items-center space-x-2">
+                    <div className="w-7 h-7 rounded-full bg-sky-pale text-sky-deep flex items-center justify-center shrink-0 border border-sky/40">
+                      <UserCheck className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <div className="flex items-center space-x-2">
+                        <span className="text-xs font-bold text-foreground">
+                          Decision Overridden by Human Reviewer
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-sky-pale text-sky-deep font-semibold border border-sky/40">
+                          {caseData.latest_human_review?.reason_code || (caseData.agent_findings?.override_reason as string) || "SUPERVISORY_EXCEPTION"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <span className="text-[11px] text-muted font-mono">
+                    {formatDateTime(caseData.latest_human_review?.created_at || (caseData.agent_findings?.overridden_at as string))} ({formatRelativeTime(caseData.latest_human_review?.created_at || (caseData.agent_findings?.overridden_at as string))})
+                  </span>
+                </div>
+
+                <div className="flex items-center space-x-2 text-xs text-secondary flex-wrap">
+                  <span>Authoritative Reviewer:</span>
+                  <span className="font-mono font-bold text-foreground">
+                    {caseData.latest_human_review?.reviewer_id || (caseData.agent_findings?.overridden_by as string) || "Operations Reviewer"}
+                  </span>
+                  {caseData.agent_findings?.original_ai_decision && (
+                    <span className="text-muted text-[11px]">
+                      &bull; Autonomous AI Recommendation Was: <strong className="font-mono text-foreground">{caseData.agent_findings.original_ai_decision}</strong>
+                    </span>
+                  )}
+                </div>
+
+                <div className="bg-card p-3 rounded-btn border border-border text-xs space-y-1">
+                  <div className="text-[10px] uppercase tracking-wider font-semibold text-muted">
+                    Reviewer Feedback & Rationale:
+                  </div>
+                  <p className="text-foreground italic font-sans whitespace-pre-wrap text-xs leading-relaxed">
+                    &ldquo;{caseData.latest_human_review?.remarks || (caseData.agent_findings?.override_remarks as string) || "Decision authoritative override applied."}&rdquo;
+                  </p>
+                </div>
+              </div>
+            )}
+
             {/* Unified Hero Verdict Bar */}
-            <div className={`p-3.5 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+            <div className={`p-4 rounded-card border flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs transition-all duration-180 ${
               caseData.current_decision === "APPROVE"
-                ? "bg-emerald-950/30 border-emerald-800/70"
+                ? "bg-status-success/10 border-status-success/20 text-foreground"
                 : caseData.current_decision === "REJECT"
-                ? "bg-rose-950/30 border-rose-800/70"
-                : "bg-amber-950/30 border-amber-800/70"
+                ? "bg-rose-blush border-rose-med/30 text-foreground"
+                : "bg-status-warning/10 border-status-warning/20 text-foreground"
             }`}>
               <div className="flex items-center space-x-3">
-                <div className={`p-2 rounded-lg border ${
+                <div className={`p-2 rounded-card border ${
                   caseData.current_decision === "APPROVE"
-                    ? "bg-emerald-950 text-emerald-400 border-emerald-700"
+                    ? "bg-status-success/15 text-status-success border-status-success/30"
                     : caseData.current_decision === "REJECT"
-                    ? "bg-rose-950 text-rose-400 border-rose-700"
-                    : "bg-amber-950 text-amber-400 border-amber-700"
+                    ? "bg-rose-blush text-rose-deep border-rose-med/40"
+                    : "bg-status-warning/15 text-status-warning border-status-warning/30"
                 }`}>
                   {caseData.current_decision === "APPROVE" && <CheckCircle2 className="w-5 h-5" />}
                   {caseData.current_decision === "REJECT" && <XCircle className="w-5 h-5" />}
                   {caseData.current_decision === "ESCALATE" && <AlertTriangle className="w-5 h-5" />}
                   {!["APPROVE", "REJECT", "ESCALATE"].includes(caseData.current_decision || "") && (
-                    <Clock className="w-5 h-5 text-slate-400" />
+                    <Clock className="w-5 h-5 text-muted" />
                   )}
                 </div>
                 <div>
                   <div className="flex items-center space-x-2 flex-wrap">
-                    <span className="text-base font-bold text-white tracking-wide">
+                    <span className={`text-base font-bold tracking-wide ${
+                      caseData.current_decision === "APPROVE"
+                        ? "text-status-success"
+                        : caseData.current_decision === "REJECT"
+                        ? "text-rose-deep"
+                        : caseData.current_decision === "ESCALATE"
+                        ? "text-status-warning"
+                        : "text-foreground"
+                    }`}>
                       {caseData.current_decision === "APPROVE"
                         ? "APPROVED"
                         : caseData.current_decision === "REJECT"
@@ -931,133 +1232,36 @@ export default function CaseDetailPage() {
                         : "IN PROGRESS"}
                     </span>
                     {caseData.rule_id_matched && (
-                      <span className="text-xs text-slate-300 font-medium">
+                      <span className="text-xs text-secondary font-medium">
                         &bull; {formatRuleLabel(caseData.rule_id_matched)}
                       </span>
                     )}
                   </div>
                   {caseData.current_sub_reason && (
-                    <div className="text-xs text-amber-300/90 font-medium mt-0.5">
+                    <div className="text-xs text-secondary font-medium mt-0.5">
                       Trigger: {formatSubReason(caseData.current_sub_reason)}
                     </div>
                   )}
                 </div>
               </div>
 
-              {caseData.decision_confidence !== null && caseData.decision_confidence !== undefined && (
-                <div className="sm:text-right flex sm:flex-col items-baseline sm:items-end justify-between border-t sm:border-t-0 pt-2 sm:pt-0 border-slate-800/60">
-                  <span className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">
-                    Confidence
-                  </span>
-                  <span className="text-base font-bold font-mono text-cyan-300">
-                    {(caseData.decision_confidence * 100).toFixed(0)}%
-                  </span>
-                </div>
-              )}
+              <div className="flex items-center space-x-3 self-end sm:self-center">
+                {caseData.decision_confidence !== null && caseData.decision_confidence !== undefined && (
+                  <div className="text-right">
+                    <span className="text-[10px] text-muted uppercase tracking-wider font-semibold block">
+                      Confidence
+                    </span>
+                    <span className="text-base font-bold font-mono text-foreground">
+                      {(caseData.decision_confidence * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                )}
+              </div>
             </div>
 
-            {/* Specialist Quick-Status Strip */}
-            {caseData.agent_findings && (
-              <div className="grid grid-cols-5 gap-1.5 p-1 bg-slate-950/80 rounded-lg border border-slate-800/80 text-[11px]">
-                {/* Identity */}
-                <button
-                  type="button"
-                  onClick={() => setSelectedCategory("kyc")}
-                  className={`p-1.5 rounded flex flex-col items-center justify-center transition border ${
-                    selectedCategory === "kyc"
-                      ? "bg-slate-800 border-sky-600/70"
-                      : "border-transparent hover:bg-slate-900"
-                  }`}
-                  title="View Identity Verification"
-                >
-                  <span className="text-[10px] text-slate-400 font-medium">Identity</span>
-                  <span className={`text-[10px] font-bold font-mono ${
-                    caseData.agent_findings.kyc?.verdict === "PASS" ? "text-emerald-400" :
-                    caseData.agent_findings.kyc?.verdict === "FAIL" ? "text-rose-400" : "text-amber-400"
-                  }`}>
-                    {caseData.agent_findings.kyc?.verdict || "PASS"}
-                  </span>
-                </button>
-
-                {/* Billing */}
-                <button
-                  type="button"
-                  onClick={() => setSelectedCategory("claims")}
-                  className={`p-1.5 rounded flex flex-col items-center justify-center transition border ${
-                    selectedCategory === "claims"
-                      ? "bg-slate-800 border-blue-600/70"
-                      : "border-transparent hover:bg-slate-900"
-                  }`}
-                  title="View Billing & Financial Lines"
-                >
-                  <span className="text-[10px] text-slate-400 font-medium">Billing</span>
-                  <span className={`text-[10px] font-bold font-mono ${
-                    caseData.agent_findings.claims?.verdict === "PASS" ? "text-emerald-400" :
-                    caseData.agent_findings.claims?.verdict === "FAIL" ? "text-rose-400" : "text-amber-400"
-                  }`}>
-                    {caseData.agent_findings.claims?.line_items_sum_valid ? "Valid" : "Review"}
-                  </span>
-                </button>
-
-                {/* Coverage */}
-                <button
-                  type="button"
-                  onClick={() => setSelectedCategory("policy")}
-                  className={`p-1.5 rounded flex flex-col items-center justify-center transition border ${
-                    selectedCategory === "policy"
-                      ? "bg-slate-800 border-purple-600/70"
-                      : "border-transparent hover:bg-slate-900"
-                  }`}
-                  title="View Policy Coverage"
-                >
-                  <span className="text-[10px] text-slate-400 font-medium">Coverage</span>
-                  <span className="text-[10px] font-bold font-mono text-purple-300">
-                    {caseData.agent_findings.policy?.coverage_percentage ? `${caseData.agent_findings.policy.coverage_percentage}%` : "100%"}
-                  </span>
-                </button>
-
-                {/* Risk */}
-                <button
-                  type="button"
-                  onClick={() => setSelectedCategory("fraud")}
-                  className={`p-1.5 rounded flex flex-col items-center justify-center transition border ${
-                    selectedCategory === "fraud"
-                      ? "bg-slate-800 border-amber-600/70"
-                      : "border-transparent hover:bg-slate-900"
-                  }`}
-                  title="View Fraud & Anomaly Risk"
-                >
-                  <span className="text-[10px] text-slate-400 font-medium">Risk</span>
-                  <span className={`text-[10px] font-bold font-mono ${
-                    (caseData.agent_findings.fraud?.risk_level || "LOW") === "LOW" ? "text-emerald-400" :
-                    caseData.agent_findings.fraud?.risk_level === "HIGH" ? "text-rose-400" : "text-amber-400"
-                  }`}>
-                    {caseData.agent_findings.fraud?.risk_level || "LOW"}
-                  </span>
-                </button>
-
-                {/* Medical Necessity */}
-                <button
-                  type="button"
-                  onClick={() => setSelectedCategory("clinical")}
-                  className={`p-1.5 rounded flex flex-col items-center justify-center transition border ${
-                    selectedCategory === "clinical"
-                      ? "bg-emerald-950 border-emerald-600 font-bold"
-                      : "bg-emerald-950/20 border-emerald-900/40 hover:bg-emerald-950/40"
-                  }`}
-                  title="View Medical Necessity & Alignment"
-                >
-                  <span className="text-[10px] text-emerald-300 font-medium truncate max-w-full">Necessity</span>
-                  <span className="text-[10px] font-bold font-mono text-emerald-400">
-                    {caseData.agent_findings.clinical?.verdict || "Met"}
-                  </span>
-                </button>
-              </div>
-            )}
-
             {explainError && (
-              <div className="p-3 bg-rose-950/60 border border-rose-900/50 rounded-lg text-rose-300 text-xs flex items-center space-x-2">
-                <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+              <div className="p-3 bg-rose-blush border border-rose-med/30 rounded-btn text-rose-deep text-xs flex items-center space-x-2">
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-deep" />
                 <span>{explainError}</span>
               </div>
             )}
@@ -1071,23 +1275,24 @@ export default function CaseDetailPage() {
                 decisionConfidence={caseData.decision_confidence}
                 currentDecision={caseData.current_decision}
                 modelSource={modelSource || (caseData.agent_findings?.explanation_model as string)}
+                agentFindings={caseData.agent_findings}
                 onRefresh={handleGenerateExplanation}
                 isRefreshing={explaining}
                 selectedCategory={selectedCategory}
                 onCategoryChange={setSelectedCategory}
               />
             ) : (
-              <div className="p-6 bg-slate-950/80 border border-slate-800 rounded-xl text-center space-y-3">
-                <Sparkles className="w-6 h-6 text-cyan-400 mx-auto animate-bounce" />
-                <div className="text-xs font-semibold text-white">No Clinical Explanation Generated Yet</div>
-                <p className="text-[11px] text-slate-400 max-w-md mx-auto">
+              <div className="p-6 bg-card-inner border border-border rounded-card text-center space-y-3">
+                <Sparkles className="w-6 h-6 text-muted mx-auto" />
+                <div className="text-xs font-semibold text-foreground">No Clinical Explanation Generated Yet</div>
+                <p className="text-[11px] text-muted max-w-md mx-auto">
                   Synthesize an authoritative clinical audit narrative grounded in policy clauses and line-item arithmetic using Groq LLM.
                 </p>
                 <button
                   type="button"
                   onClick={handleGenerateExplanation}
                   disabled={explaining}
-                  className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition shadow-md disabled:opacity-50"
+                  className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-btn bg-[#397FA9] hover:bg-[#2C6688] text-white text-xs font-semibold transition-all duration-180 shadow-xs active:scale-[0.98] disabled:opacity-50"
                 >
                   <Sparkles className="w-3.5 h-3.5" />
                   <span>{explaining ? "Synthesizing..." : "Synthesize AI Explanation"}</span>
@@ -1097,12 +1302,12 @@ export default function CaseDetailPage() {
 
             {/* Missing Documents Alert */}
             {caseData.missing_documents && caseData.missing_documents.length > 0 && (
-              <div className="p-3 bg-blue-950/40 border border-blue-800/80 rounded-lg text-xs space-y-1">
-                <div className="text-blue-300 font-semibold flex items-center space-x-1.5">
-                  <FileText className="w-4 h-4 text-cyan-400 flex-shrink-0" />
+              <div className="p-3 bg-status-warning/10 border border-status-warning/20 rounded-btn text-xs space-y-1">
+                <div className="text-status-warning font-semibold flex items-center space-x-1.5">
+                  <FileText className="w-4 h-4 flex-shrink-0" />
                   <span>Missing Mandatory Documents:</span>
                 </div>
-                <ul className="list-disc list-inside text-blue-200/80 text-[11px] pl-5">
+                <ul className="list-disc list-inside text-secondary text-[11px] pl-5">
                   {caseData.missing_documents.map((d) => (
                     <li key={d}>{d}</li>
                   ))}
@@ -1112,151 +1317,254 @@ export default function CaseDetailPage() {
           </div>
 
           {/* Operator Action Console */}
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4 shadow-lg">
-            <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider border-b border-slate-800 pb-2">
+          <div className="bg-card border border-border rounded-card p-4 sm:p-5 space-y-4 shadow-xs">
+            <h3 className="text-xs font-bold text-foreground uppercase tracking-wider border-b border-border pb-2">
               Human Reviewer Console
             </h3>
 
             {actionError && (
-              <div className="p-3 rounded-lg bg-rose-950/60 border border-rose-800 text-rose-300 text-xs">
+              <div className="p-3 rounded-btn bg-status-danger/10 border border-status-danger/20 text-status-danger text-xs">
                 {actionError}
               </div>
             )}
 
             {isAwaitingHuman ? (
               hasLock ? (
-                <div className="space-y-3">
+                <div className="space-y-2.5">
                   <button
                     onClick={handleConfirmRecommendation}
                     disabled={submittingAction}
-                    className="w-full py-2.5 px-4 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow flex items-center justify-center space-x-2 transition"
+                    className="w-full h-9 py-2 px-4 rounded-btn bg-[#397FA9] hover:bg-[#2C6688] text-white text-xs font-bold shadow-xs flex items-center justify-center space-x-2 transition-all duration-180 active:scale-[0.98] disabled:opacity-50"
                   >
                     <CheckCircle className="w-4 h-4" />
                     <span>Confirm Recommended Decision</span>
                   </button>
 
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-2 gap-2.5">
                     <button
-                      onClick={() => setIsOverrideModalOpen(true)}
+                      onClick={() => openOverrideModal()}
                       disabled={submittingAction}
-                      className="py-2.5 px-4 rounded-lg bg-amber-600 hover:bg-amber-500 text-slate-950 text-xs font-bold shadow flex items-center justify-center space-x-2 transition"
+                      className="h-9 py-2 px-3 rounded-btn bg-card hover:bg-rose-blush text-rose-deep border border-border hover:border-rose-med/40 text-xs font-semibold shadow-xs flex items-center justify-center space-x-1.5 transition-all duration-180 active:scale-[0.98] disabled:opacity-50"
                     >
-                      <AlertTriangle className="w-4 h-4" />
+                      <AlertTriangle className="w-3.5 h-3.5 text-status-warning" />
                       <span>Override Decision</span>
                     </button>
 
                     <button
                       onClick={() => setIsRfiModalOpen(true)}
                       disabled={submittingAction}
-                      className="py-2.5 px-4 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-cyan-800 text-xs font-bold shadow flex items-center justify-center space-x-2 transition"
+                      className="h-9 py-2 px-3 rounded-btn bg-card hover:bg-pink-hover text-secondary hover:text-pink-deep border border-border hover:border-pink-border text-xs font-semibold shadow-xs flex items-center justify-center space-x-1.5 transition-all duration-180 active:scale-[0.98] disabled:opacity-50"
                     >
-                      <Send className="w-4 h-4" />
+                      <Send className="w-3.5 h-3.5 text-muted" />
                       <span>Request Info (RFI)</span>
                     </button>
                   </div>
                 </div>
               ) : (
-                <div className="p-4 bg-slate-950 rounded-xl border border-slate-800 text-center space-y-3">
-                  <Lock className="w-6 h-6 text-amber-400 mx-auto" />
-                  <p className="text-xs text-slate-400">
-                    You must acquire the review lock before submitting adjudication decisions or overrides.
+                <div className="p-4 bg-card-inner rounded-card border border-border text-center space-y-3">
+                  <Lock className="w-5 h-5 text-muted mx-auto" />
+                  <p className="text-xs text-secondary">
+                    Acquire the review lock for exclusive handling, or directly apply an authoritative reviewer override.
                   </p>
-                  <button
-                    onClick={handleAcquireLock}
-                    className="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-slate-950 text-xs font-bold"
-                  >
-                    Acquire Lock Now
-                  </button>
+                  <div className="flex flex-col sm:flex-row gap-2 justify-center">
+                    <button
+                      onClick={handleAcquireLock}
+                      className="h-8 px-4 py-1.5 rounded-btn bg-[#397FA9] hover:bg-[#2C6688] text-white text-xs font-semibold shadow-xs transition-all duration-180 active:scale-[0.98]"
+                    >
+                      Acquire Review Lock
+                    </button>
+                    <button
+                      onClick={() => openOverrideModal()}
+                      className="h-8 px-3.5 py-1.5 rounded-btn bg-card hover:bg-pink-hover text-pink-text hover:text-pink-deep border border-border hover:border-pink-border text-xs font-semibold shadow-xs transition-all duration-180 active:scale-[0.98] flex items-center justify-center space-x-1.5"
+                    >
+                      <AlertTriangle className="w-3.5 h-3.5 text-warning" />
+                      <span>Override Decision</span>
+                    </button>
+                  </div>
                 </div>
               )
             ) : (
-              <div className="p-4 bg-slate-950 rounded-xl border border-slate-800 text-center space-y-3">
-                <CheckCircle2 className="w-6 h-6 text-emerald-400 mx-auto" />
-                <p className="text-xs text-slate-400">
-                  Case is currently in state <strong className="text-slate-200">{caseData.workflow_state}</strong>. Human review is closed.
+              <div className="p-4 bg-card-inner rounded-card border border-border space-y-3">
+                <div className="flex items-center justify-between text-xs pb-2 border-b border-border">
+                  <div className="flex items-center space-x-2">
+                    {caseData.current_decision === "APPROVE" ? (
+                      <CheckCircle2 className="w-4 h-4 text-status-success shrink-0" />
+                    ) : caseData.current_decision === "REJECT" ? (
+                      <XCircle className="w-4 h-4 text-status-danger shrink-0" />
+                    ) : (
+                      <AlertTriangle className="w-4 h-4 text-warning shrink-0" />
+                    )}
+                    <span className="text-secondary">
+                      Current Verdict: <strong className="text-foreground">{caseData.current_decision || "PENDING"}</strong>
+                    </span>
+                  </div>
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-card text-muted border border-border">
+                    {caseData.workflow_state}
+                  </span>
+                </div>
+
+                <p className="text-xs text-secondary leading-relaxed">
+                  Adjudicators and supervisors may authoritatively override this {caseData.current_decision?.toLowerCase() || ""} decision at any time. All overrides are immutably signed and chained into the audit ledger.
                 </p>
-                <button
-                  onClick={handleRerunCase}
-                  disabled={rerunning}
-                  className="w-full py-2 px-3 rounded-lg bg-indigo-950 hover:bg-indigo-900 border border-indigo-800 text-indigo-300 text-xs font-semibold flex items-center justify-center space-x-2 transition disabled:opacity-50"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${rerunning ? "animate-spin text-indigo-400" : ""}`} />
-                  <span>{rerunning ? "Rerunning Pipeline..." : "Rerun Adjudication Pipeline"}</span>
-                </button>
+
+                <div className="pt-2">
+                  <button
+                    onClick={() => openOverrideModal()}
+                    disabled={submittingAction}
+                    className="w-full h-9 py-2 px-3 rounded-btn bg-card hover:bg-pink-hover text-pink-text hover:text-pink-deep border border-border hover:border-pink-border text-xs font-semibold shadow-xs flex items-center justify-center space-x-2 transition-all duration-180 active:scale-[0.98] disabled:opacity-50"
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5 text-warning" />
+                    <span>Override Adjudication Decision</span>
+                  </button>
+                </div>
               </div>
             )}
           </div>
+        </>
+      )}
         </div>
       </div>
 
       {/* Decision Override Modal */}
       {isOverrideModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
-            <h3 className="text-base font-bold text-white flex items-center space-x-2">
-              <AlertTriangle className="w-5 h-5 text-amber-400" />
-              <span>Adjudication Decision Override</span>
-            </h3>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in duration-150">
+          <div className="bg-card border border-border rounded-card max-w-md w-full p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between pb-2 border-b border-border">
+              <h3 className="text-sm font-bold text-foreground flex items-center space-x-2">
+                <AlertTriangle className="w-4 h-4 text-status-warning" />
+                <span>Adjudication Decision Override</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setIsOverrideModalOpen(false)}
+                className="text-muted hover:text-foreground text-xs p-1 rounded hover:bg-card-inner transition"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Current Decision Pill */}
+            <div className="p-2.5 bg-sky-pale rounded-btn border border-border flex items-center justify-between text-xs">
+              <span className="text-secondary font-medium">Current Decision:</span>
+              <span className={`px-2.5 py-0.5 rounded-full font-bold font-mono text-[11px] border ${
+                caseData.current_decision === "APPROVE"
+                  ? "bg-status-success/15 text-status-success border-status-success/30"
+                  : caseData.current_decision === "REJECT"
+                  ? "bg-rose-blush text-rose-deep border-rose-med/40"
+                  : "bg-status-warning/15 text-status-warning border-status-warning/30"
+              }`}>
+                {caseData.current_decision || "PENDING"}
+              </span>
+            </div>
+
+            {actionError && (
+              <div className="p-2.5 rounded-btn bg-rose-blush border border-rose-med/30 text-rose-deep text-xs">
+                {actionError}
+              </div>
+            )}
 
             <form onSubmit={handleOverrideSubmit} className="space-y-4">
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
+                <label className="block text-xs font-medium text-foreground mb-1.5">
                   New Binding Decision
                 </label>
+                {/* 1-Click Decision Selector Pills */}
+                <div className="grid grid-cols-3 gap-2 mb-2">
+                  <button
+                    type="button"
+                    onClick={() => setOverrideDecision("APPROVE")}
+                    className={`py-1.5 px-2 rounded-btn text-xs font-semibold border transition-all duration-180 active:scale-[0.98] flex items-center justify-center space-x-1 ${
+                      overrideDecision === "APPROVE"
+                        ? "bg-status-success/15 text-status-success border-status-success/40 font-bold shadow-xs"
+                        : "bg-card text-muted border-border hover:bg-pink-hover hover:text-pink-deep hover:border-pink-border"
+                    }`}
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>APPROVE</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOverrideDecision("REJECT")}
+                    className={`py-1.5 px-2 rounded-btn text-xs font-semibold border transition-all duration-180 active:scale-[0.98] flex items-center justify-center space-x-1 ${
+                      overrideDecision === "REJECT"
+                        ? "bg-rose-blush text-rose-deep border-rose-med/40 font-bold shadow-xs"
+                        : "bg-card text-muted border-border hover:bg-pink-hover hover:text-pink-deep hover:border-pink-border"
+                    }`}
+                  >
+                    <XCircle className="w-3.5 h-3.5" />
+                    <span>REJECT</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOverrideDecision("ESCALATE")}
+                    className={`py-1.5 px-2 rounded-btn text-xs font-semibold border transition-all duration-180 active:scale-[0.98] flex items-center justify-center space-x-1 ${
+                      overrideDecision === "ESCALATE"
+                        ? "bg-status-warning/15 text-status-warning border-status-warning/40 font-bold shadow-xs"
+                        : "bg-card text-muted border-border hover:bg-pink-hover hover:text-pink-deep hover:border-pink-border"
+                    }`}
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    <span>ESCALATE</span>
+                  </button>
+                </div>
                 <select
                   value={overrideDecision}
                   onChange={(e) => setOverrideDecision(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
+                  className="w-full bg-card-inner border border-border rounded-btn px-3 py-2 text-xs text-foreground focus:outline-none focus:border-sky-med focus:ring-1 focus:ring-sky/30 transition-colors"
                 >
-                  <option value="APPROVE">APPROVE</option>
-                  <option value="REJECT">REJECT</option>
-                  <option value="ESCALATE">ESCALATE</option>
+                  <option value="APPROVE">APPROVE (Approve claim for payment)</option>
+                  <option value="REJECT">REJECT (Deny claim eligibility/coverage)</option>
+                  <option value="ESCALATE">ESCALATE (Escalate for specialized committee)</option>
                 </select>
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
+                <label className="block text-xs font-medium text-foreground mb-1">
                   Reason Code
                 </label>
                 <select
                   value={reasonCode}
                   onChange={(e) => setReasonCode(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
+                  className="w-full bg-card-inner border border-border rounded-btn px-3 py-2 text-xs text-foreground focus:outline-none focus:border-sky-med focus:ring-1 focus:ring-sky/30 transition-colors"
                 >
-                  <option value="SUPERVISORY_EXCEPTION">SUPERVISORY_EXCEPTION</option>
-                  <option value="POLICY_PREAUTHORIZATION_GRANTED">POLICY_PREAUTHORIZATION_GRANTED</option>
-                  <option value="SUSPECTED_FRAUD_VERIFIED">SUSPECTED_FRAUD_VERIFIED</option>
-                  <option value="DOCUMENTATION_LEGIBLE_TO_HUMAN">DOCUMENTATION_LEGIBLE_TO_HUMAN</option>
+                  <option value="SUPERVISORY_EXCEPTION">SUPERVISORY_EXCEPTION (Supervisory Override Granted)</option>
+                  <option value="POLICY_PREAUTHORIZATION_GRANTED">POLICY_PREAUTHORIZATION_GRANTED (Pre-Authorization Verified)</option>
+                  <option value="CLINICAL_APPEAL_HONORED">CLINICAL_APPEAL_HONORED (Medical Necessity / Clinical Appeal)</option>
+                  <option value="DOCUMENTATION_LEGIBLE_TO_HUMAN">DOCUMENTATION_LEGIBLE_TO_HUMAN (Document Verified Legible by Human)</option>
+                  <option value="SUSPECTED_FRAUD_VERIFIED">SUSPECTED_FRAUD_VERIFIED (Suspected Fraud Confirmed)</option>
+                  <option value="BILLING_DISPUTE_SETTLED">BILLING_DISPUTE_SETTLED (Fee Schedule / Billing Dispute Settled)</option>
+                  <option value="OTHER">OTHER (Other Justified Supervisory Action)</option>
                 </select>
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Mandatory Remarks (Min 10 characters)
+                <label className="block text-xs font-medium text-foreground mb-1">
+                  Reviewer Feedback & Rationale * (Min 5 characters)
                 </label>
                 <textarea
                   rows={3}
                   value={remarks}
                   onChange={(e) => setRemarks(e.target.value)}
-                  placeholder="Explain why the autonomous decision is being superseded..."
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
+                  placeholder="Provide clinical or policy rationale and detailed feedback explaining why the autonomous agent decision is being overridden..."
+                  className="w-full bg-card-inner border border-border rounded-btn p-3 text-xs text-foreground placeholder-muted focus:outline-none focus:border-sky-med focus:ring-1 focus:ring-sky/30 transition-colors"
+                  required
                 />
               </div>
 
-              <div className="flex items-center justify-end space-x-3 pt-3 border-t border-slate-800">
+              <div className="flex items-center justify-end space-x-2.5 pt-3 border-t border-border">
                 <button
                   type="button"
                   onClick={() => setIsOverrideModalOpen(false)}
-                  className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium"
+                  className="px-3.5 py-1.5 rounded-btn bg-card hover:bg-pink-hover text-secondary hover:text-pink-deep border border-border hover:border-pink-border text-xs font-medium transition-all duration-180 active:scale-[0.98]"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={submittingAction}
-                  className="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-slate-950 text-xs font-bold"
+                  className="px-4 py-1.5 rounded-btn bg-[#397FA9] hover:bg-[#2C6688] text-white text-xs font-semibold shadow-xs transition-all duration-180 active:scale-[0.98] disabled:opacity-50"
                 >
-                  {submittingAction ? "Submitting..." : "Submit Override"}
+                  {submittingAction ? "Submitting..." : "Apply Authoritative Override"}
                 </button>
               </div>
             </form>
@@ -1266,16 +1574,16 @@ export default function CaseDetailPage() {
 
       {/* Request Information (RFI) Modal */}
       {isRfiModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
-            <h3 className="text-base font-bold text-white flex items-center space-x-2">
-              <Send className="w-5 h-5 text-cyan-400" />
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in duration-150">
+          <div className="bg-card border border-border rounded-card max-w-md w-full p-6 space-y-4 shadow-2xl">
+            <h3 className="text-sm font-bold text-foreground flex items-center space-x-2">
+              <Send className="w-4 h-4 text-sky-deep" />
               <span>Request Information (RFI)</span>
             </h3>
 
             <form onSubmit={handleRfiSubmit} className="space-y-4">
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
+                <label className="block text-xs font-medium text-foreground mb-1">
                   Missing Document Details & Instructions
                 </label>
                 <textarea
@@ -1283,22 +1591,22 @@ export default function CaseDetailPage() {
                   value={rfiRemarks}
                   onChange={(e) => setRfiRemarks(e.target.value)}
                   placeholder="Specify required identity proof or medical bill amendments..."
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
+                  className="w-full bg-card-inner border border-border rounded-btn p-3 text-xs text-foreground placeholder-muted focus:outline-none focus:border-sky-med focus:ring-1 focus:ring-sky/30 transition-colors"
                 />
               </div>
 
-              <div className="flex items-center justify-end space-x-3 pt-3 border-t border-slate-800">
+              <div className="flex items-center justify-end space-x-2.5 pt-3 border-t border-border">
                 <button
                   type="button"
                   onClick={() => setIsRfiModalOpen(false)}
-                  className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium"
+                  className="px-3.5 py-1.5 rounded-btn bg-card hover:bg-pink-hover text-secondary hover:text-pink-deep border border-border hover:border-pink-border text-xs font-medium transition-all duration-180 active:scale-[0.98]"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={submittingAction}
-                  className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold"
+                  className="px-4 py-1.5 rounded-btn bg-[#397FA9] hover:bg-[#2C6688] text-white text-xs font-semibold shadow-xs transition-all duration-180 active:scale-[0.98] disabled:opacity-50"
                 >
                   {submittingAction ? "Submitting..." : "Send RFI"}
                 </button>
@@ -1310,4 +1618,3 @@ export default function CaseDetailPage() {
     </div>
   );
 }
-

@@ -48,6 +48,18 @@ class CaseListResponse(BaseModel):
     items: list[CaseListItem]
 
 
+class HumanReviewItem(BaseModel):
+    """Authoritative human reviewer action and feedback audit entry."""
+    id: str
+    reviewer_id: str
+    action: str  # OVERRIDE, CONFIRM, REQUEST_INFO
+    new_decision: str | None = None
+    reason_code: str
+    remarks: str
+    expected_case_version: int
+    created_at: datetime
+
+
 class CaseDetailResponse(BaseModel):
     """Detailed case record view (Spec 08 § 2.3)."""
     case_id: str
@@ -65,6 +77,8 @@ class CaseDetailResponse(BaseModel):
     version: int = 1
     document_count: int = 0
     documents: list[DocumentUploadedInfo] = Field(default_factory=list)
+    human_reviews: list[HumanReviewItem] = Field(default_factory=list)
+    latest_human_review: HumanReviewItem | None = None
     created_at: datetime
     updated_at: datetime
 

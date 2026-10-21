@@ -2,14 +2,214 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ==========================================================================
+   THEME DESIGN TOKENS (SINGLE SOURCE OF TRUTH)
+   Healthcare-Fintech SaaS: Linear/Stripe/Vercel-inspired Enterprise Design
+   ========================================================================== */
+
 :root {
-  --background: #0f172a;
-  --foreground: #f8fafc;
+  /* ==========================================================================
+     CASHLESS HEALTHCARE MEDICAL PALETTE (EXTRACTED FROM CANONICAL BANNER)
+     Vibrant Medical Scrub Blue (#2769E6), Coral Red (#E8505B), Ice Blue & Pure White
+     ========================================================================== */
+
+  /* Main Workspace & Card Surfaces */
+  --page-bg: #F4F8FB;
+  --card-bg: #FFFFFF;
+  --inner-card-bg: #EDF5FA;
+  --card-hover: #FCEAF0;
+  --btn-hover: #FCEAF0;
+  --border-color: #E4EAF0;
+
+  /* Primary Typography */
+  --text-color: #29394B;
+  --secondary-text: #718096;
+  --muted-text: #8E9CAE;
+
+  /* Primary Sky Blue & Deep Medical Blue */
+  --accent-color: #78BCE5;
+  --accent-sky: #78BCE5;
+  --accent-soft: #EDF5FA;
+  --accent-pale: #F4F8FB;
+  --accent-deep: #397FA9;
+  --accent-text: #FFFFFF;
+  --accent-bg: #EDF5FA;
+  --accent-hover: #397FA9;
+
+  /* Soft Pink Hover & Blush Accents (Interactive Requirement) */
+  --pink-hover: #FCEAF0;
+  --pink-blush: #F7DCE5;
+  --pink-border: #E8C1CF;
+  --pink-accent: #D989A1;
+  --pink-text: #A94E70;
+  --pink-deep: #8E3554;
+
+  --rose-blush: #F7DCE5;
+  --rose-med: #D989A1;
+  --rose-deep: #A94E70;
+
+  /* Semantic Status Tokens */
+  --success-color: #2E8B57;
+  --success-bg: #EAF5EF;
+  --success-border: #BCE3CE;
+
+  --warning-color: #C07D1E;
+  --warning-bg: #FBF3E5;
+  --warning-border: #F7DFB3;
+
+  --danger-color: #C24B5D;
+  --danger-bg: #F9EAED;
+  --danger-border: #F3C3CC;
+
+  --info-color: #397FA9;
+  --info-bg: #EDF5FA;
+  --info-border: #D0E4F2;
+
+  --radius-card: 12px;
+  --radius-btn: 8px;
 }
+
+.dark {
+  /* Calm, Soft Slate-Charcoal Medical Dark (Restrained, never harsh neon navy) */
+  --page-bg: #121822;
+  --card-bg: #1A222F;
+  --inner-card-bg: #202B3B;
+  --card-hover: #253346;
+  --btn-hover: #263549;
+  --border-color: rgba(255, 255, 255, 0.08);
+
+  --text-color: #F1F5F9;
+  --secondary-text: #94A3B8;
+  --muted-text: #64748B;
+
+  --accent-color: #4BA2DD;
+  --accent-sky: #78BCE5;
+  --accent-soft: rgba(120, 188, 229, 0.14);
+  --accent-pale: #1A2433;
+  --accent-deep: #90CDF4;
+  --accent-text: #FFFFFF;
+  --accent-bg: rgba(120, 188, 229, 0.14);
+  --accent-hover: #5EAEE8;
+
+  /* Interactive Pink & Rose in Dark Mode (Soft Glow, Never White Outlines) */
+  --pink-hover: rgba(217, 137, 161, 0.12);
+  --pink-blush: rgba(217, 137, 161, 0.16);
+  --pink-border: rgba(217, 137, 161, 0.32);
+  --pink-accent: #E598AE;
+  --pink-text: #F7A8BF;
+  --pink-deep: #FCA5A5;
+
+  --rose-blush: rgba(217, 137, 161, 0.14);
+  --rose-med: #E598AE;
+  --rose-deep: #FCA5A5;
+
+  --success-color: #34D399;
+  --success-bg: rgba(52, 211, 153, 0.12);
+  --success-border: rgba(52, 211, 153, 0.22);
+
+  --warning-color: #FBBF24;
+  --warning-bg: rgba(251, 191, 36, 0.12);
+  --warning-border: rgba(251, 191, 36, 0.22);
+
+  --danger-color: #F87171;
+  --danger-bg: rgba(248, 113, 113, 0.14);
+  --danger-border: rgba(248, 113, 113, 0.24);
+
+  --info-color: #60A5FA;
+  --info-bg: rgba(96, 165, 250, 0.14);
+  --info-border: rgba(96, 165, 250, 0.22);
+
+  --radius-card: 12px;
+  --radius-btn: 8px;
+}
+
+/* ==========================================================================
+   GLOBAL BASE STYLING
+   ========================================================================== */
 
 body {
-  color: var(--foreground);
-  background: var(--background);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: var(--text-color);
+  background-color: var(--page-bg);
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  transition: background-color 150ms ease, color 150ms ease;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
+/* Tabular Numerals for Financial Data & KPIs */
+.tabular-nums,
+.font-mono,
+[data-tabular="true"] {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* 150ms-200ms Smooth Microinteractions */
+button,
+a,
+input,
+select,
+textarea,
+[role="button"] {
+  transition: color 150ms ease, background-color 150ms ease, border-color 150ms ease, opacity 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+}
+
+/* Accessible Focus Indicators */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--page-bg), 0 0 0 4px var(--accent-color);
+}
+
+/* Disabled State */
+button:disabled,
+input:disabled,
+select:disabled,
+textarea:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Respect Reduced Motion */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Sleek Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.22);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.42);
+}
+
+/* Dark Mode Border Harmony: Prevent Stark White or Harsh Outlines */
+.dark input,
+.dark select,
+.dark textarea {
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.dark input:focus,
+.dark select:focus,
+.dark textarea:focus {
+  border-color: var(--accent-color);
+}

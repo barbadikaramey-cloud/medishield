@@ -43,6 +43,38 @@ def _enum_str(val: Any, default: str = "N/A") -> str:
     return str(val.value if hasattr(val, "value") else val)
 
 
+def _safe_unwrap_value(val: Any, default: Any = "") -> Any:
+    """Recursively unwraps ProvenanceValue objects or serialized {'value': ...} dicts to raw scalar values."""
+    if val is None:
+        return default
+    if hasattr(val, "value"):
+        return _safe_unwrap_value(val.value, default)
+    if isinstance(val, dict) and "value" in val:
+        return _safe_unwrap_value(val["value"], default)
+    return val
+
+
+def _format_tamper_findings(signals: list[Any]) -> list[str]:
+    """Groups tamper signals by source document as short bullets (document -> inconsistency)."""
+    by_doc: dict[str, list[Any]] = {}
+    for sig in signals:
+        if _safe_get(sig, "signal_type") == "FORENSIC_RETRIEVAL_FAILED":
+            continue
+        doc = _safe_get(sig, "document_name") or _safe_get(sig, "document_id") or "Document not identified"
+        by_doc.setdefault(str(doc), []).append(sig)
+
+    out: list[str] = []
+    for doc, doc_signals in by_doc.items():
+        out.append(f"  - 📄 **{doc}**")
+        for sig in doc_signals:
+            kind = str(_safe_get(sig, "signal_type", "SIGNAL")).replace("_", " ").title()
+            sev = _safe_get(sig, "severity", "")
+            conf = float(_safe_get(sig, "confidence", 0.0) or 0.0)
+            desc = _safe_get(sig, "description", "")
+            out.append(f"    - {kind} ({sev}, {conf * 100:.0f}%): {desc}")
+    return out
+
+
 def generate_deterministic_explanation(
     context: DecisionInputContext,
     decision_output: OrchestratorOutput,
@@ -107,11 +139,16 @@ def generate_deterministic_explanation(
         lines.append(f"- **Member DB Match:** {'✅ Verified in master database' if db_match else '❌ Unmatched or identity mismatch'}")
         mem_id = _safe_get(kyc, "member_id")
         if mem_id is not None:
-            m_val = mem_id.value if hasattr(mem_id, "value") else str(mem_id)
+            m_val = _safe_unwrap_value(mem_id)
             lines.append(f"- **Resolved Member ID:** `{m_val}`")
-        if context.security_tamper_score > 0:
-            lines.append(f"- **Document Integrity / Tamper Score:** `{context.security_tamper_score * 100:.1f}%` (Threshold: 50%)")
         flags = _safe_get(kyc, "flags", [])
+        tamper_lines = _format_tamper_findings(_safe_get(kyc, "tamper_signals", []) or [])
+        if tamper_lines:
+            lines.append(f"- **Document Integrity / Tamper Score:** `{context.security_tamper_score * 100:.1f}%`")
+            lines.append("- **⚠️ Tamper Flag — Flagged Documents:**")
+            lines.extend(tamper_lines)
+        elif context.security_tamper_score > 0:
+            lines.append(f"- **Document Integrity / Tamper Score:** `{context.security_tamper_score * 100:.1f}%`")
         if flags:
             lines.append(f"- **Identity Flags:** {', '.join(flags)}")
         reasoning = _safe_get(kyc, "reasoning_summary")
@@ -131,37 +168,58 @@ def generate_deterministic_explanation(
         cl_v_str = cl_verdict.value if hasattr(cl_verdict, "value") else str(cl_verdict or "PASS")
         cl_conf = float(_safe_get(claims, "confidence", 1.0) or 1.0)
         lines.append(f"- **Claims Verdict:** `{cl_v_str}` (Confidence: {cl_conf * 100:.1f}%)")
+        service_lines = _safe_get(claims, "service_lines") or _safe_get(claims, "line_items") or []
+        first_line_sym = _safe_get(service_lines[0], "currency_symbol") if service_lines else None
+        curr_sym = _safe_get(claims, "currency_symbol") or first_line_sym
+        if not curr_sym:
+            curr_code = _safe_get(claims, "currency")
+            curr_sym = "₹" if curr_code == "INR" else "$"
         claim_amt = _safe_get(claims, "claim_amount")
         if claim_amt is not None:
-            claim_val = claim_amt.value if hasattr(claim_amt, "value") else claim_amt
+            claim_val = _safe_unwrap_value(claim_amt)
             try:
-                lines.append(f"- **Header Claim Total:** `${float(claim_val):,.2f}`")
+                lines.append(f"- **Header Claim Total:** `{curr_sym}{float(claim_val):,.2f}`")
             except (ValueError, TypeError):
-                lines.append(f"- **Header Claim Total:** `${claim_val}`")
-        math_valid = _safe_get(claims, "line_items_sum_valid", True)
-        lines.append(f"- **Line Items Arithmetic:** {'✅ Exact match (line totals equal header charge)' if math_valid else '❌ Discrepancy detected between line sums and declared total'}")
-        service_lines = _safe_get(claims, "service_lines") or _safe_get(claims, "line_items") or []
+                lines.append(f"- **Header Claim Total:** `{curr_sym}{claim_val}`")
+        math_valid = _safe_get(claims, "line_items_sum_valid")
+        if math_valid is None:
+            lines.append("- **Line Items Arithmetic:** Not available")
+        else:
+            lines.append(f"- **Line Items Arithmetic:** {'✅ Exact match (line totals equal header charge)' if math_valid else '❌ Discrepancy detected between line sums and declared total'}")
         if service_lines:
             lines.append(f"- **Itemized Service Lines:** {len(service_lines)} lines parsed")
             for idx, item in enumerate(service_lines[:5], 1):
-                cpt = _safe_get(item, "hcpcs") or _safe_get(item, "cpt_code", "UNKNOWN")
-                cpt_val = cpt.value if hasattr(cpt, "value") else str(cpt)
+                cpt = _safe_get(item, "hcpcs") or _safe_get(item, "cpt_code")
+                cpt_val = _safe_unwrap_value(cpt, "")
+                rev = _safe_get(item, "rev_code")
+                rev_val = _safe_unwrap_value(rev, "")
                 amt = _safe_get(item, "amount") or _safe_get(item, "total_charge", 0.0)
-                amt_val = amt.value if hasattr(amt, "value") else amt
+                amt_val = _safe_unwrap_value(amt, 0.0)
+                line_sym = _safe_get(item, "currency_symbol") or curr_sym
+
+                if cpt_val and str(cpt_val).strip() not in ("", "None", "UNKNOWN", "null"):
+                    code_lbl = f"CPT/HCPCS `{cpt_val}`"
+                elif rev_val and str(rev_val).strip() not in ("", "None", "UNKNOWN", "null"):
+                    code_lbl = f"Rev Code `{rev_val}`"
+                else:
+                    code_lbl = "Code `UNKNOWN`"
+
                 try:
-                    lines.append(f"  - Line {idx}: CPT/HCPCS `{cpt_val}` | Charge: `${float(amt_val):,.2f}`")
+                    lines.append(f"  - Line {idx}: {code_lbl} | Charge: `{line_sym}{float(amt_val):,.2f}`")
                 except (ValueError, TypeError):
-                    lines.append(f"  - Line {idx}: CPT/HCPCS `{cpt_val}` | Charge: `${amt_val}`")
+                    lines.append(f"  - Line {idx}: {code_lbl} | Charge: `{line_sym}{amt_val}`")
             if len(service_lines) > 5:
                 lines.append(f"  - *(and {len(service_lines) - 5} additional line items)*")
         cpt_codes = _safe_get(claims, "cpt_codes", [])
         if cpt_codes:
-            cpt_strs = [c.value if hasattr(c, "value") else str(c) for c in cpt_codes]
-            lines.append(f"- **Extracted CPT / HCPCS Codes:** {', '.join(cpt_strs)}")
+            cpt_strs = [str(_safe_unwrap_value(c)) for c in cpt_codes if _safe_unwrap_value(c)]
+            if cpt_strs:
+                lines.append(f"- **Extracted CPT / HCPCS Codes:** {', '.join(cpt_strs)}")
         icd10_codes = _safe_get(claims, "icd10_codes", [])
         if icd10_codes:
-            icd_strs = [c.value if hasattr(c, "value") else str(c) for c in icd10_codes]
-            lines.append(f"- **Diagnosis Codes (ICD-10):** {', '.join(icd_strs)}")
+            icd_strs = [str(_safe_unwrap_value(c)) for c in icd10_codes if _safe_unwrap_value(c)]
+            if icd_strs:
+                lines.append(f"- **Diagnosis Codes (ICD-10):** {', '.join(icd_strs)}")
         val_errors = _safe_get(claims, "validation_errors", [])
         if val_errors:
             lines.append(f"- **Validation Warnings:** {'; '.join(val_errors)}")
@@ -179,18 +237,23 @@ def generate_deterministic_explanation(
         p_v_str = p_verdict.value if hasattr(p_verdict, "value") else str(p_verdict or "PASS")
         p_conf = float(_safe_get(pol, "confidence", 1.0) or 1.0)
         lines.append(f"- **Policy Verdict:** `{p_v_str}` (Confidence: {p_conf * 100:.1f}%)")
-        cov_pct = float(_safe_get(pol, "coverage_percentage", 100.0) or 100.0)
-        lines.append(f"- **Coverage Percentage:** `{cov_pct:.1f}%`")
+        cov_pct = _safe_get(pol, "coverage_percentage")
+        if cov_pct is None:
+            lines.append("- **Coverage Percentage:** Not available")
+        else:
+            lines.append(f"- **Coverage Percentage:** `{float(cov_pct):.1f}%`")
         policy_id = _safe_get(pol, "policy_id")
         if policy_id:
             lines.append(f"- **Active Policy:** `{policy_id}`")
         effective_date_valid = _safe_get(pol, "service_date_within_effective_period")
         if effective_date_valid is None:
-            effective_date_valid = _safe_get(pol, "effective_on_service_date", True)
-        if effective_date_valid:
+            effective_date_valid = _safe_get(pol, "effective_on_service_date")
+        if effective_date_valid is True:
             lines.append("- **Service Date Validity:** ✅ Date of service falls within active enrollment window")
-        else:
+        elif effective_date_valid is False:
             lines.append("- **Service Date Validity:** ❌ Date of service falls outside policy enrollment window")
+        else:
+            lines.append("- **Service Date Validity:** Not available")
         if _safe_get(pol, "exclusion_clause_verified", False):
             ex_id = _safe_get(pol, "exclusion_clause_id") or "Applicable Exclusion"
             lines.append(f"- **Exclusion Notice:** ⚠️ Confirmed policy exclusion: {ex_id}")
@@ -220,8 +283,11 @@ def generate_deterministic_explanation(
         fr = context.fraud_output
         risk_level = _safe_get(fr, "risk_level")
         r_str = risk_level.value if hasattr(risk_level, "value") else str(risk_level or "LOW")
-        fr_score = float(_safe_get(fr, "fraud_score", 0.0) or 0.0)
-        lines.append(f"- **Fraud Risk Tier:** `{r_str}` | **Deterministic Fraud Score:** `{fr_score * 100:.1f}%`")
+        review_required = bool(_safe_get(fr, "fraud_review_required", False))
+        lines.append(
+            f"- **Fraud Review Required:** `{'YES' if review_required else 'NO'}` "
+            f"| **Status:** `{r_str}`"
+        )
         fr_verdict = _safe_get(fr, "verdict")
         fr_v_str = fr_verdict.value if hasattr(fr_verdict, "value") else str(fr_verdict or "PASS")
         fr_conf = float(_safe_get(fr, "confidence", 1.0) or 1.0)
@@ -230,18 +296,17 @@ def generate_deterministic_explanation(
         if anomalies:
             lines.append(f"- **Detected Anomalies:** {', '.join(anomalies)}")
         else:
-            lines.append("- **Detected Anomalies:** None (Standard billing patterns verified)")
-        feature_scores: dict[str, float] = {}
+            lines.append("- **Detected Anomalies:** None reported by the fraud assessment")
+        detected_features: list[str] = []
         features = _safe_get(fr, "features")
         if features:
-            feature_scores = {f.feature_name: f.normalized_score for f in features if hasattr(f, "feature_name")}
-        elif _safe_get(fr, "feature_scores"):
-            feature_scores = _safe_get(fr, "feature_scores")
-        if feature_scores:
-            top_features = sorted(feature_scores.items(), key=lambda x: x[1], reverse=True)[:3]
-            feat_str = ", ".join(f"{k}: {v:.2f}" for k, v in top_features if v > 0)
-            if feat_str:
-                lines.append(f"- **Key Contributing Factors:** {feat_str}")
+            detected_features = [
+                f.feature_name
+                for f in features
+                if getattr(f, "detected", False) and hasattr(f, "feature_name")
+            ]
+        if detected_features:
+            lines.append(f"- **Detected Factors:** {', '.join(detected_features)}")
     else:
         lines.append("- *Fraud detection evaluation not available.*")
 
@@ -255,11 +320,15 @@ def generate_deterministic_explanation(
         is_consistent = _safe_get(cr, "is_consistent", True)
         lines.append(f"- **Overall Consistency:** {'✅ Cross-document integrity verified' if is_consistent else '⚠️ Inconsistency or missing attestation detected'}")
         
-        doc_sig = _safe_get(cr, "doctor_signature_verified", True)
+        doc_sig = _safe_get(cr, "doctor_signature_verified", False)
         lines.append(f"- **Doctor Signature / Attestation:** {'✅ Verified on clinical record' if doc_sig else '❌ Missing or unverified on clinical record'}")
 
         pat_sig = _safe_get(cr, "patient_signature_verified", True)
-        lines.append(f"- **Patient Signature / Assignment:** {'✅ Verified on claim documentation' if pat_sig else '❌ Missing patient signature or assignment of benefits'}")
+        lines.append(f"- **Patient Signature / Assignment:** {'✅ Verified or not required on claim documentation' if pat_sig else '❌ Missing patient signature or assignment of benefits'}")
+
+        off_sig = _safe_get(cr, "officer_signature_verified", True)
+        if not off_sig:
+            lines.append("- **Authorized Officer Signature:** ❌ Missing authorized officer signature on policy amendment document")
 
         npi_ver = _safe_get(cr, "npi_verified", True)
         lines.append(f"- **Rendering Provider NPI:** {'✅ Verified valid 10-digit NPI' if npi_ver else '❌ Missing or invalid rendering provider NPI'}")
@@ -270,7 +339,8 @@ def generate_deterministic_explanation(
         proc_ver = _safe_get(cr, "procedure_codes_verified", True)
         if not proc_ver:
             uncoded_amt = float(_safe_get(cr, "unvalidated_charges_total", 0.0) or 0.0)
-            lines.append(f"- **Procedure Code Validation:** ❌ Unvalidated line charges (${uncoded_amt:,.2f}) lack authoritative CPT/HCPCS procedure code")
+            c_sym = _safe_get(getattr(context, "claims_output", None), "currency_symbol") or "$"
+            lines.append(f"- **Procedure Code Validation:** ❌ Unvalidated line charges ({c_sym}{uncoded_amt:,.2f}) lack authoritative CPT/HCPCS procedure code")
         else:
             lines.append("- **Procedure Code Validation:** ✅ All billed line charges mapped to recognized procedure codes")
 
@@ -315,47 +385,22 @@ def generate_deterministic_explanation(
         line_assessments = _safe_get(clin, "line_assessments", []) or []
         if line_assessments:
             lines.append("- **Itemized Clinical Indication & Evidence Grounding:**")
+            line_reasons: set[str] = set()
             for la in line_assessments:
                 l_num = _safe_get(la, "line_number", 1)
                 code = _safe_get(la, "service_code", "UNKNOWN")
-                modality = _safe_get(la, "modality", "SERVICE")
-                mod_str = modality.value if hasattr(modality, "value") else str(modality)
                 amt = float(_safe_get(la, "billed_amount", 0.0) or 0.0)
-                p_icd = _safe_get(la, "primary_icd10_codes", []) or []
-                s_icd = _safe_get(la, "secondary_icd10_codes", []) or []
-                p_status = _safe_get(la, "performance_status")
-                p_stat_str = p_status.value if hasattr(p_status, "value") else str(p_status or "")
-                ind_status = _safe_get(la, "indication_status")
-                ind_stat_str = ind_status.value if hasattr(ind_status, "value") else str(ind_status or "")
-                nec_status = _safe_get(la, "necessity_status")
-                nec_stat_str = nec_status.value if hasattr(nec_status, "value") else str(nec_status or "")
-
-                icd_desc = f"Primary ICD: {', '.join(p_icd)}" if p_icd else "No primary ICD mapped"
-                if s_icd:
-                    icd_desc += f" | Secondary ICD: {', '.join(s_icd)}"
-
-                finding = _safe_get(la, "clinical_finding_summary", "")
-
-                gc = _safe_get(la, "guideline_citation")
-                guideline_str = ""
-                if gc:
-                    g_title = _safe_get(gc, "guideline_title") or _safe_get(gc, "guideline_id") or "Standard Clinical Guideline"
-                    g_id = _safe_get(gc, "guideline_id", "")
-                    guideline_str = f" [Guideline: {g_title} ({g_id})]" if g_id else f" [Guideline: {g_title}]"
-
+                finding = _safe_get(la, "discrepancy_description") or _safe_get(la, "clinical_finding_summary", "")
                 l_verdict = _safe_get(la, "line_verdict")
                 l_v_str = l_verdict.value if hasattr(l_verdict, "value") else str(l_verdict or "PASS")
+                if finding and l_v_str != "PASS":
+                    line_reasons.add(str(finding))
                 badge = "✅" if l_v_str == "PASS" else "⚠️" if l_v_str in ("INDETERMINATE", "UNAVAILABLE") else "❌"
-
+                curr_sym = _safe_get(la, "currency_symbol") or "$"
                 lines.append(
-                    f"  - {badge} **Line {l_num} (CPT/Code `{code}` &bull; {mod_str} &bull; ${amt:,.2f}):** "
-                    f"{icd_desc}. Performance: `{p_stat_str}` | Indication: `{ind_stat_str}` | Necessity: `{nec_stat_str}`{guideline_str}."
+                    f"  - {badge} **Line {l_num} — {code} ({curr_sym}{amt:,.2f}):** "
+                    f"{finding or f'Clinical assessment {l_v_str.lower()}.'}"
                 )
-                if finding:
-                    lines.append(f"    *Clinical Grounding:* {finding}")
-                desc = _safe_get(la, "discrepancy_description")
-                if desc:
-                    lines.append(f"    *Discrepancy Note:* ⚠️ {desc}")
 
         # Inpatient Bed-Day Reconciliation
         bdr = _safe_get(clin, "bed_day_reconciliation")
@@ -389,20 +434,13 @@ def generate_deterministic_explanation(
 
         # Reviewer Flags & Discrepancies
         discrepancies = _safe_get(clin, "blocking_discrepancies", [])
-        all_discs = list(discrepancies)
-        for la in line_assessments:
-            desc = _safe_get(la, "discrepancy_description")
-            if desc and desc not in all_discs:
-                all_discs.append(desc)
+        all_discs = list(dict.fromkeys(str(item) for item in discrepancies if str(item) not in line_reasons))
 
         if all_discs:
             lines.append("- **Clinical Discrepancies & Reviewer Flags:**")
             for d in all_discs:
                 lines.append(f"  - ⚠️ {d}")
 
-        c_summary = _safe_get(clin, "clinical_summary")
-        if c_summary:
-            lines.append(f"- **Clinical Assessment Summary:** {c_summary}")
     else:
         lines.append("- *Clinical alignment specialist assessment not available.*")
 
@@ -438,9 +476,11 @@ def generate_decision_explanation(
 ) -> str:
     """
     Generates an enriched clinical and policy explanation for the decision.
-    Tries the Groq LLM client if configured and available; gracefully falls back
-    to deterministic synthesis upon failure or offline environment (Rule 11, Rule 14).
+    Returns deterministic synthesis so every displayed assertion stays grounded
+    in specialist findings and cannot be invented by an LLM.
     """
+    return generate_deterministic_explanation(context, decision_output)
+
     client = llm_client or default_groq_client
     if not client or not client.is_available():
         logger.info("Groq LLM is not available; generating deterministic decision explanation.")
@@ -591,8 +631,9 @@ def generate_decision_explanation(
         },
         "consistency": {
             "is_consistent": bool(_safe_get(cr_out, "is_consistent", True)),
-            "doctor_signature_verified": bool(_safe_get(cr_out, "doctor_signature_verified", True)),
+            "doctor_signature_verified": bool(_safe_get(cr_out, "doctor_signature_verified", False)),
             "patient_signature_verified": bool(_safe_get(cr_out, "patient_signature_verified", True)),
+            "officer_signature_verified": bool(_safe_get(cr_out, "officer_signature_verified", True)),
             "npi_verified": bool(_safe_get(cr_out, "npi_verified", True)),
             "prior_authorization_verified": bool(_safe_get(cr_out, "prior_authorization_verified", True)),
             "specific_escalation_reasons": list(_safe_get(cr_out, "specific_escalation_reasons", []) or []),
@@ -644,7 +685,12 @@ def generate_decision_explanation(
         "   - #### 5. Cross-Document Consistency & Regulatory Attestation (Doctor/Patient signatures, NPI, PA, dates)\n"
         "   - #### 6. Clinical Alignment & Medical Necessity\n"
         "   - #### 7. Actionable Guidance for Human Reviewer / Adjuster\n"
-        "4. EXPLICIT CLINICAL ALIGNMENT DIRECTIVES FOR SECTION 6:\n"
+        "4. STRICT REGULATORY ATTESTATION DIRECTIVES FOR SECTION 5:\n"
+        "   - Accurately report the verified/unverified status of Doctor Attestation and Patient Signature from the consistency snapshot.\n"
+        "   - If 'doctor_signature_verified' is false, you MUST explicitly state that the physician signature or clinical attestation is missing, blank, or unverified.\n"
+        "   - If 'patient_signature_verified' is false, you MUST explicitly state that the patient signature or assignment of benefits is missing, blank, or unverified.\n"
+        "   - NEVER state that doctor or patient signatures are verified or present if the consistency snapshot reports them as false.\n"
+        "5. EXPLICIT CLINICAL ALIGNMENT DIRECTIVES FOR SECTION 6:\n"
         "   - DO NOT merely state high-level numbers, scores, or counts (e.g. avoid '3 lines evaluated, 100% score').\n"
         "   - Provide comprehensive, medical-grade clinical rationale for why the procedures were or were not justified:\n"
         "     * Medical Indication Rationale: For each billed procedure code (CPT/HCPCS), explain how the primary diagnosis (chief complaint) and any secondary diagnoses (comorbidities or inpatient complications) establish medical indication. Explain the underlying clinical rationale connecting the diagnosis to the surgical, diagnostic, or medical service.\n"

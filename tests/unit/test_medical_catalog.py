@@ -276,6 +276,19 @@ def test_seed_medical_codes_populates_catalog():
     assert rev_details is not None
     assert rev_details.coding_system == CodingSystem.REV_CODE
 
+    # Diagnosis codes validate; superseded/non-billable codes must not.
+    assert sql_repo.is_valid_code("K35.80", CodingSystem.ICD10_CM) is True
+    assert sql_repo.is_valid_code("S52.501A", CodingSystem.ICD10_CM) is True
+    assert sql_repo.is_valid_code("59400", CodingSystem.CPT) is True
+    for code in ("M54.50", "M54.51", "M54.59", "K21.00", "K21.01"):
+        assert sql_repo.is_valid_code(code, CodingSystem.ICD10_CM) is True
+    assert sql_repo.is_valid_code("K21.0", CodingSystem.ICD10_CM) is False
+    assert sql_repo.is_valid_code("M54.5", CodingSystem.ICD10_CM) is False
+    assert sql_repo.is_valid_code("18828", CodingSystem.CPT) is False
+
+    # Seeding is idempotent.
+    assert seed_medical_codes(session) == 0
+
     session.close()
 
 

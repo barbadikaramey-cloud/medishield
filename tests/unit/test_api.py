@@ -11,7 +11,6 @@ from fastapi.testclient import TestClient
 
 from medishield.api.deps import (
     ROLE_ADMIN,
-    ROLE_MANAGER,
     ROLE_REVIEWER,
     get_db,
     get_storage,
@@ -27,6 +26,7 @@ from medishield.db.enums import (
 from medishield.db.models import (
     AuditEvent,
     Case,
+    Decision,
     Document,
     HumanReview,
     Policy,
@@ -82,6 +82,7 @@ class FakeDBSession:
         self.documents: list[Document] = []
         self.review_locks: list[ReviewLock] = []
         self.human_reviews: list[HumanReview] = []
+        self.decisions: list[Decision] = []
         self.policies: list[Policy] = []
         self.policy_versions: list[PolicyVersion] = []
         self.audit_events: list[AuditEvent] = []
@@ -95,6 +96,8 @@ class FakeDBSession:
             return FakeQuery(self.review_locks)
         if model_class is HumanReview:
             return FakeQuery(self.human_reviews)
+        if model_class is Decision:
+            return FakeQuery(self.decisions)
         if model_class is Policy:
             return FakeQuery(self.policies)
         if model_class is PolicyVersion:
@@ -109,6 +112,10 @@ class FakeDBSession:
                 obj.id = uuid.uuid4()
             if not hasattr(obj, "documents") or obj.documents is None:
                 obj.documents = []
+            if not hasattr(obj, "human_reviews") or obj.human_reviews is None:
+                obj.human_reviews = []
+            if not hasattr(obj, "decisions") or obj.decisions is None:
+                obj.decisions = []
             if obj not in self.cases:
                 self.cases.append(obj)
         elif isinstance(obj, Document):
@@ -126,6 +133,16 @@ class FakeDBSession:
             if not getattr(obj, "id", None):
                 obj.id = uuid.uuid4()
             self.human_reviews.append(obj)
+            for c in self.cases:
+                if c.id == obj.case_id and obj not in c.human_reviews:
+                    c.human_reviews.append(obj)
+        elif isinstance(obj, Decision):
+            if not getattr(obj, "id", None):
+                obj.id = uuid.uuid4()
+            self.decisions.append(obj)
+            for c in self.cases:
+                if c.id == obj.case_id and obj not in c.decisions:
+                    c.decisions.append(obj)
         elif isinstance(obj, Policy):
             if not getattr(obj, "id", None):
                 obj.id = uuid.uuid4()
@@ -385,6 +402,111 @@ def test_human_review_override_optimistic_concurrency(client: TestClient, fake_d
     assert data["case_version"] == 3
     assert case.workflow_state == WorkflowState.COMPLETED
     assert case.current_decision == BusinessDecision.APPROVE
+    assert case.is_complete is True
+
+    # 3. Verify HumanReview recorded in DB
+    assert len(fake_db.human_reviews) == 1
+    hr = fake_db.human_reviews[0]
+    assert hr.action == "OVERRIDE"
+    assert hr.reason_code == "CLINICAL_NECESSITY_VERIFIED"
+    assert hr.remarks == "Attending physician letter confirms inpatient medical necessity."
+    assert hr.reviewer_id == "adj-alice"
+
+    # 4. Verify authoritative Decision record added with ActorType.HUMAN
+    assert len(fake_db.decisions) == 1
+    dec = fake_db.decisions[0]
+    assert dec.actor_type == ActorType.HUMAN
+    assert dec.decision == BusinessDecision.APPROVE
+    assert dec.rule_id_matched == "HUMAN_OVERRIDE_CLINICAL_NECESSITY_VERIFIED"
+    assert dec.is_active is True
+
+    # 5. Verify chained AuditEvent recorded
+    assert any(e.event_type == "HUMAN_OVERRIDE" and e.actor_type == ActorType.HUMAN for e in fake_db.audit_events)
+
+    # 6. Verify get_case_detail exposes latest_human_review with feedback
+    res_detail = client.get("/api/v1/cases/CASE-OVERRIDE-01", headers={"X-User-Role": ROLE_REVIEWER})
+    assert res_detail.status_code == 200
+    detail_data = res_detail.json()
+    assert detail_data["latest_human_review"] is not None
+    assert detail_data["latest_human_review"]["remarks"] == "Attending physician letter confirms inpatient medical necessity."
+    assert detail_data["latest_human_review"]["reason_code"] == "CLINICAL_NECESSITY_VERIFIED"
+    assert detail_data["latest_human_review"]["new_decision"] == "APPROVE"
+
+    # 7. Verify reviewer can override when case is ALREADY COMPLETED (always available)
+    res_override_completed = client.post(
+        "/api/v1/cases/CASE-OVERRIDE-01/review/override",
+        json={
+            "new_decision": "REJECT",
+            "reason_code": "SUSPECTED_FRAUD_VERIFIED",
+            "remarks": "Post-adjudication investigation confirmed fabricated receipts.",
+            "expected_case_version": 3,
+        },
+        headers={"X-User-Role": ROLE_REVIEWER, "X-User-Id": "supervisor-dan"},
+    )
+    assert res_override_completed.status_code == 200
+    assert case.current_decision == BusinessDecision.REJECT
+    assert case.version == 4
+    assert len(fake_db.human_reviews) == 2
+    assert fake_db.human_reviews[-1].remarks == "Post-adjudication investigation confirmed fabricated receipts."
+
+
+def test_override_on_approved_and_rejected_cases(client: TestClient, fake_db: FakeDBSession) -> None:
+    """Verify that cases already in APPROVE or REJECT state can be authoritatively overridden (ADR-005)."""
+    now = datetime.now(UTC)
+
+    # 1. Start with an APPROVED case
+    case_approved = Case(
+        case_id="CASE-APP-01",
+        workflow_state=WorkflowState.COMPLETED,
+        current_decision=BusinessDecision.APPROVE,
+        version=1,
+        created_at=now,
+        updated_at=now,
+    )
+    fake_db.add(case_approved)
+
+    # Override APPROVED -> REJECT
+    res_reject = client.post(
+        "/api/v1/cases/CASE-APP-01/review/override",
+        json={
+            "new_decision": "REJECT",
+            "reason_code": "SUSPECTED_FRAUD_VERIFIED",
+            "remarks": "Reviewer verified fabricated billing receipts post-approval.",
+            "expected_case_version": 1,
+        },
+        headers={"X-User-Role": ROLE_REVIEWER, "X-User-Id": "adj-bob"},
+    )
+    assert res_reject.status_code == 200
+    assert case_approved.current_decision == BusinessDecision.REJECT
+    assert case_approved.workflow_state == WorkflowState.COMPLETED
+    assert case_approved.version == 2
+
+    # 2. Start with a REJECTED case
+    case_rejected = Case(
+        case_id="CASE-REJ-01",
+        workflow_state=WorkflowState.COMPLETED,
+        current_decision=BusinessDecision.REJECT,
+        version=1,
+        created_at=now,
+        updated_at=now,
+    )
+    fake_db.add(case_rejected)
+
+    # Override REJECT -> APPROVE
+    res_approve = client.post(
+        "/api/v1/cases/CASE-REJ-01/review/override",
+        json={
+            "new_decision": "APPROVE",
+            "reason_code": "CLINICAL_APPEAL_HONORED",
+            "remarks": "Medical director honored clinical appeal and authorized full benefit.",
+            "expected_case_version": 1,
+        },
+        headers={"X-User-Role": ROLE_REVIEWER, "X-User-Id": "adj-alice"},
+    )
+    assert res_approve.status_code == 200
+    assert case_rejected.current_decision == BusinessDecision.APPROVE
+    assert case_rejected.workflow_state == WorkflowState.COMPLETED
+    assert case_rejected.version == 2
 
 
 def test_human_review_request_info(client: TestClient, fake_db: FakeDBSession) -> None:
@@ -495,16 +617,11 @@ def test_cryptographic_audit_export_verification(client: TestClient, fake_db: Fa
     assert data["terminal_hash"] == h2
 
 
-def test_operational_metrics_rbac_and_data(client: TestClient, fake_db: FakeDBSession) -> None:
-    """Verify operational metrics require MANAGER or ADMIN role and return STP metrics."""
+def test_operational_metrics_rbac(client: TestClient, fake_db: FakeDBSession) -> None:
+    """Verify operational metrics require MANAGER or ADMIN role (data checks: test_operational_metrics.py)."""
     # 1. Reviewer is forbidden
     res_rev = client.get("/api/v1/metrics/operational", headers={"X-User-Role": ROLE_REVIEWER})
     assert res_rev.status_code == 403
-
-    # 2. Manager is allowed
-    res_mgr = client.get("/api/v1/metrics/operational", headers={"X-User-Role": ROLE_MANAGER})
-    assert res_mgr.status_code == 200
-    assert "straight_through_processing_rate" in res_mgr.json()
 
 
 def test_rerun_case_not_found(client: TestClient, fake_db: FakeDBSession) -> None:
@@ -573,4 +690,3 @@ def test_rerun_case_success_synchronous(
     assert data["workflow_state"] == "COMPLETED"
     assert "rerun executed successfully" in data["message"].lower()
     mock_run.assert_called_once()
-

@@ -8,9 +8,9 @@ from medishield.domain.contracts import (
     ClaimsAgentOutput,
     KYCAgentOutput,
     RiskLevel,
+    ServiceLine,
 )
 from medishield.domain.fraud import (
-    FEATURE_WEIGHTS,
     FraudDetectionEngine,
     FraudEvaluationContext,
     calculate_duplicate_claim_feature,
@@ -41,6 +41,15 @@ def build_mock_claims_output(
         claim_amount=ProvenanceValue(value=Decimal(str(total_amount)), confidence=0.99),
         service_date=ProvenanceValue(value=svc_date, confidence=0.99),
         provider_npi=ProvenanceValue(value=provider_npi, confidence=0.99),
+        service_lines=[
+            ServiceLine(
+                line_number=1,
+                hcpcs=ProvenanceValue(value="99213", confidence=0.99),
+                amount=ProvenanceValue(value=Decimal(str(line_sum)), confidence=0.99),
+                units=ProvenanceValue(value=1.0, confidence=0.99),
+                service_date=ProvenanceValue(value=svc_date, confidence=0.99),
+            )
+        ],
         schema_valid=True,
         line_items_sum_valid=(total_amount == line_sum),
         calculated_lines_sum=line_sum,
@@ -60,13 +69,14 @@ def build_mock_kyc_output(tamper_score: float = 0.0) -> KYCAgentOutput:
     )
 
 
-# ── 1. Weight Validation Tests ───────────────────────────────────────────────
+# ── 1. Binary Feature Contract Tests ────────────────────────────────────────
 
-def test_feature_weights_sum_to_one():
-    """Confirms all 7 feature weights strictly sum to 1.00 (Spec 10 § 2.1)."""
-    assert len(FEATURE_WEIGHTS) == 7
-    total_weight = sum(FEATURE_WEIGHTS.values())
-    assert abs(total_weight - 1.00) < 1e-9
+def test_each_feature_has_binary_detection_without_weights():
+    feature = calculate_duplicate_claim_feature("CLM-01")
+    assert feature.detected is True
+    assert feature.raw_value == 1.0
+    assert "weight" not in feature.model_dump()
+    assert "normalized_score" not in feature.model_dump()
 
 
 # ── 2. Feature-by-Feature Calculation Tests ───────────────────────────────────
@@ -74,12 +84,11 @@ def test_feature_weights_sum_to_one():
 def test_duplicate_claim_feature():
     """F-01: duplicate_claim_key logic."""
     unique_feat = calculate_duplicate_claim_feature(None)
-    assert unique_feat.normalized_score == 0.0
+    assert unique_feat.detected is False
     assert unique_feat.raw_value == 0.0
-    assert unique_feat.weight == 0.30
 
     dup_feat = calculate_duplicate_claim_feature("CLM-HIST-9901")
-    assert dup_feat.normalized_score == 1.0
+    assert dup_feat.detected is True
     assert dup_feat.raw_value == 1.0
     assert "CLM-HIST-9901" in dup_feat.description
 
@@ -87,73 +96,62 @@ def test_duplicate_claim_feature():
 def test_image_tamper_feature():
     """F-02: image_tamper_anomaly logic."""
     clean_feat = calculate_image_tamper_feature(0.0)
-    assert clean_feat.normalized_score == 0.0
+    assert clean_feat.detected is False
 
     tamper_feat = calculate_image_tamper_feature(0.75)
-    assert tamper_feat.normalized_score == 0.75
+    assert tamper_feat.detected is True
+    assert tamper_feat.raw_value == 0.75
 
     clamped_high = calculate_image_tamper_feature(1.4)
-    assert clamped_high.normalized_score == 1.0
+    assert clamped_high.detected is True
 
     clamped_low = calculate_image_tamper_feature(-0.5)
-    assert clamped_low.normalized_score == 0.0
+    assert clamped_low.detected is False
 
 
 def test_rapid_velocity_feature():
     """F-03: rapid_resubmission_velocity logic."""
-    # N=1 (current submission only) -> 0.0
-    assert calculate_rapid_velocity_feature(1).normalized_score == 0.0
-    assert calculate_rapid_velocity_feature(0).normalized_score == 0.0
-
-    # N=2 -> (2 - 1) / 4 = 0.25
-    assert calculate_rapid_velocity_feature(2).normalized_score == 0.25
-
-    # N=3 -> (3 - 1) / 4 = 0.50
-    assert calculate_rapid_velocity_feature(3).normalized_score == 0.50
-
-    # N=5 -> (5 - 1) / 4 = 1.0
-    assert calculate_rapid_velocity_feature(5).normalized_score == 1.0
-
-    # N=10 -> clamped to 1.0
-    assert calculate_rapid_velocity_feature(10).normalized_score == 1.0
+    assert calculate_rapid_velocity_feature(1).detected is False
+    assert calculate_rapid_velocity_feature(0).detected is False
+    assert calculate_rapid_velocity_feature(2).detected is True
+    assert calculate_rapid_velocity_feature(5).detected is True
 
 
 def test_provider_billing_outlier_feature():
     """F-04: provider_billing_outlier Z-score logic."""
     # Within normal variation (Z <= 2.0)
-    # mean=100, std=20, amount=140 -> Z = 2.0 -> score = 0.0
     feat_normal = calculate_provider_billing_outlier_feature(
         claim_amount=140.0, mean_charge=100.0, std_charge=20.0
     )
     assert feat_normal.raw_value == 2.0
-    assert feat_normal.normalized_score == 0.0
+    assert feat_normal.detected is False
 
-    # Moderate outlier: amount=170 -> Z = 3.5 -> (3.5 - 2.0)/3.0 = 0.5
+    # Any value above the statistical threshold is a binary signal.
     feat_moderate = calculate_provider_billing_outlier_feature(
         claim_amount=170.0, mean_charge=100.0, std_charge=20.0
     )
     assert feat_moderate.raw_value == 3.5
-    assert feat_moderate.normalized_score == 0.5
+    assert feat_moderate.detected is True
 
     # Extreme outlier: amount=220 -> Z = 6.0 -> (6.0 - 2.0)/3.0 = 1.33 -> clamped to 1.0
     feat_extreme = calculate_provider_billing_outlier_feature(
         claim_amount=220.0, mean_charge=100.0, std_charge=20.0
     )
     assert feat_extreme.raw_value == 6.0
-    assert feat_extreme.normalized_score == 1.0
+    assert feat_extreme.detected is True
 
     # Missing benchmark statistics -> safe 0.0
     feat_missing = calculate_provider_billing_outlier_feature(
         claim_amount=500.0, mean_charge=None, std_charge=None
     )
-    assert feat_missing.normalized_score == 0.0
+    assert feat_missing.detected is False
     assert feat_missing.raw_value == 0.0
 
     # Zero standard deviation -> safe 0.0
     feat_zero_std = calculate_provider_billing_outlier_feature(
         claim_amount=500.0, mean_charge=100.0, std_charge=0.0
     )
-    assert feat_zero_std.normalized_score == 0.0
+    assert feat_zero_std.detected is False
 
 
 def test_service_date_inconsistency_feature():
@@ -163,69 +161,66 @@ def test_service_date_inconsistency_feature():
     # Valid chronological date: 15 days ago -> 0.0
     valid_date = date(2026, 9, 16)
     feat_valid = calculate_service_date_inconsistency_feature(valid_date, today)
-    assert feat_valid.normalized_score == 0.0
+    assert feat_valid.detected is False
 
     # Future date: 5 days in future -> 1.0
     future_date = date(2026, 10, 6)
     feat_future = calculate_service_date_inconsistency_feature(future_date, today)
-    assert feat_future.normalized_score == 1.0
+    assert feat_future.detected is True
     assert "Future service date" in feat_future.description
 
     # Stale date: 400 days in the past -> 0.5
     stale_date = date(2025, 8, 27)
     feat_stale = calculate_service_date_inconsistency_feature(stale_date, today)
-    assert feat_stale.normalized_score == 0.5
+    assert feat_stale.detected is True
     assert "Stale service date" in feat_stale.description
 
     # Missing date -> 0.0
     feat_none = calculate_service_date_inconsistency_feature(None, today)
-    assert feat_none.normalized_score == 0.0
+    assert feat_none.detected is False
 
 
 def test_line_total_arithmetic_drift_feature():
     """F-06: line_total_arithmetic_drift percentage drift logic."""
     # Zero drift: total 500, lines sum 500 -> 0.0
     feat_exact = calculate_line_total_arithmetic_drift_feature(500.0, 500.0)
-    assert feat_exact.normalized_score == 0.0
+    assert feat_exact.detected is False
 
-    # 5% drift: total 500, lines sum 475 -> delta = 25/500 = 0.05 -> 0.05 / 0.10 = 0.50
+    # Any verified non-zero drift is a binary signal.
     feat_drift = calculate_line_total_arithmetic_drift_feature(500.0, 475.0)
     assert feat_drift.raw_value == 0.05
-    assert feat_drift.normalized_score == 0.50
+    assert feat_drift.detected is True
 
     # 15% drift: total 500, lines sum 425 -> delta = 75/500 = 0.15 -> clamped to 1.0
     feat_high_drift = calculate_line_total_arithmetic_drift_feature(500.0, 425.0)
     assert feat_high_drift.raw_value == 0.15
-    assert feat_high_drift.normalized_score == 1.0
+    assert feat_high_drift.detected is True
 
     # Zero total amount -> safe 0.0
     feat_zero_total = calculate_line_total_arithmetic_drift_feature(0.0, 0.0)
-    assert feat_zero_total.normalized_score == 0.0
+    assert feat_zero_total.detected is False
+
+    feat_incomplete = calculate_line_total_arithmetic_drift_feature(
+        500.0,
+        400.0,
+        extraction_complete=False,
+    )
+    assert feat_incomplete.detected is False
+    assert "incomplete" in feat_incomplete.description.lower()
 
 
 def test_member_frequency_30d_feature():
     """F-07: member_claim_frequency_30d baseline exceeding logic."""
-    # N <= 3 -> 0.0
-    assert calculate_member_frequency_30d_feature(1).normalized_score == 0.0
-    assert calculate_member_frequency_30d_feature(3).normalized_score == 0.0
-
-    # N=4 -> (4 - 3) / 5 = 0.20
-    assert calculate_member_frequency_30d_feature(4).normalized_score == 0.20
-
-    # N=5 -> (5 - 3) / 5 = 0.40
-    assert calculate_member_frequency_30d_feature(5).normalized_score == 0.40
-
-    # N=8 -> (8 - 3) / 5 = 1.0
-    assert calculate_member_frequency_30d_feature(8).normalized_score == 1.0
-
-    # N=15 -> clamped to 1.0
-    assert calculate_member_frequency_30d_feature(15).normalized_score == 1.0
+    assert calculate_member_frequency_30d_feature(1).detected is False
+    assert calculate_member_frequency_30d_feature(3).detected is False
+    assert calculate_member_frequency_30d_feature(4).detected is True
+    assert calculate_member_frequency_30d_feature(15).detected is True
 
 
 # ── 3. Engine End-to-End & Scenario Tests ─────────────────────────────────────
 
-def test_clean_claim_scores_low_risk():
-    """Clean claim with no anomalies scores 0.00 and passes automated check."""
+def test_clean_claim_has_no_fraud_review_signal():
+    """Clean claim has a zero binary signal and no fraud review requirement."""
     claims_out = build_mock_claims_output(total_amount=250.0, line_sum=250.0)
     kyc_out = build_mock_kyc_output(tamper_score=0.0)
     ctx = FraudEvaluationContext(
@@ -239,6 +234,7 @@ def test_clean_claim_scores_low_risk():
     result = evaluate_claim_fraud(claims_out, kyc_out, ctx)
 
     assert result.fraud_score == 0.0
+    assert result.fraud_review_required is False
     assert result.risk_level == RiskLevel.LOW
     assert result.verdict == AgentVerdict.PASS
     assert result.duplicate_claim_detected is False
@@ -248,16 +244,17 @@ def test_clean_claim_scores_low_risk():
     assert len(result.features) == 7
 
 
-def test_duplicate_claim_alone_triggers_medium_risk():
-    """Duplicate claim collision (weight 0.30) elevates risk to MEDIUM (INDETERMINATE)."""
+def test_duplicate_claim_alone_triggers_fraud_review():
+    """A single detected factor triggers review without summing weights."""
     claims_out = build_mock_claims_output()
     kyc_out = build_mock_kyc_output(tamper_score=0.0)
     ctx = FraudEvaluationContext(duplicate_claim_match_id="CLM-PRIOR-4482")
 
     result = evaluate_claim_fraud(claims_out, kyc_out, ctx)
 
-    assert result.fraud_score == 0.30
-    assert result.risk_level == RiskLevel.MEDIUM
+    assert result.fraud_score == 1.0
+    assert result.fraud_review_required is True
+    assert result.risk_level == RiskLevel.REVIEW_REQUIRED
     assert result.verdict == AgentVerdict.INDETERMINATE
     assert result.duplicate_claim_detected is True
     assert result.duplicate_claim_id == "CLM-PRIOR-4482"
@@ -265,15 +262,45 @@ def test_duplicate_claim_alone_triggers_medium_risk():
     assert "CLM-PRIOR-4482" in result.anomalies[0]
 
 
-def test_severe_compounding_anomalies_trigger_high_risk():
-    """
-    Multiple anomalies compounding above 0.70 threshold:
-    - duplicate match (0.30 * 1.0 = 0.30)
-    - tamper score 0.8 (0.20 * 0.8 = 0.16)
-    - provider outlier 1.0 (0.15 * 1.0 = 0.15)
-    - future service date (0.10 * 1.0 = 0.10)
-    Total = 0.30 + 0.16 + 0.15 + 0.10 = 0.71 -> HIGH risk (FAIL).
-    """
+def test_any_single_factor_triggers_fraud_review():
+    """Each independent factor triggers review on its own, regardless of magnitude."""
+    ordinary_claim = build_mock_claims_output()
+    future_claim = build_mock_claims_output(service_date=datetime.now(UTC).date() + timedelta(days=7))
+    drifted_claim = build_mock_claims_output(total_amount=500.0, line_sum=499.0)
+    cases = [
+        FraudDetectionEngine.evaluate(
+            ordinary_claim,
+            context=FraudEvaluationContext(duplicate_claim_match_id="CLM-01"),
+        ),
+        FraudDetectionEngine.evaluate(ordinary_claim, build_mock_kyc_output(tamper_score=0.30)),
+        FraudDetectionEngine.evaluate(
+            ordinary_claim,
+            context=FraudEvaluationContext(resubmission_count_48h=2),
+        ),
+        FraudDetectionEngine.evaluate(
+            build_mock_claims_output(total_amount=130.0, line_sum=130.0),
+            context=FraudEvaluationContext(cpt_benchmark_mean=100.0, cpt_benchmark_std=10.0),
+        ),
+        FraudDetectionEngine.evaluate(
+            future_claim,
+            context=FraudEvaluationContext(submission_date=datetime.now(UTC).date()),
+        ),
+        FraudDetectionEngine.evaluate(drifted_claim),
+        FraudDetectionEngine.evaluate(
+            ordinary_claim,
+            context=FraudEvaluationContext(member_claim_count_30d=4),
+        ),
+    ]
+    assert len(cases) == 7
+    for result in cases:
+        assert result.fraud_score == 1.0
+        assert result.fraud_review_required is True
+        assert result.risk_level == RiskLevel.REVIEW_REQUIRED
+        assert result.verdict == AgentVerdict.INDETERMINATE
+        assert result.anomalies
+
+
+def test_multiple_factors_keep_binary_review_signal():
     future_date = datetime.now(UTC).date() + timedelta(days=7)
     claims_out = build_mock_claims_output(
         total_amount=1000.0,
@@ -290,42 +317,23 @@ def test_severe_compounding_anomalies_trigger_high_risk():
 
     result = evaluate_claim_fraud(claims_out, kyc_out, ctx)
 
-    assert result.fraud_score == 0.71
-    assert result.risk_level == RiskLevel.HIGH
-    assert result.verdict == AgentVerdict.FAIL
+    assert result.fraud_score == 1.0
+    assert result.fraud_review_required is True
+    assert result.risk_level == RiskLevel.REVIEW_REQUIRED
+    assert result.verdict == AgentVerdict.INDETERMINATE
     assert result.duplicate_claim_detected is True
     assert len(result.anomalies) >= 4
 
 
-def test_threshold_boundaries():
-    """Confirms exact behavior at threshold boundaries 0.30 and 0.70."""
-    # 0.2999 is LOW
-    assert FraudDetectionEngine.evaluate(
+def test_no_detected_factors_yield_zero_and_low_risk():
+    result = FraudDetectionEngine.evaluate(
         build_mock_claims_output(),
         build_mock_kyc_output(tamper_score=0.0),
-    ).risk_level == RiskLevel.LOW
-
-    # Boundary test: score == 0.3000 -> MEDIUM
-    claims_out = build_mock_claims_output()
-    ctx_dup = FraudEvaluationContext(duplicate_claim_match_id="CLM-01")
-    res_med = FraudDetectionEngine.evaluate(claims_out, context=ctx_dup)
-    assert res_med.fraud_score == 0.30
-    assert res_med.risk_level == RiskLevel.MEDIUM
-    assert res_med.verdict == AgentVerdict.INDETERMINATE
-
-    # Boundary test: score >= 0.7000 -> HIGH
-    # F01: 0.30, F02: 0.20 (tamper=1.0), F03: 0.15 (N=5), F06: 0.05 (drift 10%)
-    # Total = 0.30 + 0.20 + 0.15 + 0.05 = 0.70
-    claims_drift = build_mock_claims_output(total_amount=100.0, line_sum=85.0)
-    ctx_70 = FraudEvaluationContext(
-        duplicate_claim_match_id="CLM-01",
-        resubmission_count_48h=5,
     )
-    kyc_tamper = build_mock_kyc_output(tamper_score=1.0)
-    res_70 = FraudDetectionEngine.evaluate(claims_drift, kyc_tamper, ctx_70)
-    assert res_70.fraud_score == 0.70
-    assert res_70.risk_level == RiskLevel.HIGH
-    assert res_70.verdict == AgentVerdict.FAIL
+    assert result.fraud_score == 0.0
+    assert result.fraud_review_required is False
+    assert result.risk_level == RiskLevel.LOW
+    assert result.verdict == AgentVerdict.PASS
 
 
 def test_velocity_flag_activation():
@@ -365,6 +373,6 @@ def test_service_date_inconsistency_slash_format_parsing():
 
     res = evaluate_claim_fraud(claims_out, context=ctx)
     f5 = next(f for f in res.features if f.feature_name == "service_date_inconsistency")
-    assert f5.normalized_score == 1.0
+    assert f5.detected is True
     assert "Future service date detected" in f5.description
 

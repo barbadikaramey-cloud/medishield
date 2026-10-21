@@ -5,10 +5,12 @@ clinical alignment engine, and all 20 synthetic evaluation benchmark cases (EVAL
 """
 
 from datetime import date, datetime
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
+from medishield.db.catalog import InMemoryClinicalGuidelineRepository
 from medishield.db.enums import (
     AgentVerdict,
     BusinessDecision,
@@ -34,6 +36,9 @@ from medishield.domain.contracts import (
     LineClinicalEvidence,
     MandatoryGuidelineCriterion,
     MedicalNecessityStatus,
+    OCRDocumentPayload,
+    OCRPagePayload,
+    OCRTextSpan,
     PerformanceEvidenceStatus,
     PolicyCoverageOutput,
     PriorAuthRequirementStatus,
@@ -57,9 +62,54 @@ from medishield.domain.decision import (
     DecisionInputContext,
     DeterministicDecisionEngine,
 )
-from medishield.domain.provenance import FieldProvenance, ProvenanceValue
+from medishield.domain.provenance import (
+    BBox,
+    ClinicalAssertionStatus,
+    EvidenceSource,
+    EvidenceVerificationStatus,
+    FieldProvenance,
+    ProvenanceType,
+    ProvenanceValue,
+)
+from medishield.intake.storage import InMemoryStorageBackend
 from medishield.workflows.nodes import clinical_alignment_node, decision_engine_node
 from medishield.workflows.state import DocumentReference, create_initial_case_state
+
+
+def claim_span_provenance(text: str) -> FieldProvenance:
+    return FieldProvenance(
+        document_id="DOC-CLAIM-FIXTURE",
+        page_number=1,
+        span_id=f"span-claim-{text}",
+        text_content=text,
+        evidence_quality_score=0.95,
+        evidence_source=EvidenceSource.OCR,
+        verification_status=EvidenceVerificationStatus.VERIFIED,
+    )
+
+
+class _SupportedInterpreter:
+    """Stub relevancy model citing the supplied evidence and supporting every candidate pair."""
+
+    def __init__(self, clinical_span_id: str) -> None:
+        self.clinical_span_id = clinical_span_id
+
+    def assess(self, candidate_lines):
+        from medishield.domain.clinical_interpreter import ClinicalRelationshipProposal
+
+        return {
+            (line["line_number"], line["service_code"], pair["diagnosis_code"]): ClinicalRelationshipProposal(
+                line_number=line["line_number"],
+                service_code=line["service_code"],
+                diagnosis_code=pair["diagnosis_code"],
+                relationship="SUPPORTED",
+                diagnosis_evidence_id=pair["diagnosis_evidence_ids"][0],
+                service_evidence_id=line["service_evidence_ids"][0],
+                clinical_evidence_id=self.clinical_span_id,
+            )
+            for line in candidate_lines
+            for pair in line["diagnosis_candidates"]
+        }
 
 # ── Test Helpers ─────────────────────────────────────────────────────────────
 
@@ -74,10 +124,281 @@ def make_provenance_span(
     return FieldProvenance(
         document_id=doc_id,
         page_number=page,
+        span_id=f"span-p{page}-verified",
         text_content=snippet,
+        provenance_type=ProvenanceType.SPAN,
         evidence_quality_score=evidence_score,
         model_confidence=model_conf,
+        evidence_source=EvidenceSource.OCR,
+        verification_status=EvidenceVerificationStatus.VERIFIED,
+        normalized_interpretation=snippet,
+        assertion_status=ClinicalAssertionStatus.AFFIRMED,
+        evidence_relevance_verified=True,
     )
+
+
+def make_verified_criterion(
+    criterion_id: str,
+    description: str,
+    span: FieldProvenance,
+    outcome: CriterionEvaluationOutcome = CriterionEvaluationOutcome.SATISFIED,
+) -> MandatoryGuidelineCriterion:
+    return MandatoryGuidelineCriterion(
+        criterion_id=criterion_id,
+        description=description,
+        requirement_reference_id=f"fixture://guideline/{criterion_id}",
+        requirement_source_reference=f"fixture://source/{criterion_id}",
+        requirement_source_chunk_id=criterion_id,
+        requirement_source_verified=True,
+        evaluation_outcome=outcome,
+        supporting_spans=[span],
+        evidence_interpretation=span.text_content,
+        evidence_relevance_verified=True,
+    )
+
+
+def make_verified_guideline(
+    guideline_id: str,
+    service_code: str,
+    criteria: list[MandatoryGuidelineCriterion],
+) -> GuidelineCitation:
+    return GuidelineCitation(
+        guideline_id=guideline_id,
+        guideline_version="fixture-1",
+        guideline_title=f"Evidence-complete {service_code} guideline",
+        jurisdiction="TEST",
+        payer_product="TEST",
+        source_reference=f"fixture://guideline/{guideline_id}",
+        source_chunk_id=guideline_id,
+        source_verified=True,
+        applicable_to_claim=True,
+        effective_date=date(2025, 1, 1),
+        criteria_evaluations=criteria,
+    )
+
+
+def make_verified_line(
+    line_number: int,
+    service_code: str,
+    modality: ServiceModality,
+    span: FieldProvenance,
+    criterion_id: str,
+    criterion_description: str,
+    billed_amount: float = 100.0,
+) -> LineClinicalEvidence:
+    criterion = make_verified_criterion(criterion_id, criterion_description, span)
+    guideline = make_verified_guideline(f"LCD-{service_code}-FIXTURE", service_code, [criterion])
+    return LineClinicalEvidence(
+        line_number=line_number,
+        service_code=service_code,
+        modality=modality,
+        billed_units=1.0,
+        billed_amount=billed_amount,
+        service_date=date(2026, 8, 1),
+        performance_status=PerformanceEvidenceStatus.RESULTED,
+        indication_status=ClinicalIndicationStatus.EXPLICITLY_INDICATED,
+        necessity_status=MedicalNecessityStatus.MET,
+        guideline_citation=guideline,
+        performance_evidence=[span],
+        indication_evidence=[span],
+        prior_auth_requirement=PriorAuthRequirementStatus.NOT_REQUIRED,
+        prior_auth_verification=PriorAuthVerificationStatus.NOT_APPLICABLE,
+        repeat_service_status=RepeatServiceStatus.NOT_A_REPEATED_SERVICE,
+        supporting_spans=[span],
+        line_verdict=AgentVerdict.PASS,
+        clinical_finding_summary="Verified clinical evidence supports the line.",
+    )
+
+
+@pytest.mark.parametrize(
+    ("language", "fact", "pattern"),
+    [
+        ("English", "Patient completed at least 6 weeks of physical therapy.", r"at least\s+6 weeks"),
+        ("Hindi", "मरीज ने कम से कम 6 सप्ताह फिजियोथेरेपी ली।", r"कम से कम\s+6 सप्ताह"),
+        ("Spanish", "Paciente completó al menos 6 semanas de fisioterapia.", r"al menos\s+6 semanas"),
+        ("Mixed", "Patient completed at least 6 weeks की फिजियोथेरेपी.", r"at least\s+6 weeks.*फिजियोथेरेपी"),
+    ],
+)
+def test_configured_clinical_criterion_matches_verified_multilingual_evidence(
+    language: str,
+    fact: str,
+    pattern: str,
+) -> None:
+    evidence = make_provenance_span(snippet=fact)
+    guideline = {
+        "mandatory_criteria": [{
+            "criterion_id": "CRIT-DURATION",
+            "description": "Documented treatment duration",
+            "source_reference": "fixture://guideline/duration",
+            "source_chunk_id": "CRIT-DURATION",
+            "source_verified": True,
+            "requirement_type": "EVIDENCE_REGEX",
+            "evaluation_parameters": {"pattern": pattern},
+            "is_mandatory": True,
+        }]
+    }
+
+    [criterion] = DeterministicClinicalAlignmentEngine.evaluate_guideline_criteria(
+        guideline,
+        [evidence],
+        [],
+    )
+
+    assert criterion.evaluation_outcome == CriterionEvaluationOutcome.SATISFIED, language
+    assert criterion.has_verified_patient_evidence
+
+
+def test_diagnosis_span_cannot_satisfy_treatment_duration_criterion() -> None:
+    evidence = make_provenance_span(snippet="Primary diagnosis: knee osteoarthritis (M17.9).")
+    guideline = {
+        "mandatory_criteria": [{
+            "criterion_id": "CRIT-DURATION",
+            "description": "Documented treatment duration",
+            "source_reference": "fixture://guideline/duration",
+            "source_chunk_id": "CRIT-DURATION",
+            "source_verified": True,
+            "requirement_type": "EVIDENCE_REGEX",
+            "evaluation_parameters": {"pattern": r"at least\s+6 weeks"},
+            "is_mandatory": True,
+        }]
+    }
+
+    [criterion] = DeterministicClinicalAlignmentEngine.evaluate_guideline_criteria(guideline, [evidence], [])
+
+    assert criterion.evaluation_outcome == CriterionEvaluationOutcome.UNASSESSED_EVIDENCE_UNAVAILABLE
+    assert criterion.supporting_spans == []
+
+
+def test_negated_uncertain_and_contradictory_findings_are_not_positive() -> None:
+    guideline = {
+        "mandatory_criteria": [{
+            "criterion_id": "CRIT-DIAGNOSIS",
+            "description": "Documented hypertension",
+            "source_reference": "fixture://guideline/diagnosis",
+            "source_chunk_id": "CRIT-DIAGNOSIS",
+            "source_verified": True,
+            "requirement_type": "EVIDENCE_REGEX",
+            "evaluation_parameters": {
+                "pattern": r"hypertension",
+                "negation_patterns": [r"no history of hypertension"],
+                "uncertainty_patterns": [r"possible hypertension"],
+            },
+            "is_mandatory": True,
+        }]
+    }
+    cases = (
+        (["No history of hypertension is documented."], CriterionEvaluationOutcome.NOT_SATISFIED),
+        (["Possible hypertension; diagnosis not confirmed."], CriterionEvaluationOutcome.UNASSESSED_EVIDENCE_UNAVAILABLE),
+        (["Hypertension confirmed.", "No history of hypertension is documented."], CriterionEvaluationOutcome.CONTRADICTORY),
+    )
+
+    for texts, expected in cases:
+        [criterion] = DeterministicClinicalAlignmentEngine.evaluate_guideline_criteria(
+            guideline,
+            [make_provenance_span(snippet=text) for text in texts],
+            [],
+        )
+        assert criterion.evaluation_outcome == expected
+
+
+def test_unrelated_span_and_guideline_requirement_cannot_satisfy_criterion() -> None:
+    repo = InMemoryClinicalGuidelineRepository(guidelines={
+        "70553": {
+            "guideline_id": "LCD-70553",
+            "guideline_version": "test-1",
+            "guideline_title": "Brain MRI",
+            "effective_date": date(2025, 1, 1),
+            "expiration_date": None,
+            "requires_prior_auth": True,
+            "mandatory_criteria": [{
+                "criterion_id": "CRIT-IMAGING",
+                "description": "Documented focal neurological findings",
+                "source_reference": "fixture://guideline/70553",
+                "source_chunk_id": "CRIT-IMAGING",
+                "source_verified": True,
+                "requirement_type": "EVIDENCE_REGEX",
+                "evaluation_parameters": {"pattern": r"focal neurological findings"},
+                "is_mandatory": True,
+            }],
+        }
+    })
+    citation = DeterministicClinicalAlignmentEngine.get_guideline_for_code(
+        "70553",
+        date(2026, 8, 1),
+        spans_override=[make_provenance_span(snippet="focal neurological findings")],
+        guideline_repo=repo,
+        payer_product="TEST",
+        jurisdiction="TEST",
+    )
+    assert citation is not None
+    assert citation.criteria_evaluations[0].evaluation_outcome == CriterionEvaluationOutcome.UNASSESSED_EVIDENCE_UNAVAILABLE
+    assert citation.criteria_evaluations[0].supporting_spans == []
+
+    criterion = DeterministicClinicalAlignmentEngine.evaluate_guideline_criteria(
+        repo.get_guideline("70553") or {},
+        [make_provenance_span(snippet="Claim total: $950.00")],
+        [],
+    )[0]
+    assert criterion.evaluation_outcome == CriterionEvaluationOutcome.UNASSESSED_EVIDENCE_UNAVAILABLE
+
+
+def test_missing_imaging_evidence_and_missing_model_confidence_remain_unavailable() -> None:
+    evidence = make_provenance_span(snippet="MRI brain was ordered.", model_conf=None)
+    guideline_data = {
+        "mandatory_criteria": [{
+            "criterion_id": "CRIT-IMAGING",
+            "description": "Imaging demonstrates lesion",
+            "source_reference": "fixture://guideline/imaging",
+            "source_chunk_id": "CRIT-IMAGING",
+            "source_verified": True,
+            "requirement_type": "EVIDENCE_REGEX",
+            "evaluation_parameters": {"pattern": r"lesion on completed MRI"},
+            "is_mandatory": True,
+        }]
+    }
+    criterion = DeterministicClinicalAlignmentEngine.evaluate_guideline_criteria(guideline_data, [evidence], [])[0]
+    assert criterion.evaluation_outcome == CriterionEvaluationOutcome.UNASSESSED_EVIDENCE_UNAVAILABLE
+
+    line = make_clean_line_evidence()
+    no_confidence = line.model_copy(update={
+        "performance_evidence": [item.model_copy(update={"model_confidence": None}) for item in line.performance_evidence],
+        "indication_evidence": [item.model_copy(update={"model_confidence": None}) for item in line.indication_evidence],
+        "supporting_spans": [item.model_copy(update={"model_confidence": None}) for item in line.supporting_spans],
+        "guideline_citation": line.guideline_citation.model_copy(update={
+            "criteria_evaluations": [
+                item.model_copy(update={"supporting_spans": [
+                    span.model_copy(update={"model_confidence": None}) for span in item.supporting_spans
+                ]})
+                for item in line.guideline_citation.criteria_evaluations
+            ]
+        }),
+    })
+    output = build_clinical_alignment_output([1], [no_confidence], clinical_documents_present=["OCR"])
+    assert output.verdict == AgentVerdict.PASS
+    assert output.confidence is None
+
+
+def test_missing_mandatory_criterion_blocks_composite_pass() -> None:
+    line = make_clean_line_evidence()
+    citation = line.guideline_citation.model_copy(update={
+        "criteria_evaluations": [
+            line.guideline_citation.criteria_evaluations[0].model_copy(update={
+                "evaluation_outcome": CriterionEvaluationOutcome.UNASSESSED_EVIDENCE_UNAVAILABLE,
+                "supporting_spans": [],
+                "evidence_relevance_verified": False,
+            })
+        ]
+    })
+    incomplete_line = line.model_copy(update={
+        "guideline_citation": citation,
+        "line_verdict": AgentVerdict.INDETERMINATE,
+        "necessity_status": MedicalNecessityStatus.CRITERIA_INCOMPLETE,
+    })
+
+    output = build_clinical_alignment_output([1], [incomplete_line], clinical_documents_present=["OCR"])
+
+    assert output.verdict == AgentVerdict.INDETERMINATE
+    assert output.evidence_sufficient is False
 
 
 def make_clean_line_evidence(
@@ -88,21 +409,8 @@ def make_clean_line_evidence(
     service_date: date = date(2026, 8, 1),
 ) -> LineClinicalEvidence:
     span = make_provenance_span()
-    crit = MandatoryGuidelineCriterion(
-        criterion_id="CRIT-99214-01",
-        description="Moderate complexity decision making",
-        is_mandatory=True,
-        evaluation_outcome=CriterionEvaluationOutcome.SATISFIED,
-        supporting_spans=[span],
-        rationale="Documented clinical visit notes confirm moderate complexity.",
-    )
-    guideline = GuidelineCitation(
-        guideline_id="LCD-99214-01",
-        guideline_version="2026.1",
-        guideline_title="E/M Services Level 4",
-        effective_date=date(2025, 1, 1),
-        criteria_evaluations=[crit],
-    )
+    crit = make_verified_criterion("CRIT-99214-01", "Moderate complexity decision making", span)
+    guideline = make_verified_guideline("LCD-99214-01", "99214", [crit])
     return LineClinicalEvidence(
         line_number=line_number,
         service_code=service_code,
@@ -114,6 +422,8 @@ def make_clean_line_evidence(
         indication_status=ClinicalIndicationStatus.EXPLICITLY_INDICATED,
         necessity_status=MedicalNecessityStatus.MET,
         guideline_citation=guideline,
+        performance_evidence=[span],
+        indication_evidence=[span],
         prior_auth_requirement=PriorAuthRequirementStatus.NOT_REQUIRED,
         prior_auth_verification=PriorAuthVerificationStatus.NOT_APPLICABLE,
         repeat_service_status=RepeatServiceStatus.NOT_A_REPEATED_SERVICE,
@@ -202,7 +512,7 @@ class TestClinicalContractsAndInvariants:
             effective_date=date(2025, 1, 1),
             criteria_evaluations=[crit],
         )
-        with pytest.raises(ValidationError, match="requires non-empty supporting_spans provenance"):
+        with pytest.raises(ValidationError, match="all mandatory criteria"):
             LineClinicalEvidence(
                 line_number=1,
                 service_code="99214",
@@ -322,12 +632,10 @@ class TestClinicalAlignmentBenchmarkSuite:
         """EVAL-CLIN-01: Note documents chest pain, ECG resulted -> PASS, PASS -> Rule P6 APPROVE."""
         line1 = make_clean_line_evidence(1, "99214", 1.0, 150.00)
         span_ecg = make_provenance_span(snippet="ECG performed and resulted: normal sinus rhythm.")
-        crit_ecg = MandatoryGuidelineCriterion(
-            criterion_id="CRIT-93000-01",
-            description="Cardiac symptoms or rhythm evaluation",
-            is_mandatory=True,
-            evaluation_outcome=CriterionEvaluationOutcome.SATISFIED,
-            supporting_spans=[span_ecg],
+        crit_ecg = make_verified_criterion(
+            "CRIT-93000-01",
+            "Cardiac symptoms or rhythm evaluation",
+            span_ecg,
         )
         line2 = LineClinicalEvidence(
             line_number=2,
@@ -339,16 +647,12 @@ class TestClinicalAlignmentBenchmarkSuite:
             performance_status=PerformanceEvidenceStatus.RESULTED,
             indication_status=ClinicalIndicationStatus.EXPLICITLY_INDICATED,
             necessity_status=MedicalNecessityStatus.MET,
-            guideline_citation=GuidelineCitation(
-                guideline_id="LCD-93000-01",
-                guideline_version="2026.1",
-                guideline_title="Diagnostic ECG",
-                effective_date=date(2025, 1, 1),
-                criteria_evaluations=[crit_ecg],
-            ),
+            guideline_citation=make_verified_guideline("LCD-93000-01", "93000", [crit_ecg]),
             prior_auth_requirement=PriorAuthRequirementStatus.NOT_REQUIRED,
             prior_auth_verification=PriorAuthVerificationStatus.NOT_APPLICABLE,
             repeat_service_status=RepeatServiceStatus.NOT_A_REPEATED_SERVICE,
+            performance_evidence=[span_ecg],
+            indication_evidence=[span_ecg],
             supporting_spans=[span_ecg],
             line_verdict=AgentVerdict.PASS,
             clinical_finding_summary="ECG performed with sinus rhythm documented.",
@@ -396,41 +700,23 @@ class TestClinicalAlignmentBenchmarkSuite:
         span_op = make_provenance_span(doc_id="DOC-OP-NOTE", snippet="Laparoscopic appendectomy performed cleanly.")
         span_lab = make_provenance_span(doc_id="DOC-LAB-SHEET", snippet="Comprehensive metabolic panel resulted.")
 
-        line1 = LineClinicalEvidence(
-            line_number=1,
-            service_code="44970",
-            modality=ServiceModality.SURGICAL_PROCEDURE,
-            billed_units=1.0,
-            billed_amount=2500.00,
-            service_date=date(2026, 8, 1),
-            performance_status=PerformanceEvidenceStatus.DIRECTLY_DOCUMENTED_PERFORMANCE,
-            indication_status=ClinicalIndicationStatus.EXPLICITLY_INDICATED,
-            necessity_status=MedicalNecessityStatus.MET,
-            guideline_citation=DeterministicClinicalAlignmentEngine.get_guideline_for_code("44970", date(2026, 8, 1), spans_override=[span_op]),
-            prior_auth_requirement=PriorAuthRequirementStatus.NOT_REQUIRED,
-            prior_auth_verification=PriorAuthVerificationStatus.NOT_APPLICABLE,
-            repeat_service_status=RepeatServiceStatus.NOT_A_REPEATED_SERVICE,
-            supporting_spans=[span_op],
-            line_verdict=AgentVerdict.PASS,
-            clinical_finding_summary="Operative note confirms laparoscopy.",
+        line1 = make_verified_line(
+            1,
+            "44970",
+            ServiceModality.SURGICAL_PROCEDURE,
+            span_op,
+            "CRIT-44970-01",
+            "Operative report supports appendectomy for documented appendicitis",
+            2500.00,
         )
-        line2 = LineClinicalEvidence(
-            line_number=2,
-            service_code="80053",
-            modality=ServiceModality.LABORATORY_TEST,
-            billed_units=1.0,
-            billed_amount=120.00,
-            service_date=date(2026, 8, 1),
-            performance_status=PerformanceEvidenceStatus.RESULTED,
-            indication_status=ClinicalIndicationStatus.EXPLICITLY_INDICATED,
-            necessity_status=MedicalNecessityStatus.MET,
-            guideline_citation=DeterministicClinicalAlignmentEngine.get_guideline_for_code("80053", date(2026, 8, 1), spans_override=[span_lab]),
-            prior_auth_requirement=PriorAuthRequirementStatus.NOT_REQUIRED,
-            prior_auth_verification=PriorAuthVerificationStatus.NOT_APPLICABLE,
-            repeat_service_status=RepeatServiceStatus.NOT_A_REPEATED_SERVICE,
-            supporting_spans=[span_lab],
-            line_verdict=AgentVerdict.PASS,
-            clinical_finding_summary="Lab report confirms blood chemistry resulted.",
+        line2 = make_verified_line(
+            2,
+            "80053",
+            ServiceModality.LABORATORY_TEST,
+            span_lab,
+            "CRIT-80053-01",
+            "Documented indication for a comprehensive metabolic panel",
+            120.00,
         )
 
         output = build_clinical_alignment_output(
@@ -460,24 +746,18 @@ class TestClinicalAlignmentBenchmarkSuite:
     def test_eval_clin_03_prior_auth_required_and_verified_approved(self) -> None:
         """EVAL-CLIN-03: CPT 70553 (REQUIRED) with VERIFIED_APPROVED prior auth -> PASS -> APPROVE."""
         span = make_provenance_span(snippet="Brain MRI completed; prior authorization verified: AUTH-98765.")
-        line1 = LineClinicalEvidence(
-            line_number=1,
-            service_code="70553",
-            modality=ServiceModality.DIAGNOSTIC_IMAGING,
-            billed_units=1.0,
-            billed_amount=950.00,
-            service_date=date(2026, 8, 1),
-            performance_status=PerformanceEvidenceStatus.RESULTED,
-            indication_status=ClinicalIndicationStatus.EXPLICITLY_INDICATED,
-            necessity_status=MedicalNecessityStatus.MET,
-            guideline_citation=DeterministicClinicalAlignmentEngine.get_guideline_for_code("70553", date(2026, 8, 1), spans_override=[span]),
-            prior_auth_requirement=PriorAuthRequirementStatus.REQUIRED,
-            prior_auth_verification=PriorAuthVerificationStatus.VERIFIED_APPROVED,
-            repeat_service_status=RepeatServiceStatus.NOT_A_REPEATED_SERVICE,
-            supporting_spans=[span],
-            line_verdict=AgentVerdict.PASS,
-            clinical_finding_summary="MRI Brain performed with active verified prior authorization.",
-        )
+        line1 = make_verified_line(
+            1,
+            "70553",
+            ServiceModality.DIAGNOSTIC_IMAGING,
+            span,
+            "CRIT-70553-01",
+            "Documented focal neurological signs or intracranial lesion supports MRI",
+            950.00,
+        ).model_copy(update={
+            "prior_auth_requirement": PriorAuthRequirementStatus.REQUIRED,
+            "prior_auth_verification": PriorAuthVerificationStatus.VERIFIED_APPROVED,
+        })
         output = build_clinical_alignment_output(
             expected_line_numbers=[1],
             line_assessments=[line1],
@@ -559,6 +839,8 @@ class TestClinicalAlignmentBenchmarkSuite:
             prior_auth_requirement=PriorAuthRequirementStatus.REQUIRED,
             prior_auth_verification=PriorAuthVerificationStatus.VERIFIED_DENIED,
             repeat_service_status=RepeatServiceStatus.NOT_A_REPEATED_SERVICE,
+            performance_evidence=[span],
+            indication_evidence=[span],
             supporting_spans=[span],
             line_verdict=AgentVerdict.FAIL,
             clinical_finding_summary="Prior authorization formally denied by payer.",
@@ -589,11 +871,15 @@ class TestClinicalAlignmentBenchmarkSuite:
     def test_eval_clin_06_mandatory_criterion_failed(self) -> None:
         """EVAL-CLIN-06: CPT 27447 Knee Replacement: only 2 weeks conservative therapy -> FAIL -> ESCALATE(HUMAN_REVIEW)."""
         span = make_provenance_span(snippet="Patient completed 2 weeks of physical therapy before electing total knee replacement.")
-        guideline = DeterministicClinicalAlignmentEngine.get_guideline_for_code(
+        guideline = make_verified_guideline(
+            "LCD-27447-01",
             "27447",
-            date(2026, 8, 1),
-            criteria_satisfied_overrides={"CRIT-27447-CONSERVATIVE": False},
-            spans_override=[span],
+            [make_verified_criterion(
+                "CRIT-27447-CONSERVATIVE",
+                "Documented failure of non-surgical conservative therapy for >= 6 weeks",
+                span,
+                CriterionEvaluationOutcome.NOT_SATISFIED,
+            )],
         )
         line1 = LineClinicalEvidence(
             line_number=1,
@@ -700,12 +986,21 @@ class TestClinicalAlignmentBenchmarkSuite:
 
     def test_eval_clin_09_explicit_clinical_contradiction(self) -> None:
         """EVAL-CLIN-09: Note states 'Patient refused surgery; managed conservatively' -> CONFLICT -> ESCALATE(AMBIGUITY)."""
+        contradiction = make_provenance_span(snippet="Patient refused surgery; managed conservatively.").model_copy(update={
+            "assertion_status": ClinicalAssertionStatus.NEGATED,
+            "normalized_interpretation": "Patient refused surgery",
+            "evidence_relevance_verified": True,
+        })
         line1 = DeterministicClinicalAlignmentEngine.evaluate_line_item(
             line_number=1,
             service_code="47562",
             billed_units=1.0,
             billed_amount=4500.00,
             service_date=date(2026, 8, 1),
+            performance_status=PerformanceEvidenceStatus.EXPLICITLY_CONTRADICTED,
+            supporting_spans=[contradiction],
+            performance_evidence=[contradiction],
+            indication_evidence=[contradiction],
             clinical_notes_text="Patient refused surgery; managed conservatively with oral antibiotics.",
         )
         assert line1.line_verdict == AgentVerdict.CONFLICT
@@ -743,8 +1038,8 @@ class TestClinicalAlignmentBenchmarkSuite:
             service_timestamp=datetime(2026, 8, 1, 18, 0),
             encounter_discharge_datetime=datetime(2026, 8, 1, 11, 0),
         )
-        assert line1.line_verdict == AgentVerdict.CONFLICT
-        assert line1.performance_status == PerformanceEvidenceStatus.CONFIRMED_NON_PERFORMANCE
+        assert line1.line_verdict == AgentVerdict.INDETERMINATE
+        assert line1.performance_status == PerformanceEvidenceStatus.NOT_DOCUMENTED
 
         output = build_clinical_alignment_output(
             expected_line_numbers=[1],
@@ -754,7 +1049,7 @@ class TestClinicalAlignmentBenchmarkSuite:
             low_ocr_quality_pages=[],
             latency_ms=10,
         )
-        assert output.verdict == AgentVerdict.CONFLICT
+        assert output.verdict == AgentVerdict.INDETERMINATE
 
         ctx = make_clean_decision_context(
             case_id="EVAL-CLIN-10",
@@ -1058,8 +1353,8 @@ class TestClinicalAlignmentBenchmarkSuite:
         assert decision.rule_id_matched == RULE_P6_CLEAN_PASS
         assert decision.decision == BusinessDecision.APPROVE
 
-    def test_eval_clin_18_duplicate_tuple_collision_canonical_resolution(self) -> None:
-        """EVAL-CLIN-18: F-01 collision (score 0.30) canonically falls in [0.30, 0.70) -> RULE-P7-BORDERLINE-REVIEW."""
+    def test_eval_clin_18_duplicate_tuple_collision_requires_fraud_review(self) -> None:
+        """EVAL-CLIN-18: A standalone duplicate factor triggers P4 fraud review."""
         line1 = make_clean_line_evidence(1, "99214", 1.0, 150.00)
         output = build_clinical_alignment_output(
             expected_line_numbers=[1],
@@ -1077,24 +1372,24 @@ class TestClinicalAlignmentBenchmarkSuite:
             cpt_codes=["99214"],
             claim_amount=150.00,
         )
-        # Fraud score = 0.30 (Medium Risk interval [0.30, 0.70))
         ctx.fraud_output = FraudAgentOutput(
             agent_name="fraud",
-            verdict=AgentVerdict.PASS,
+            verdict=AgentVerdict.INDETERMINATE,
             confidence=0.95,
-            fraud_score=0.30,
-            risk_level=RiskLevel.MEDIUM,
-            duplicate_claim_detected=False,  # Canonical score without unapproved hard-stop override
+            fraud_score=1.0,
+            fraud_review_required=True,
+            risk_level=RiskLevel.REVIEW_REQUIRED,
+            duplicate_claim_detected=True,
             anomalies=["F-01: Historical claim tuple collision"],
             latency_ms=10,
         )
         decision = DeterministicDecisionEngine.adjudicate(ctx)
-        assert decision.rule_id_matched == RULE_P7_BORDERLINE_REVIEW
+        assert decision.rule_id_matched == RULE_P4_HIGH_FRAUD
         assert decision.decision == BusinessDecision.ESCALATE
-        assert decision.escalation_sub_reason == EscalationSubReason.HUMAN_REVIEW
+        assert decision.escalation_sub_reason == EscalationSubReason.FRAUD_REVIEW
 
     def test_eval_clin_19_canonical_fraud_rule_concordance(self) -> None:
-        """EVAL-CLIN-19: Cumulative fraud score 0.80 >= 0.70 triggers RULE-P4-HIGH-FRAUD -> ESCALATE(FRAUD_REVIEW)."""
+        """EVAL-CLIN-19: Multiple flagged fraud factors remain P4 review, not denial."""
         line1 = LineClinicalEvidence(
             line_number=1,
             service_code="49000",
@@ -1121,7 +1416,7 @@ class TestClinicalAlignmentBenchmarkSuite:
             low_ocr_quality_pages=[],
             latency_ms=10,
         )
-        assert output.verdict == AgentVerdict.FAIL
+        assert output.verdict == AgentVerdict.INDETERMINATE
 
         ctx = make_clean_decision_context(
             case_id="EVAL-CLIN-19",
@@ -1129,13 +1424,14 @@ class TestClinicalAlignmentBenchmarkSuite:
             cpt_codes=["49000"],
             claim_amount=5000.00,
         )
-        # Cumulative fraud score 0.80 (High Risk >= 0.70)
+        # Fraud review retains P4 precedence even when clinical evidence is insufficient.
         ctx.fraud_output = FraudAgentOutput(
             agent_name="fraud",
-            verdict=AgentVerdict.FAIL,
+            verdict=AgentVerdict.INDETERMINATE,
             confidence=0.95,
-            fraud_score=0.80,
-            risk_level=RiskLevel.HIGH,
+            fraud_score=1.0,
+            fraud_review_required=True,
+            risk_level=RiskLevel.REVIEW_REQUIRED,
             duplicate_claim_detected=True,
             anomalies=["F-01 collision", "F-02 document anomaly", "F-03 submission velocity"],
             latency_ms=10,
@@ -1151,37 +1447,14 @@ class TestClinicalAlignmentBenchmarkSuite:
         # prov_quality = 0.92, val_completeness = 1.0, model_conf = 0.90
         # Confidence = 0.40(0.92) + 0.35(1.0) + 0.25(0.90) = 0.368 + 0.35 + 0.225 = 0.943 >= 0.75
         span = make_provenance_span(conf=0.95, model_conf=0.90, evidence_score=0.92)
-        crit = MandatoryGuidelineCriterion(
-            criterion_id="CRIT-99214-01",
-            description="Moderate complexity",
-            is_mandatory=True,
-            evaluation_outcome=CriterionEvaluationOutcome.SATISFIED,
-            supporting_spans=[span],
-        )
-        guideline = GuidelineCitation(
-            guideline_id="LCD-99214-01",
-            guideline_version="2026.1",
-            guideline_title="E/M Services",
-            effective_date=date(2025, 1, 1),
-            criteria_evaluations=[crit],
-        )
-        line1 = LineClinicalEvidence(
-            line_number=1,
-            service_code="99214",
-            modality=ServiceModality.MEDICAL_VISIT_OR_EVAL,
-            billed_units=1.0,
-            billed_amount=150.00,
-            service_date=date(2026, 8, 1),
-            performance_status=PerformanceEvidenceStatus.DIRECTLY_DOCUMENTED_PERFORMANCE,
-            indication_status=ClinicalIndicationStatus.EXPLICITLY_INDICATED,
-            necessity_status=MedicalNecessityStatus.MET,
-            guideline_citation=guideline,
-            prior_auth_requirement=PriorAuthRequirementStatus.NOT_REQUIRED,
-            prior_auth_verification=PriorAuthVerificationStatus.NOT_APPLICABLE,
-            repeat_service_status=RepeatServiceStatus.NOT_A_REPEATED_SERVICE,
-            supporting_spans=[span],
-            line_verdict=AgentVerdict.PASS,
-            clinical_finding_summary="Documented E/M visit.",
+        line1 = make_verified_line(
+            1,
+            "99214",
+            ServiceModality.MEDICAL_VISIT_OR_EVAL,
+            span,
+            "CRIT-99214-01",
+            "Moderate complexity decision making",
+            150.00,
         )
         output_clean = build_clinical_alignment_output(
             expected_line_numbers=[1],
@@ -1361,6 +1634,25 @@ class TestClinicalDecisionRoutingRegressions:
             billed_amount=4500.00,
             service_date=date(2026, 8, 1),
             clinical_notes_text="Patient refused surgery; managed conservatively with oral antibiotics.",
+            clinical_notes_verified=True,
+            supporting_spans=[
+                make_provenance_span(
+                    snippet="Patient refused surgery; managed conservatively with oral antibiotics."
+                ).model_copy(update={
+                    "assertion_status": ClinicalAssertionStatus.NEGATED,
+                    "evidence_relevance_verified": True,
+                })
+            ],
+            guideline_repo=InMemoryClinicalGuidelineRepository(
+                indications={"47562": {
+                    "name": "laparoscopic cholecystectomy",
+                    "anatomy": "gallbladder",
+                    "valid_icd_prefixes": [],
+                    "assertion_patterns": {
+                        "contradicted_performance_patterns": [r"refused surgery"],
+                    },
+                }}
+            ),
         )
         assert line_conflict.line_verdict == AgentVerdict.CONFLICT
 
@@ -1733,26 +2025,23 @@ class TestClinicalDecisionRoutingRegressions:
         state = clinical_alignment_node(state)
 
         assert "clinical_alignment_node" in state.get("completed_nodes", [])
-        assert state.get("clinical_alignment_verdict") == AgentVerdict.PASS.value
-        clin_conf = state.get("clinical_alignment_confidence")
-        assert clin_conf is not None and clin_conf >= 0.75
+        assert state.get("clinical_alignment_verdict") == AgentVerdict.INDETERMINATE.value
+        assert state.get("clinical_alignment_confidence") is None
 
         summary = state.get("clinical_alignment_summary")
         assert summary is not None
         assert summary.get("total_lines_assessed") == 1
-        assert summary.get("lines_fully_supported_count") == 1
-        assert summary.get("assessment_sufficient") is True
+        assert summary.get("lines_fully_supported_count") == 0
+        assert summary.get("assessment_sufficient") is False
+        assert summary.get("evidence_sufficient") is False
 
         # Verify line-level evidence and provenance spans
         line_assessments = summary.get("line_assessments", [])
         assert len(line_assessments) == 1
         line1 = line_assessments[0]
-        assert line1.get("line_verdict") == AgentVerdict.PASS.value
+        assert line1.get("line_verdict") == AgentVerdict.INDETERMINATE.value
         assert line1.get("service_code") == "99214"
-        spans = line1.get("supporting_spans", [])
-        assert len(spans) > 0
-        assert spans[0].get("document_id") == "DOC-CLIN-01"
-        assert spans[0].get("evidence_quality_score") is not None
+        assert line1.get("supporting_spans", []) == []
 
     def test_missing_clinical_documentation_cannot_produce_clean_approval(self) -> None:
         """10. Packet without clinical documentation cannot produce clean APPROVE; routes to human review."""
@@ -1847,6 +2136,47 @@ class TestClinicalDecisionRoutingRegressions:
 class TestDischargeSummaryClinicalAlignment:
     """Tests for Primary, Secondary, and Hospital Course clinical alignment in discharge summaries."""
 
+    def test_validated_catalog_contraindication_is_a_hard_clinical_failure(self) -> None:
+        repo = InMemoryClinicalGuidelineRepository(
+            indications={
+                "99214": {
+                    "name": "outpatient office visit",
+                    "anatomy": "outpatient evaluation",
+                    "valid_icd_prefixes": ["I25"],
+                    "contraindicated_incompatible_prefixes": ["E11"],
+                }
+            },
+            valid_diagnosis_codes={"E11.9"},
+        )
+
+        line = DeterministicClinicalAlignmentEngine.evaluate_line_item(
+            line_number=1,
+            service_code="99214",
+            billed_units=1.0,
+            billed_amount=200.0,
+            service_date=date(2026, 8, 1),
+            diagnosis_codes=["E11.9"],
+            primary_icd10_codes=["E11.9"],
+            guideline_repo=repo,
+        )
+
+        assert line.indication_status == ClinicalIndicationStatus.CLINICALLY_CONTRAINDICATED
+        assert line.line_verdict == AgentVerdict.FAIL
+        assert "validated diagnosis code(s) E11.9" in (line.discrepancy_description or "")
+
+    def test_discharge_summary_normalizes_ocr_codes_via_active_catalog(self, monkeypatch) -> None:
+        repo = InMemoryClinicalGuidelineRepository(valid_diagnosis_codes={"I25.10", "G43.909"})
+        monkeypatch.setattr(DeterministicClinicalAlignmentEngine, "_default_repo_instance", repo)
+
+        analysis = DischargeSummaryParser.parse(
+            "FINAL DIAGNOSES\n"
+            "Primary: Coronary artery disease (ICD-10: 125.10)\n"
+            "Secondary: Migraine (ICD-10: G43909)"
+        )
+
+        assert analysis.primary_icd_codes == ["I25.10"]
+        assert analysis.secondary_icd_codes == ["G43.909"]
+
     def test_discharge_summary_parser_extracts_primary_secondary_course(self) -> None:
         raw_text = """NORTHWESTERN MEMORIAL HOSPITAL
 DISCHARGE SUMMARY
@@ -1903,9 +2233,17 @@ Vital signs remained stable throughout the hospitalization. The patient was clea
             primary_diagnosis_text="Primary: Urinary tract infection (N39.0)",
             secondary_diagnosis_text="Secondary: Unspecified acute appendicitis (ICD-10: K35.80)",
             hospital_course_text="Patient underwent laparoscopic appendectomy without complication.",
+            guideline_repo=InMemoryClinicalGuidelineRepository(
+                indications={"44970": {
+                    "name": "laparoscopic appendectomy",
+                    "anatomy": "appendix",
+                    "valid_icd_prefixes": ["K35"],
+                }},
+                valid_diagnosis_codes={"K35.80"},
+            ),
         )
         assert line.indication_status == ClinicalIndicationStatus.EXPLICITLY_INDICATED
-        assert line.line_verdict == AgentVerdict.PASS
+        assert line.line_verdict == AgentVerdict.INDETERMINATE
         assert "K35.80" in line.secondary_icd10_codes
 
     def test_clinical_alignment_hospital_course_substantiates_lab_and_imaging(self) -> None:
@@ -1928,10 +2266,10 @@ Vital signs remained stable throughout the hospitalization. The patient was clea
             hospital_course_text="Complete diagnostic workup including laboratory evaluation and imaging studies was performed.",
         )
         assert line.performance_status == PerformanceEvidenceStatus.DIRECTLY_DOCUMENTED_PERFORMANCE
-        assert line.line_verdict == AgentVerdict.PASS
+        assert line.line_verdict == AgentVerdict.INDETERMINATE
 
-    def test_clinical_alignment_node_with_discharge_summary_primary_secondary_course(self) -> None:
-        """Node 6C verifies multi-line claim with primary, secondary diagnoses and hospital course without escalation."""
+    def test_clinical_alignment_node_without_persisted_ocr_is_indeterminate(self) -> None:
+        """Inline document text cannot substitute for persisted OCR evidence."""
         state = create_initial_case_state("CASE-DISCH-01", execution_id="EXEC-DISCH-01")
         state["claims_summary"] = {
             "cpt_codes": [{"value": "44970"}, {"value": "80053"}],
@@ -1992,11 +2330,162 @@ Discharged on 08/03/2026 in stable condition.
 
         # Execute Node 6C
         state = clinical_alignment_node(state)
-        assert state.get("clinical_alignment_verdict") == AgentVerdict.PASS.value
-        assert state.get("clinical_alignment_confidence", 0.0) >= 0.75
+        assert state.get("clinical_alignment_verdict") == AgentVerdict.INDETERMINATE.value
+        assert state.get("clinical_alignment_confidence") is None
         summary = state.get("clinical_alignment_summary")
-        assert summary.get("assessment_sufficient") is True
-        assert summary.get("lines_fully_supported_count") == 2
+        assert summary.get("assessment_sufficient") is False
+        assert summary.get("evidence_sufficient") is False
+        assert summary.get("lines_fully_supported_count") == 0
+        assert summary.get("lines_indeterminate_count") == 2
+
+    def test_hindi_knee_case_requires_verified_guideline_and_patient_evidence(self, monkeypatch) -> None:
+        """Hindi knee-OA claims pass only when versioned criteria match persisted OCR evidence."""
+        repo = InMemoryClinicalGuidelineRepository(
+            guidelines={
+                "27447": {
+                    "guideline_id": "LCD-27447-TEST",
+                    "guideline_version": "test-2026.1",
+                    "guideline_title": "Total knee arthroplasty",
+                    "payer_product": "TEST",
+                    "jurisdiction": "TEST",
+                    "source_reference": "fixture://lcd/27447",
+                    "source_chunk_id": "LCD-27447-TEST",
+                    "source_verified": True,
+                    "effective_date": date(2025, 1, 1),
+                    "expiration_date": None,
+                    "requires_prior_auth": False,
+                    "mandatory_criteria": [
+                        {
+                            "criterion_id": "CRIT-TKA-CONSERVATIVE",
+                            "description": "Documented conservative therapy for at least six weeks",
+                            "source_reference": "fixture://lcd/27447#conservative",
+                            "source_chunk_id": "CRIT-TKA-CONSERVATIVE",
+                            "source_verified": True,
+                            "requirement_type": "EVIDENCE_REGEX",
+                            "evaluation_parameters": {
+                                "pattern": r"(?:कम से कम|at least)\s+6 सप्ताह.*(?:फिजियोथेरेपी|therapy)",
+                            },
+                            "is_mandatory": True,
+                        },
+                        {
+                            "criterion_id": "CRIT-TKA-RADIOGRAPHIC",
+                            "description": "Radiographic evidence of advanced joint disease",
+                            "source_reference": "fixture://lcd/27447#radiographic",
+                            "source_chunk_id": "CRIT-TKA-RADIOGRAPHIC",
+                            "source_verified": True,
+                            "requirement_type": "EVIDENCE_REGEX",
+                            "evaluation_parameters": {"pattern": r"(?:Grade|ग्रेड)\s*3"},
+                            "is_mandatory": True,
+                        },
+                    ],
+                }
+            },
+            indications={
+                "27447": {
+                    "name": "Total Knee Arthroplasty",
+                    "anatomy": "Knee Joint",
+                    "valid_icd_prefixes": ("M17",),
+                    "keywords": (),
+                    "assertion_patterns": {
+                        "affirmed_diagnosis_patterns": [r"Primary Diagnosis.*M17\.9"],
+                        "affirmed_performance_patterns": [r"27447.*की गई"],
+                    },
+                }
+            },
+            valid_diagnosis_codes={"M17.9"},
+        )
+        monkeypatch.setattr(DeterministicClinicalAlignmentEngine, "_default_repo_instance", repo)
+
+        def run_case(hospital_course: str, interpreter: Any = None) -> dict:
+            case_id = "CASE-HI-KNEE-GROUNDING"
+            doc_id = "DOC-HI-DISCHARGE"
+            document_text = (
+                "DISCHARGE SUMMARY\n"
+                "Primary Diagnosis: घुटने का ऑस्टियोआर्थराइटिस (ICD-10: M17.9)\n"
+                "PROCEDURES PERFORMED:\nCPT 27447 Total knee arthroplasty की गई\n"
+                f"HOSPITAL COURSE:\n{hospital_course}"
+            )
+            span = OCRTextSpan(
+                span_id="span-p1-knee-record",
+                page_number=1,
+                text=document_text,
+                confidence=0.98,
+                bbox=BBox(x0=0.05, y0=0.05, x1=0.95, y1=0.95),
+            )
+            payload = OCRDocumentPayload(
+                document_id=doc_id,
+                case_id=case_id,
+                total_pages=1,
+                pages=[OCRPagePayload(page_number=1, raw_text=document_text, spans=[span])],
+            )
+            storage = InMemoryStorageBackend(share_store=False)
+            payload_key = f"ocr/{case_id}/{doc_id}.json"
+            storage.put_bytes(payload_key, payload.model_dump_json().encode(), "application/json")
+            doc = DocumentReference(
+                document_id=doc_id,
+                object_key="unused/raw.png",
+                mime_type="image/png",
+                checksum="fixture",
+                split_source_page_indices=[1],
+            )
+            doc["doc_type"] = DocumentType.DISCHARGE_SUMMARY.value
+            doc["file_name"] = "discharge_summary.png"
+            doc["ocr_payload_uri"] = payload_key
+            state = create_initial_case_state(case_id, execution_id="EXEC-HI-KNEE")
+            state["documents"] = [doc]
+            state["claims_summary"] = {
+                "service_lines": [{
+                    "line_number": 1,
+                    "hcpcs": {"value": "27447", "provenance": claim_span_provenance("27447")},
+                    "amount": {"value": 18500.0},
+                    "units": {"value": 1.0},
+                    "service_date": {"value": "2026-10-18"},
+                }],
+                "icd10_codes": [{"value": "M17.9", "provenance": claim_span_provenance("M17.9")}],
+            }
+            state["policy_coverage_summary"] = {"payer_product": "TEST", "jurisdiction": "TEST"}
+            return clinical_alignment_node(
+                state,
+                storage=storage,
+                relationship_interpreter=interpreter or _SupportedInterpreter("span-p1-knee-record"),
+            )
+
+        complete = run_case(
+            "मरीज ने कम से कम 6 सप्ताह फिजियोथेरेपी ली। X-ray showed Grade 3 joint disease."
+        )
+        assert complete["clinical_alignment_verdict"] == AgentVerdict.PASS.value
+        complete_line = complete["clinical_alignment_summary"]["line_assessments"][0]
+        assert complete_line["primary_icd10_codes"] == ["M17.9"]
+        assert complete_line["primary_icd10_codes"] != ["M17.11"]
+        assert all(
+            criterion["evaluation_outcome"] == CriterionEvaluationOutcome.SATISFIED.value
+            and criterion["requirement_source_verified"]
+            and criterion["supporting_spans"][0]["verification_status"] == EvidenceVerificationStatus.VERIFIED.value
+            for criterion in complete_line["guideline_citation"]["criteria_evaluations"]
+        )
+
+        missing = run_case("X-ray showed Grade 3 joint disease.")
+        assert missing["clinical_alignment_verdict"] == AgentVerdict.INDETERMINATE.value
+        missing_line = missing["clinical_alignment_summary"]["line_assessments"][0]
+        assert CriterionEvaluationOutcome.UNASSESSED_EVIDENCE_UNAVAILABLE.value in {
+            criterion["evaluation_outcome"]
+            for criterion in missing_line["guideline_citation"]["criteria_evaluations"]
+        }
+
+        class _Abstaining:
+            def __init__(self, relationship: str | None) -> None:
+                self.relationship = relationship
+
+            def assess(self, candidate_lines):
+                if self.relationship is None:
+                    return {}
+                supported = _SupportedInterpreter("span-p1-knee-record").assess(candidate_lines)
+                return {n: p.model_copy(update={"relationship": self.relationship}) for n, p in supported.items()}
+
+        course = "मरीज ने कम से कम 6 सप्ताह फिजियोथेरेपी ली। X-ray showed Grade 3 joint disease."
+        for abstained in (_Abstaining(None), _Abstaining("UNCERTAIN"), _Abstaining("NOT_ESTABLISHED")):
+            result = run_case(course, abstained)
+            assert result["clinical_alignment_verdict"] == AgentVerdict.INDETERMINATE.value
 
 
 

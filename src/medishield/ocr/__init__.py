@@ -1,10 +1,10 @@
 from medishield.ocr.ocr_reconcile import (
-    SYNTHETIC_VALID_CPT_CODES,
     ArithmeticCheckStatus,
     GeminiVisionClient,
     HuggingFaceVisionClient,
     ReconcileStatus,
     VisionClient,
+    detect_claim_currency,
     evaluate_claim_totals,
     extract_cpt_codes_from_table,
     extract_money_value_geometrically,
@@ -17,7 +17,6 @@ from medishield.ocr.preprocessor import (
 )
 
 __all__ = [
-    "SYNTHETIC_VALID_CPT_CODES",
     "ArithmeticCheckStatus",
     "DefaultOCREngine",
     "GeminiVisionClient",
@@ -25,6 +24,7 @@ __all__ = [
     "OCRPreprocessorEngine",
     "ReconcileStatus",
     "VisionClient",
+    "detect_claim_currency",
     "evaluate_claim_totals",
     "extract_cpt_codes_from_table",
     "extract_money_value_geometrically",

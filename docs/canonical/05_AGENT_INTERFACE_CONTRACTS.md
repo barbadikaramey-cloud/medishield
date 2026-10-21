@@ -266,27 +266,28 @@ class PolicyCoverageOutput(BaseModel):
 
 ## 7. Fraud Detection Agent Contract
 
-The Fraud Detection Agent scores claims against a deterministic feature suite and patient billing history.
+The Fraud Detection Agent checks a deterministic feature suite and patient billing history. Features do not have fractional weights or normalized contribution scores. Each detector emits a binary finding and retains its raw measurement for audit context.
 
 ```python
 class FraudFeature(BaseModel):
     feature_name: str
     raw_value: float
-    normalized_score: float = Field(..., ge=0.0, le=1.0)
-    weight: float = Field(..., ge=0.0, le=1.0)
+    detected: bool
     description: str
 
 class RiskLevel(str, Enum):
-    LOW = "LOW"          # fraud_score < 0.30
-    MEDIUM = "MEDIUM"    # 0.30 <= fraud_score < 0.70
-    HIGH = "HIGH"        # fraud_score >= 0.70
+    LOW = "LOW"
+    REVIEW_REQUIRED = "REVIEW_REQUIRED"
+    MEDIUM = "MEDIUM"    # Historical records only
+    HIGH = "HIGH"        # Historical records only
 
 class FraudAgentOutput(BaseModel):
     agent_name: str = "fraud_agent"
     verdict: str = Field(..., description="AgentVerdict: PASS, FAIL, INDETERMINATE, UNAVAILABLE")
     confidence: float = Field(..., ge=0.0, le=1.0)
     
-    fraud_score: float = Field(..., ge=0.0, le=1.0)
+    fraud_score: float = Field(..., ge=0.0, le=1.0, description="Compatibility indicator: 1.0 when fraud review is required, otherwise 0.0")
+    fraud_review_required: bool = False
     risk_level: RiskLevel
     features: List[FraudFeature]
     anomalies: List[str] = Field(default_factory=list)

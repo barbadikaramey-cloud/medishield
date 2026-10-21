@@ -4,7 +4,7 @@ from datetime import date
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import Session
 
 from medishield.agents.kyc import (
@@ -18,9 +18,12 @@ from medishield.db.models import (
     Base,
     Case,
     Enrollment,
+    EnrollmentRiderApplication,
     Member,
     Policy,
+    PolicyRider,
 )
+from medishield.db.schema_compat import prepare_sqlite_schema as prepare_legacy_sqlite_schema
 from medishield.db.seeder import seed_benchmark_dataset, seed_demo_cases_if_empty
 from medishield.db.session import prepare_sqlite_schema
 from medishield.domain.contracts import (
@@ -60,6 +63,69 @@ def test_sqlite_tables_created_and_seeded(sqlite_session: Session):
 
     case_count = sqlite_session.query(Case).count()
     assert case_count >= 2, "Expected 2 initial demo cases"
+
+
+def test_benchmark_seed_rerun_does_not_duplicate_members(sqlite_session: Session):
+    member_count = sqlite_session.query(Member).count()
+    rider_count = sqlite_session.query(PolicyRider).count()
+    application_count = sqlite_session.query(EnrollmentRiderApplication).count()
+
+    seed_benchmark_dataset(sqlite_session)
+
+    assert sqlite_session.query(Member).count() == member_count
+    assert sqlite_session.query(PolicyRider).count() == rider_count
+    assert sqlite_session.query(EnrollmentRiderApplication).count() == application_count
+    assert (
+        sqlite_session.query(EnrollmentRiderApplication)
+        .filter(EnrollmentRiderApplication.status != "REQUESTED")
+        .count()
+        == 0
+    )
+
+
+def test_policy_rider_terms_and_patient_requests_are_persisted(sqlite_session: Session):
+    riders = {
+        rider.rider_code: rider
+        for rider in sqlite_session.query(PolicyRider).all()
+    }
+    assert {
+        code: (rider.waiting_period_value, rider.waiting_period_unit)
+        for code, rider in riders.items()
+    } == {
+        "MATERNITY": (9, "MONTH"),
+        "CRITICAL_ILLNESS": (90, "DAY"),
+        "OPD": (30, "DAY"),
+    }
+
+    applications = sqlite_session.query(EnrollmentRiderApplication).all()
+    assert applications
+    for application in applications:
+        assert application.status == "REQUESTED"
+        assert application.effective_start_date is None
+        assert application.enrollment.policy_version_id == application.policy_rider.policy_version_id
+
+
+def test_legacy_sqlite_schema_receives_new_model_columns(tmp_path: Path):
+    """Ensures databases created before migration 005 remain startup-compatible."""
+    engine = create_engine(f"sqlite:///{(tmp_path / 'legacy.db').as_posix()}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE policies (
+                id VARCHAR(36) PRIMARY KEY,
+                policy_id VARCHAR(32) NOT NULL,
+                plan_name VARCHAR(128) NOT NULL,
+                policy_type VARCHAR(32) NOT NULL,
+                is_active BOOLEAN NOT NULL DEFAULT 1,
+                created_at DATETIME NOT NULL
+            )
+            """
+        )
+
+        prepare_legacy_sqlite_schema(connection)
+
+    columns = {column["name"] for column in inspect(engine).get_columns("policies")}
+    assert {"payer_product", "jurisdiction"} <= columns
 
 
 def test_pt16658_karen_harris_seeded_correctly(sqlite_session: Session):

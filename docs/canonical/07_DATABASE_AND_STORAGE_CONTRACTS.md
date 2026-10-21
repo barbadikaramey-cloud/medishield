@@ -163,6 +163,45 @@ CREATE TABLE enrollments (
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE policy_riders (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    policy_version_id UUID NOT NULL REFERENCES policy_versions(id) ON DELETE CASCADE,
+    rider_code VARCHAR(32) NOT NULL,
+    name VARCHAR(128) NOT NULL,
+    waiting_period_value INTEGER NOT NULL CHECK (waiting_period_value >= 0),
+    waiting_period_unit VARCHAR(16) NOT NULL CHECK (waiting_period_unit IN ('DAY', 'MONTH')),
+    waiting_period_start_event VARCHAR(64) NOT NULL,
+    benefit_limit_text VARCHAR(256),
+    covered_services JSONB NOT NULL,
+    exclusions JSONB NOT NULL,
+    source_section VARCHAR(32) NOT NULL,
+    source_page INTEGER,
+    source_pdf_key VARCHAR(512) NOT NULL,
+    source_text TEXT NOT NULL,
+    source_verified BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(policy_version_id, rider_code)
+);
+
+CREATE TABLE enrollment_rider_applications (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    enrollment_id UUID NOT NULL REFERENCES enrollments(id) ON DELETE CASCADE,
+    policy_rider_id UUID NOT NULL REFERENCES policy_riders(id) ON DELETE RESTRICT,
+    status VARCHAR(20) NOT NULL DEFAULT 'REQUESTED'
+        CHECK (status IN ('REQUESTED', 'APPROVED', 'DENIED', 'WITHDRAWN')),
+    requested_on DATE,
+    requested_effective_date DATE,
+    effective_start_date DATE,
+    effective_end_date DATE,
+    source_document_ref VARCHAR(128) UNIQUE,
+    approval_reference VARCHAR(128),
+    approved_by VARCHAR(64),
+    approved_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (status != 'APPROVED' OR
+        (approved_by IS NOT NULL AND approved_at IS NOT NULL AND effective_start_date IS NOT NULL))
+);
+
 CREATE TABLE policy_chunks (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     policy_version_id UUID NOT NULL REFERENCES policy_versions(id) ON DELETE CASCADE,

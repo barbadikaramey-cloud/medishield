@@ -36,7 +36,7 @@ def _build_sample_context(
     kyc_verdict: AgentVerdict = AgentVerdict.PASS,
     claims_verdict: AgentVerdict = AgentVerdict.PASS,
     policy_verdict: AgentVerdict = AgentVerdict.PASS,
-    fraud_score: float = 0.05,
+    fraud_score: float = 0.0,
 ) -> tuple[DecisionInputContext, OrchestratorOutput]:
     now = datetime.now(UTC)
 
@@ -113,8 +113,7 @@ def _build_sample_context(
             FraudFeature(
                 feature_name="duplicate_claim",
                 raw_value=0.0,
-                normalized_score=0.0,
-                weight=0.25,
+                detected=False,
                 description="Duplicate collision",
             )
         ],
@@ -168,6 +167,16 @@ def test_deterministic_explanation_approve():
     assert "Straight-Through Processing" in explanation
 
 
+def test_deterministic_explanation_preserves_zero_coverage():
+    """A valid zero coverage value must not be replaced by the default 100%."""
+    context, decision_output = _build_sample_context()
+    context.policy_output.coverage_percentage = 0.0
+
+    explanation = generate_deterministic_explanation(context, decision_output)
+
+    assert "**Coverage Percentage:** `0.0%`" in explanation
+
+
 def test_deterministic_explanation_escalate():
     """Verifies that an escalated case highlights escalation sub-reason and operator action."""
     context, decision_output = _build_sample_context()
@@ -201,20 +210,21 @@ def test_generate_decision_explanation_llm_fallback():
     assert "$4,095.00" in explanation
 
 
-def test_generate_decision_explanation_llm_success():
-    """Verifies that when Groq returns a rich JSON explanation, it is adopted."""
+def test_generate_decision_explanation_ignores_unverified_llm_output():
+    """Unverified LLM prose must never replace the evidence-grounded explanation."""
     context, decision_output = _build_sample_context()
 
     mock_client = MagicMock()
     mock_client.is_available.return_value = True
     mock_client.generate_json.return_value = {
-        "detailed_explanation": "### Clinical Rationale\nThis claim was fully approved with zero copay based on verified Gold plan."
+        "detailed_explanation": "Fabricated fact: this claim has zero copay and guarantees payment."
     }
 
     explanation = generate_decision_explanation(context, decision_output, llm_client=mock_client)
 
-    assert "### Clinical Rationale" in explanation
-    assert "Gold plan" in explanation
+    assert "Adjudication Decision: APPROVE" in explanation
+    assert "Fabricated fact" not in explanation
+    mock_client.generate_json.assert_not_called()
 
 
 def test_case_detail_schema_has_detailed_explanation():
@@ -233,12 +243,26 @@ def test_case_detail_schema_has_detailed_explanation():
     assert resp.justification == "Clean pass"
 
 
-def test_clinical_alignment_explanation_includes_diagnosis_procedure_misalignment():
+def test_clinical_alignment_explanation_includes_diagnosis_procedure_misalignment(monkeypatch):
     """Verifies that diagnosis-procedure clinical misalignment is explicitly surfaced in Section 6 of explanation."""
     context, decision_output = _build_sample_context()
 
+    from medishield.db.catalog import InMemoryClinicalGuidelineRepository
     from medishield.domain.clinical_align import DeterministicClinicalAlignmentEngine
     from medishield.domain.contracts import ClinicalIndicationStatus
+
+    repo = InMemoryClinicalGuidelineRepository(
+        indications={
+            "27447": {
+                "name": "Total Knee Arthroplasty (TKA)",
+                "anatomy": "Knee Joint",
+                "valid_icd_prefixes": ("M17",),
+                "keywords": (),
+            }
+        },
+        valid_diagnosis_codes={"S52", "M54.5"},
+    )
+    monkeypatch.setattr(DeterministicClinicalAlignmentEngine, "_default_repo_instance", repo)
 
     line_ev = DeterministicClinicalAlignmentEngine.evaluate_line_item(
         line_number=1,
@@ -410,9 +434,8 @@ def test_deterministic_explanation_rich_clinical_alignment_details():
     assert "satisfies 2 midnights under facility contract" in explanation
 
 
-def test_generate_decision_explanation_llm_payload_contains_rich_clinical_details():
-    """Verifies that Groq LLM receives comprehensive clinical facts in payload and specific clinical directives."""
-    import json
+def test_generate_decision_explanation_uses_rich_deterministic_clinical_details():
+    """Uses sourced clinical details directly without asking an LLM to elaborate."""
     from datetime import date
 
     from medishield.domain.contracts import (
@@ -530,62 +553,104 @@ def test_generate_decision_explanation_llm_payload_contains_rich_clinical_detail
     )
     context.clinical_output = clin_output
 
-    captured_prompt = {}
-
-    def mock_generate_json(prompt, system_prompt, **kwargs):
-        captured_prompt["prompt"] = prompt
-        captured_prompt["system_prompt"] = system_prompt
-        return {
-            "detailed_explanation": (
-                "### ✅ Executive Decision Summary: APPROVE\n\n"
-                "#### 6. Clinical Alignment & Medical Necessity\n"
-                "- **Medical Indication:** CPT 44970 is clinically indicated by acute appendicitis (K35.80).\n"
-                "- **Evidence Grounding:** Operative report validates laparoscopic technique.\n"
-                "- **Guideline Compliance:** ACS Acute Appendicitis guideline met.\n"
-                "- **Inpatient Bed Days:** 2.0 bed days reconciled under midnight census convention.\n"
-            )
-        }
-
     mock_client = MagicMock()
     mock_client.is_available.return_value = True
-    mock_client.generate_json.side_effect = mock_generate_json
+    mock_client.generate_json.return_value = {
+        "detailed_explanation": "Unsupported additional diagnosis and guideline claims."
+    }
 
     result = generate_decision_explanation(context, decision_output, llm_client=mock_client)
 
-    # Ensure result adopted
-    assert "CPT 44970 is clinically indicated by acute appendicitis" in result
+    assert "Operative report confirms laparoscopic appendectomy" in result
+    assert "LCD-44970-01" in result
+    assert "Admission on 2026-03-10 through discharge on 2026-03-12" in result
+    assert "Unsupported additional diagnosis" not in result
+    mock_client.generate_json.assert_not_called()
 
-    # Check payload structure
-    prompt_str = captured_prompt["prompt"]
-    json_start = prompt_str.find("```json\n") + len("```json\n")
-    json_end = prompt_str.find("\n```\n\nGenerate")
-    payload = json.loads(prompt_str[json_start:json_end])
 
-    clin_payload = payload["clinical_alignment"]
-    assert clin_payload["verdict"] == "PASS"
-    assert clin_payload["total_lines_assessed"] == 1
-    assert len(clin_payload["line_assessments"]) == 1
 
-    la_p = clin_payload["line_assessments"][0]
-    assert la_p["service_code"] == "44970"
-    assert la_p["primary_icd10_codes"] == ["K35.80"]
-    assert la_p["secondary_icd10_codes"] == ["R10.31"]
-    assert la_p["guideline_citation"]["guideline_id"] == "LCD-44970-01"
-    assert la_p["guideline_citation"]["guideline_title"] == "Laparoscopic Appendectomy"
-    assert la_p["clinical_finding_summary"] == "Operative report confirms laparoscopic appendectomy; pathology confirms acute suppurative appendicitis."
+def test_explanation_names_flagged_document_and_inconsistency():
+    """Tamper flag must name the flagged document and the inconsistency, in short bullets."""
+    from medishield.domain.contracts import TamperSignal
 
-    # Check bed-day payload
-    bdr_p = clin_payload["bed_day_reconciliation"]
-    assert bdr_p["billed_bed_days"] == 2.0
-    assert bdr_p["admission_date"] == "2026-03-10"
-    assert bdr_p["discharge_date"] == "2026-03-12"
-    assert bdr_p["billing_convention"] == "MIDNIGHT_CENSUS"
-    assert bdr_p["is_reconciled"] is True
+    context, decision_output = _build_sample_context()
+    context.kyc_output.tamper_signals = [
+        TamperSignal(
+            signal_type="ELA_ANOMALY",
+            severity="HIGH",
+            description="Localized JPEG compression anomalies (2 regions).",
+            confidence=0.72,
+            document_id="doc-1",
+            document_name="id_card.jpg",
+        ),
+        TamperSignal(
+            signal_type="FORENSIC_RETRIEVAL_FAILED",
+            severity="LOW",
+            description="Forensics incomplete.",
+            confidence=0.5,
+        ),
+    ]
+    context.security_tamper_score = 0.72
 
-    # Check system prompt directives
-    sys_prompt = captured_prompt["system_prompt"]
-    assert "Medical Indication Rationale:" in sys_prompt
-    assert "Performance & Evidence Grounding:" in sys_prompt
-    assert "Clinical Practice Guidelines:" in sys_prompt
-    assert "Inpatient Bed-Day & Stay Reconciliation:" in sys_prompt
+    explanation = generate_deterministic_explanation(context, decision_output)
 
+    assert "Flagged Documents" in explanation
+    assert "id_card.jpg" in explanation
+    assert "Ela Anomaly (HIGH, 72%)" in explanation
+    assert "Localized JPEG compression anomalies" in explanation
+    assert "Forensics incomplete" not in explanation
+    assert "Threshold: 50%" not in explanation
+
+
+def test_clinical_relevancy_reason_is_rendered_once() -> None:
+    from medishield.db.enums import DocumentType
+    from medishield.domain.contracts import (
+        ClinicalIndicationStatus,
+        LineClinicalEvidence,
+        MedicalNecessityStatus,
+        PerformanceEvidenceStatus,
+        PriorAuthRequirementStatus,
+        PriorAuthVerificationStatus,
+        RepeatServiceStatus,
+        ServiceModality,
+        build_clinical_alignment_output,
+    )
+
+    context, decision_output = _build_sample_context()
+    reason = "Clinical relationship between CPT 27447 and ICD-10 M17.9 is uncertain."
+    line = LineClinicalEvidence(
+        line_number=1,
+        service_code="27447",
+        modality=ServiceModality.SURGICAL_PROCEDURE,
+        billed_units=1.0,
+        billed_amount=18500.0,
+        performance_status=PerformanceEvidenceStatus.NOT_DOCUMENTED,
+        indication_status=ClinicalIndicationStatus.POTENTIALLY_RELATED,
+        necessity_status=MedicalNecessityStatus.GUIDELINE_UNAVAILABLE,
+        prior_auth_requirement=PriorAuthRequirementStatus.REQUIREMENT_UNKNOWN,
+        prior_auth_verification=PriorAuthVerificationStatus.MISSING_OR_UNVERIFIED,
+        repeat_service_status=RepeatServiceStatus.UNASSESSED,
+        line_verdict=AgentVerdict.INDETERMINATE,
+        primary_icd10_codes=["M17.9"],
+        clinical_finding_summary=reason,
+        discrepancy_description=reason,
+    )
+    clinical = build_clinical_alignment_output(
+        expected_line_numbers=[1],
+        line_assessments=[line],
+        clinical_documents_present=["DOC-CLINICAL"],
+    )
+    context.clinical_output = clinical
+    context.present_document_types = [DocumentType.CLAIM_FORM, DocumentType.DISCHARGE_SUMMARY]
+    decision_output = decision_output.model_copy(update={
+        "decision": BusinessDecision.ESCALATE,
+        "rule_id_matched": "RULE-P3-AMBIGUITY",
+    })
+
+    explanation = generate_deterministic_explanation(context, decision_output)
+
+    assert explanation.count(reason) == 1
+    assert "Clinical Discrepancies & Reviewer Flags" not in explanation
+    assert "Clinical Assessment Summary" not in explanation
+    assert "POTENTIALLY_RELATED" not in explanation
+    assert "GUIDELINE_UNAVAILABLE" not in explanation

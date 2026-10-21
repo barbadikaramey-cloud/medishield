@@ -17,30 +17,6 @@ from medishield.domain.contracts import (
 )
 from medishield.domain.provenance import ProvenanceValue
 
-# ── Feature Weights (Canonical Spec 10 § 2.1) ─────────────────────────────────
-# Sum of weights strictly equals 1.00
-WEIGHT_DUPLICATE_CLAIM_KEY = 0.30
-WEIGHT_IMAGE_TAMPER_ANOMALY = 0.20
-WEIGHT_RAPID_RESUBMISSION_VELOCITY = 0.15
-WEIGHT_PROVIDER_BILLING_OUTLIER = 0.15
-WEIGHT_SERVICE_DATE_INCONSISTENCY = 0.10
-WEIGHT_LINE_TOTAL_ARITHMETIC_DRIFT = 0.05
-WEIGHT_MEMBER_CLAIM_FREQUENCY_30D = 0.05
-
-FEATURE_WEIGHTS = {
-    "duplicate_claim_key": WEIGHT_DUPLICATE_CLAIM_KEY,
-    "image_tamper_anomaly": WEIGHT_IMAGE_TAMPER_ANOMALY,
-    "rapid_resubmission_velocity": WEIGHT_RAPID_RESUBMISSION_VELOCITY,
-    "provider_billing_outlier": WEIGHT_PROVIDER_BILLING_OUTLIER,
-    "service_date_inconsistency": WEIGHT_SERVICE_DATE_INCONSISTENCY,
-    "line_total_arithmetic_drift": WEIGHT_LINE_TOTAL_ARITHMETIC_DRIFT,
-    "member_claim_frequency_30d": WEIGHT_MEMBER_CLAIM_FREQUENCY_30D,
-}
-
-# ── Risk Tiering Thresholds (Canonical Spec 10 § 3.1) ─────────────────────────
-FRAUD_THRESHOLD_LOW = 0.30     # score < 0.30 -> LOW (PASS)
-FRAUD_THRESHOLD_HIGH = 0.70    # score >= 0.70 -> HIGH (FAIL)
-
 
 class FraudEvaluationContext(BaseModel):
     """External relational database & statistical context for claim fraud evaluation."""
@@ -92,12 +68,10 @@ def calculate_duplicate_claim_feature(duplicate_match_id: str | None) -> FraudFe
     Score: 1.0 if match exists, 0.0 if unique.
     """
     is_duplicate = duplicate_match_id is not None
-    normalized_score = 1.0 if is_duplicate else 0.0
     return FraudFeature(
         feature_name="duplicate_claim_key",
         raw_value=1.0 if is_duplicate else 0.0,
-        normalized_score=normalized_score,
-        weight=WEIGHT_DUPLICATE_CLAIM_KEY,
+        detected=is_duplicate,
         description=(
             f"Collision detected with historical claim '{duplicate_match_id}'"
             if is_duplicate
@@ -106,17 +80,20 @@ def calculate_duplicate_claim_feature(duplicate_match_id: str | None) -> FraudFe
     )
 
 
-def calculate_image_tamper_feature(kyc_tamper_score: float) -> FraudFeature:
+def calculate_image_tamper_feature(
+    kyc_tamper_score: float,
+    tamper_detected: bool | None = None,
+) -> FraudFeature:
     """
     F-02: Visual tamper score from Error Level Analysis (ELA) and font inconsistency check.
     Normalized score in [0.0, 1.0].
     """
     score_clamped = min(1.0, max(0.0, float(kyc_tamper_score)))
+    is_detected = tamper_detected if tamper_detected is not None else score_clamped >= 0.30
     return FraudFeature(
         feature_name="image_tamper_anomaly",
         raw_value=float(kyc_tamper_score),
-        normalized_score=score_clamped,
-        weight=WEIGHT_IMAGE_TAMPER_ANOMALY,
+        detected=is_detected,
         description=(
             f"Image tamper analysis reported anomaly score {score_clamped:.2f}"
             if score_clamped > 0.0
@@ -130,16 +107,10 @@ def calculate_rapid_velocity_feature(submissions_48h: int) -> FraudFeature:
     F-03: Count of claims submitted by the same member within the past 48 hours (N_48h).
     Formula: min(1.0, (N_48h - 1) / 4) if N_48h > 1 else 0.0.
     """
-    if submissions_48h > 1:
-        normalized = min(1.0, (submissions_48h - 1) / 4.0)
-    else:
-        normalized = 0.0
-
     return FraudFeature(
         feature_name="rapid_resubmission_velocity",
         raw_value=float(submissions_48h),
-        normalized_score=round(normalized, 4),
-        weight=WEIGHT_RAPID_RESUBMISSION_VELOCITY,
+        detected=submissions_48h > 1,
         description=(
             f"Member submitted {submissions_48h} claims within 48 hours"
             if submissions_48h > 1
@@ -160,13 +131,10 @@ def calculate_provider_billing_outlier_feature(
     """
     if mean_charge is None or std_charge is None or std_charge <= 0.0:
         z_score = 0.0
-        normalized = 0.0
         desc = "No benchmark provider charge distribution available for CPT code"
     else:
         z_score = (claim_amount - mean_charge) / std_charge
-        excess_z = max(0.0, z_score - 2.0)
-        normalized = min(1.0, excess_z / 3.0)
-        if normalized > 0.0:
+        if z_score > 2.0:
             desc = (
                 f"Provider charge ${claim_amount:,.2f} is an outlier "
                 f"(Z-score: {z_score:.2f}, baseline mean: ${mean_charge:,.2f}, std: ${std_charge:,.2f})"
@@ -177,8 +145,7 @@ def calculate_provider_billing_outlier_feature(
     return FraudFeature(
         feature_name="provider_billing_outlier",
         raw_value=round(z_score, 4),
-        normalized_score=round(normalized, 4),
-        weight=WEIGHT_PROVIDER_BILLING_OUTLIER,
+        detected=mean_charge is not None and std_charge is not None and std_charge > 0.0 and z_score > 2.0,
         description=desc,
     )
 
@@ -200,8 +167,7 @@ def calculate_service_date_inconsistency_feature(
         return FraudFeature(
             feature_name="service_date_inconsistency",
             raw_value=0.0,
-            normalized_score=0.0,
-            weight=WEIGHT_SERVICE_DATE_INCONSISTENCY,
+            detected=False,
             description="Service date not available for chronological evaluation",
         )
 
@@ -211,8 +177,7 @@ def calculate_service_date_inconsistency_feature(
         return FraudFeature(
             feature_name="service_date_inconsistency",
             raw_value=0.0,
-            normalized_score=0.0,
-            weight=WEIGHT_SERVICE_DATE_INCONSISTENCY,
+            detected=False,
             description=f"Service date {service_date} chronologically reconciles with hospital discharge documentation ({discharge_date or 'verified'})",
         )
 
@@ -241,8 +206,7 @@ def calculate_service_date_inconsistency_feature(
     return FraudFeature(
         feature_name="service_date_inconsistency",
         raw_value=raw_val,
-        normalized_score=normalized,
-        weight=WEIGHT_SERVICE_DATE_INCONSISTENCY,
+        detected=normalized > 0.0,
         description=desc,
     )
 
@@ -250,20 +214,22 @@ def calculate_service_date_inconsistency_feature(
 def calculate_line_total_arithmetic_drift_feature(
     total_amount: float,
     line_sum: float,
+    extraction_complete: bool = True,
 ) -> FraudFeature:
     """
     F-06: Percentage discrepancy between declared total claim amount and sum of line charges:
     delta = |Total - sum(Lines)| / Total.
     Formula: min(1.0, delta / 0.10).
     """
-    if total_amount <= 0.0:
+    if not extraction_complete:
         drift = 0.0
-        normalized = 0.0
+        desc = "Line-total drift not assessed because bill extraction is incomplete"
+    elif total_amount <= 0.0:
+        drift = 0.0
         desc = "Declared claim amount is zero or negative; drift calculation bypassed"
     else:
         drift = abs(total_amount - line_sum) / total_amount
-        normalized = min(1.0, drift / 0.10)
-        if normalized > 0.0:
+        if drift > 0.0:
             drift_pct = drift * 100.0
             desc = (
                 f"Line items arithmetic discrepancy: sum (${line_sum:,.2f}) drifts from "
@@ -275,8 +241,7 @@ def calculate_line_total_arithmetic_drift_feature(
     return FraudFeature(
         feature_name="line_total_arithmetic_drift",
         raw_value=round(drift, 4),
-        normalized_score=round(normalized, 4),
-        weight=WEIGHT_LINE_TOTAL_ARITHMETIC_DRIFT,
+        detected=extraction_complete and drift > 0.0,
         description=desc,
     )
 
@@ -287,13 +252,11 @@ def calculate_member_frequency_30d_feature(submissions_30d: int) -> FraudFeature
     Formula: min(1.0, max(0, N_30d - 3) / 5).
     """
     excess_claims = max(0, submissions_30d - 3)
-    normalized = min(1.0, excess_claims / 5.0)
 
     return FraudFeature(
         feature_name="member_claim_frequency_30d",
         raw_value=float(submissions_30d),
-        normalized_score=round(normalized, 4),
-        weight=WEIGHT_MEMBER_CLAIM_FREQUENCY_30D,
+        detected=excess_claims > 0,
         description=(
             f"Elevated 30-day claim utilization: {submissions_30d} claims submitted in last 30 days"
             if submissions_30d > 3
@@ -358,7 +321,7 @@ class FraudDetectionEngine:
         start_time: float | None = None,
     ) -> FraudAgentOutput:
         """
-        Computes the 7 canonical fraud features, weighted composite score, and risk tier.
+        Computes seven binary fraud indicators and the any-indicator review signal.
         """
         t0 = start_time if start_time is not None else time.perf_counter()
         ctx = context or FraudEvaluationContext()
@@ -371,7 +334,10 @@ class FraudDetectionEngine:
 
         # 2. Compute the 7 canonical features
         f1 = calculate_duplicate_claim_feature(ctx.duplicate_claim_match_id)
-        f2 = calculate_image_tamper_feature(kyc_tamper_score)
+        f2 = calculate_image_tamper_feature(
+            kyc_tamper_score,
+            tamper_detected=kyc_output.tamper_detected if kyc_output else False,
+        )
         f3 = calculate_rapid_velocity_feature(ctx.resubmission_count_48h)
         f4 = calculate_provider_billing_outlier_feature(
             claim_amount=total_amount,
@@ -384,41 +350,40 @@ class FraudDetectionEngine:
             discharge_date=ctx.discharge_date,
             dates_reconciled=ctx.dates_reconciled,
         )
+        incomplete_billing_errors = (
+            "INCOMPLETE_BILL_EXTRACTION",
+            "INCOMPLETE_SERVICE_LINES",
+        )
+        billing_extraction_complete = not any(
+            error.startswith(incomplete_billing_errors)
+            for error in claims_output.validation_errors
+        ) and bool(claims_output.service_lines)
         f6 = calculate_line_total_arithmetic_drift_feature(
             total_amount=total_amount,
             line_sum=calculated_line_sum,
+            extraction_complete=billing_extraction_complete,
         )
         f7 = calculate_member_frequency_30d_feature(ctx.member_claim_count_30d)
 
         features = [f1, f2, f3, f4, f5, f6, f7]
 
-        # 3. Compute composite weighted fraud score: sum(w_i * f_i)
-        composite_score = sum(f.normalized_score * f.weight for f in features)
-        composite_score = min(1.0, max(0.0, composite_score))
-        rounded_score = round(composite_score, 4)
-
-        # 4. Map score to calibrated risk tier and agent verdict (Spec 10 § 3)
-        if rounded_score < FRAUD_THRESHOLD_LOW:
-            risk_level = RiskLevel.LOW
-            verdict = AgentVerdict.PASS
-        elif rounded_score < FRAUD_THRESHOLD_HIGH:
-            risk_level = RiskLevel.MEDIUM
-            verdict = AgentVerdict.INDETERMINATE
-        else:
-            risk_level = RiskLevel.HIGH
-            verdict = AgentVerdict.FAIL
+        # Any detected indicator prompts review; the score remains a binary compatibility field.
+        fraud_review_required = any(feature.detected for feature in features)
+        binary_score = 1.0 if fraud_review_required else 0.0
+        risk_level = RiskLevel.REVIEW_REQUIRED if fraud_review_required else RiskLevel.LOW
+        verdict = AgentVerdict.INDETERMINATE if fraud_review_required else AgentVerdict.PASS
 
         # 5. Extract human-readable anomaly descriptions
         anomalies: list[str] = [
             f.description
             for f in features
-            if f.normalized_score > 0.0
+            if f.detected
         ]
 
         # 6. Flag specific indicators
-        duplicate_detected = f1.normalized_score > 0.0
+        duplicate_detected = f1.detected
         duplicate_id = ctx.duplicate_claim_match_id if duplicate_detected else None
-        velocity_detected = (f3.normalized_score > 0.0 or f7.normalized_score > 0.0)
+        velocity_detected = f3.detected or f7.detected
 
         latency_ms = max(1, int((time.perf_counter() - t0) * 1000))
 
@@ -426,7 +391,8 @@ class FraudDetectionEngine:
             agent_name="fraud_agent",
             verdict=verdict,
             confidence=1.0,
-            fraud_score=rounded_score,
+            fraud_score=binary_score,
+            fraud_review_required=fraud_review_required,
             risk_level=risk_level,
             features=features,
             anomalies=anomalies,

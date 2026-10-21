@@ -30,12 +30,12 @@ MediShield strictly segregates customer submissions from corporate knowledge:
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
----
-
-## 2. Policy Ingestion Pipeline (Docling & Vector Storage)
-
-```mermaid
-flowchart TD
+Published rider definitions are stored as children of an effective `policy_version`, including rider code, waiting-period value and unit, the clause-defined start event, benefit/exclusion text, and source clause/PDF provenance.
+Member-specific rider applications are stored separately and linked to an `enrollment` and policy rider. A customer-submitted amendment is evidence of a **request**, not evidence that coverage was approved or activated.
+Application status defaults to `REQUESTED`. Only an authorized enrollment-system record with approver, approval timestamp, and effective start date may set status to `APPROVED`.
+OCR may extract a requested rider and dates into a pending application, retaining source-document provenance. It cannot publish policy terms or mark the rider approved.
+Seeded/generated policy text remains `source_verified = false` until verified against the authoritative policy artifact. No coverage decision may rely on unverified rider text.
+This persistence contract does not itself adjudicate waiting periods. Deterministic applicability and calendar-boundary semantics must be specified and tested before rider terms are used to approve or deny a claim.
     AdminUpload[Admin Uploads Master Policy PDF] --> DoclingParser[Docling Document Parser]
     DoclingParser --> LayoutExtract[Layout, Table & Header Extraction]
     LayoutExtract --> SemanticChunking[Hierarchical Semantic Chunking]

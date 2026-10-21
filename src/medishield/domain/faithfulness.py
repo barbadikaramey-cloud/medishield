@@ -13,7 +13,12 @@ from medishield.domain.contracts import (
     OCRTextSpan,
     PolicyCoverageOutput,
 )
-from medishield.domain.provenance import FieldProvenance, ProvenanceType
+from medishield.domain.provenance import (
+    EvidenceSource,
+    EvidenceVerificationStatus,
+    FieldProvenance,
+    ProvenanceType,
+)
 
 
 def normalize_text(text: str) -> str:
@@ -127,6 +132,55 @@ def verify_extracted_span(
     )
 
 
+def verify_clinical_evidence_reference(
+    reference: FieldProvenance,
+    ocr_payload: OCRDocumentPayload,
+) -> tuple[bool, FieldProvenance]:
+    """Verify clinical evidence against its original persisted OCR document/page/span."""
+    rejected = reference.model_copy(update={
+        "evidence_source": EvidenceSource.OCR,
+        "verification_status": EvidenceVerificationStatus.REJECTED,
+        "evidence_quality_score": 0.0,
+        "evidence_relevance_verified": False,
+    })
+    if reference.document_id != ocr_payload.document_id or not reference.text_content.strip():
+        return False, rejected
+
+    page = next((page for page in ocr_payload.pages if page.page_number == reference.page_number), None)
+    if page is None:
+        return False, rejected
+
+    if reference.span_id:
+        span = next((span for span in page.spans if span.span_id == reference.span_id), None)
+        if span is None:
+            return False, rejected
+        if normalize_text(reference.text_content) != normalize_text(span.text):
+            return False, rejected
+        if reference.bbox is not None and reference.bbox != span.bbox:
+            return False, rejected
+        if reference.bounding_box is not None and reference.bounding_box != span.bbox.to_list():
+            return False, rejected
+        return True, reference.model_copy(update={
+            "bbox": span.bbox,
+            "bounding_box": span.bbox.to_list(),
+            "provenance_type": ProvenanceType.SPAN,
+            "evidence_source": EvidenceSource.OCR,
+            "verification_status": EvidenceVerificationStatus.VERIFIED,
+            "evidence_quality_score": min(reference.evidence_quality_score, span.confidence),
+        })
+
+    normalized_reference = normalize_text(reference.text_content)
+    if not normalized_reference or normalized_reference not in normalize_text(page.raw_text):
+        return False, rejected
+
+    return True, reference.model_copy(update={
+        "provenance_type": ProvenanceType.PAGE,
+        "evidence_source": EvidenceSource.OCR,
+        "verification_status": EvidenceVerificationStatus.VERIFIED,
+        "evidence_quality_score": min(reference.evidence_quality_score, 0.5),
+    })
+
+
 def parse_medical_date(raw: Any) -> date | None:
     """Robustly parses medical dates across ISO, slash (MM/DD/YYYY, DD/MM/YYYY), hyphen, and textual formats."""
     if raw is None:
@@ -218,10 +272,26 @@ def evaluate_case_consistency(
                     doc_map["CLAIM_FORM"] = s_item
                 if "prescription" in s_lower or "rx" in s_lower:
                     doc_map["PRESCRIPTION"] = s_item
+                if "amendment" in s_lower or "endorsement" in s_lower or "policy" in s_lower or "rider" in s_lower:
+                    doc_map["POLICY_AMENDMENT"] = s_item
 
     claim_text = doc_map.get("CLAIM_FORM") or doc_map.get("claim_forms") or ("\n".join(combined_texts) if combined_texts else "")
     disch_text = doc_map.get("DISCHARGE_SUMMARY") or doc_map.get("discharge_summaries") or ("\n".join(combined_texts) if combined_texts else "")
     rx_text = doc_map.get("PRESCRIPTION") or doc_map.get("prescriptions") or ""
+    policy_amendment_text = (
+        doc_map.get("POLICY_AMENDMENT")
+        or doc_map.get("policy_amendments")
+        or doc_map.get("AMENDMENT")
+        or doc_map.get("amendment")
+        or doc_map.get("POLICY")
+        or doc_map.get("policy")
+        or ""
+    )
+    if not policy_amendment_text and combined_texts:
+        for t in combined_texts:
+            if any(k in t.lower() for k in ("amendment", "endorsement", "policy rider", "policy addendum")):
+                policy_amendment_text = t
+                break
 
     # 1. Arithmetic Consistency: Sum of line items vs declared total
     amounts_consistent = claims_output.line_items_sum_valid
@@ -364,35 +434,166 @@ def evaluate_case_consistency(
         conflicts.append(msg)
         specific_reasons.append(f"Date conflict: Prescription date ({rx_date}) is {diff_days} days post-discharge (exceeds 30-day post-acute limit)")
 
-    # 4. Doctor Signatures Verification
+    # 4. Doctor Signatures Verification (Positive Evidence Attestation Model - ADR-019, Rules 12 & 13)
     doctor_signature_verified = True
     if claim_text or disch_text:
-        has_missing_marker = bool(
+        combined_doc_text = f"{claim_text} {disch_text}"
+
+        # Check explicit negative markers first
+        has_dr_missing_marker = bool(
             re.search(
-                r"(\[signature\s*missing\]|signaturemissing|physician\s*signature\s*[:\-]?\s*(\[missing\]|none|no|missing)|attending\s*physician[^\n]*\[\s*unsigned|attending\s*physician[^\n]*unsigned|\[unsigned)",
-                f"{claim_text} {disch_text}",
+                r"(\[signature\s*missing\]|signaturemissing|"
+                r"physician\s*signature\s*[:\-]?\s*(\[missing\]|none|no|missing|\[blank\]|____+|false|\b0\b)|"
+                r"attending\s*physician[^\n]*\[\s*unsigned|attending\s*physician[^\n]*unsigned|\[unsigned|"
+                r"pending\s*attestation|not\s*signed|doctor\s*signature\s*[:\-]?\s*(\[missing\]|none|no|missing|\[blank\]|____+)|"
+                r"प्रदाता\s*(?:मुहर|हस्ताक्षर)\s*[:\-]?\s*(?:____+|\[अनुपस्थित\]|नहीं))",
+                combined_doc_text,
                 re.IGNORECASE,
             )
         )
-        if has_missing_marker:
+
+        has_dr_positive_evidence = False
+        dr_sig_m = re.search(
+            r"(?:physician\s*signature|doctor(?:\x27s)?\s*signature|attending\s*physician(?:\s*signature)?|provider\s*(?:signature|stamp))\s*[:\-]?\s*([^\n\r]+)",
+            combined_doc_text,
+            re.IGNORECASE,
+        )
+        if dr_sig_m:
+            val = dr_sig_m.group(1).strip()
+            is_negative = bool(re.search(r"^(\[?(?:missing|blank|unsigned|none|no|false|0)\]?|___+|pending)", val, re.IGNORECASE))
+            if not is_negative and (
+                any(k in val.lower() for k in ("dr", "md", "do", "facs", "signed", "file", "/s/", "yes", "valid"))
+                or len(val) >= 3
+            ):
+                has_dr_positive_evidence = True
+
+        if not has_dr_positive_evidence:
+            has_dr_positive_evidence = bool(
+                re.search(
+                    r"(?:signed\s*by(?:\s*dr\.?|\s*physician|\s*attending)|"
+                    r"electronically\s*signed\s*by(?:\s*dr\.?|\s*physician|\s*attending)|"
+                    r"dr\.\s*[a-z\s]+(?:,\s*(?:md|do|facs))|physician\s*attestation\s*verified|"
+                    r"चिकित्सक\s*हस्ताक्षर\s*[:\-]?\s*(?:डॉ|हस्ताक्षरित)|डॉ\.\s*[a-z\u0900-\u097f\s]+)",
+                    combined_doc_text,
+                    re.IGNORECASE,
+                )
+            )
+
+        if has_dr_missing_marker or not has_dr_positive_evidence:
             doctor_signature_verified = False
             conflicts.append("Missing physician signature on claim form or medical record.")
             specific_reasons.append("Missing physician signature on claim form or medical record")
 
-    # 5. Patient Signatures Verification
+    # 5. Patient Signatures Verification (Conditional Evidence Attestation Model - ADR-019 & Rule 11)
+    # Patient signature is not mandatory across all claim forms. Only if a patient signature field/label is present
+    # on the claim form and the signature itself is missing, blank, or unverified, do we flag it.
     patient_signature_verified = True
     if claim_text:
-        has_pt_missing_sig = bool(
+        has_pt_sig_field = bool(
             re.search(
-                r"(?:patient(\x27s)?\s+signature|insured(\x27s)?\s+signature|signature\s+of\s+patient|assignment\s+of\s+benefits)\s*[:\-]?\s*(\[missing\]|\[blank\]|none|no|missing|false|\b0\b)",
+                r"(?:patient(?:\x27s)?\s+signature|insured(?:\x27s)?\s+signature|signature\s+of\s+patient|"
+                r"assignment\s+of\s+benefits|patient\s+or\s+authorized\s+person(?:\x27s)?\s+signature|"
+                r"box\s*12\b|मरीज\s*का\s*हस्ताक्षर)",
                 claim_text,
                 re.IGNORECASE,
             )
         )
-        if has_pt_missing_sig:
-            patient_signature_verified = False
-            conflicts.append("Missing patient signature / assignment of benefits authorization on claim form.")
-            specific_reasons.append("Missing patient signature / assignment of benefits authorization on claim form")
+        if has_pt_sig_field:
+            has_pt_missing_marker = bool(
+                re.search(
+                    r"(?:patient(\x27s)?\s+signature|insured(\x27s)?\s+signature|signature\s+of\s+patient|assignment\s+of\s+benefits|box\s*12)\s*[:\-]?\s*(\[missing\]|\[blank\]|none|no|missing|false|\b0\b|unsigned|____+)|"
+                    r"मरीज\s*का\s*हस्ताक्षर\s*[:\-]?\s*(?:____+|\[अनुपस्थित\]|नहीं)",
+                    claim_text,
+                    re.IGNORECASE,
+                )
+            )
+
+            has_pt_positive_evidence = False
+            pt_sig_m = re.search(
+                r"(?:patient(?:\x27s)?\s+signature|insured(?:\x27s)?\s+signature|signature\s+of\s+patient|assignment\s+of\s+benefits|patient\s+or\s+authorized\s+person(?:\x27s)?\s+signature)\s*[:\-]?\s*([^\n\r]+)",
+                claim_text,
+                re.IGNORECASE,
+            )
+            if pt_sig_m:
+                pt_val = pt_sig_m.group(1).strip()
+                is_negative = bool(re.search(r"^(\[?(?:missing|blank|unsigned|none|no|false|0)\]?|___+|pending)", pt_val, re.IGNORECASE))
+                if not is_negative and (
+                    any(k in pt_val.lower() for k in ("signed", "file", "yes", "authorized", "true", "/s/"))
+                    or len(pt_val) >= 3
+                ):
+                    has_pt_positive_evidence = True
+
+            if not has_pt_positive_evidence:
+                has_pt_positive_evidence = bool(
+                    re.search(
+                        r"(?:signed\s+by\s+patient|assignment\s+of\s+benefits\s+authorized|"
+                        r"मरीज\s*का\s*हस्ताक्षर\s*[:\-]?\s*(?:हस्ताक्षरित|सत्यापित))",
+                        claim_text,
+                        re.IGNORECASE,
+                    )
+                )
+
+            if has_pt_missing_marker or not has_pt_positive_evidence:
+                patient_signature_verified = False
+                conflicts.append("Missing patient signature: Patient signature field is present on claim form but unsigned or unverified.")
+                specific_reasons.append("Missing patient signature / assignment of benefits authorization on claim form")
+
+    # 5b. Authorized Officer Signature Verification on Policy Amendment Document
+    # If an authorized officer signature field is present on a policy amendment/endorsement, but the signature
+    # is missing, blank, or unverified, flag it. If the field is not present, it is not flagged.
+    officer_signature_verified = True
+    if policy_amendment_text:
+        has_officer_sig_field = bool(
+            re.search(
+                r"(?:authorized\s+(?:officer|signatory|representative|official)|"
+                r"officer\s+signature|signature\s+of\s+authorized\s+officer|"
+                r"underwriter(?:\x27s)?\s+signature|company\s+officer|"
+                r"प्राधिकृत\s*अधिकारी|अधिकृत\s*हस्ताक्षर)",
+                policy_amendment_text,
+                re.IGNORECASE,
+            )
+        )
+        if has_officer_sig_field:
+            has_officer_missing_marker = bool(
+                re.search(
+                    r"(?:authorized\s+(?:officer|signatory|representative|official)|officer\s+signature|"
+                    r"signature\s+of\s+authorized\s+officer|underwriter(?:\x27s)?\s+signature)\s*[:\-]?\s*"
+                    r"(\[missing\]|\[blank\]|none|no|missing|false|\b0\b|unsigned|____+|pending|\[अनुपस्थित\]|नहीं)",
+                    policy_amendment_text,
+                    re.IGNORECASE,
+                )
+            )
+
+            has_officer_positive_evidence = False
+            off_sig_m = re.search(
+                r"(?:authorized\s+(?:officer|signatory|representative|official)|officer\s+signature|"
+                r"signature\s+of\s+authorized\s+officer|underwriter(?:\x27s)?\s+signature)\s*[:\-]?\s*([^\n\r]+)",
+                policy_amendment_text,
+                re.IGNORECASE,
+            )
+            if off_sig_m:
+                off_val = off_sig_m.group(1).strip()
+                is_negative = bool(re.search(r"^(\[?(?:missing|blank|unsigned|none|no|false|0)\]?|___+|pending)", off_val, re.IGNORECASE))
+                if not is_negative and (
+                    any(k in off_val.lower() for k in ("signed", "/s/", "valid", "approved", "officer", "executive", "director", "manager", "underwriter"))
+                    or len(off_val) >= 3
+                ):
+                    has_officer_positive_evidence = True
+
+            if not has_officer_positive_evidence:
+                has_officer_positive_evidence = bool(
+                    re.search(
+                        r"(?:signed\s+by\s+authorized\s+officer|duly\s+authorized\s+and\s+signed|"
+                        r"electronically\s+signed\s+by\s+officer|प्राधिकृत\s*हस्ताक्षरित)",
+                        policy_amendment_text,
+                        re.IGNORECASE,
+                    )
+                )
+
+            if has_officer_missing_marker or not has_officer_positive_evidence:
+                officer_signature_verified = False
+                conflicts.append("Missing authorized officer signature on policy amendment document.")
+                specific_reasons.append("Missing authorized officer signature on policy amendment document")
 
     # 6. Provider NPI Verification
     npi_verified = True
@@ -485,27 +686,39 @@ def evaluate_case_consistency(
         cpt_clean = str(cpt_val).strip() if cpt_val is not None else ""
 
         rev_val = getattr(getattr(line, "rev_code", None), "value", None)
-        is_missing_cpt = amt > 0 and (
-            not cpt_clean
-            or cpt_clean.lower() in ("none", "unknown", "null")
-            or "." in cpt_clean  # e.g. 1250.00 daily rate erroneously placed in procedure code slot
-            or (cpt_clean.isdigit() and len(cpt_clean) < 5 and not (len(cpt_clean) in (3, 4) and rev_val and str(rev_val).upper() != "UNKNOWN"))
+        rev_clean = str(rev_val).strip() if rev_val is not None else ""
+        curr_sym = getattr(line, "currency_symbol", "$") or "$"
+
+        has_valid_cpt = bool(
+            cpt_clean
+            and cpt_clean.lower() not in ("none", "unknown", "null")
+            and "." not in cpt_clean
+            and (
+                re.fullmatch(r"^\d{5}$", cpt_clean)
+                or re.fullmatch(r"^[A-Z0-9]\d{4}$", cpt_clean)
+            )
         )
-        if is_missing_cpt:
+        has_valid_rev = bool(
+            (rev_clean and rev_clean.upper() not in ("UNKNOWN", "NONE", "NULL", "") and re.fullmatch(r"^\d{3,4}$", rev_clean))
+            or (cpt_clean and re.fullmatch(r"^\d{3,4}$", cpt_clean))
+        )
+
+        is_missing_code = amt > 0 and not has_valid_cpt and not has_valid_rev
+        if is_missing_code:
             procedure_codes_verified = False
             uncoded_charges_total += amt
             desc = getattr(getattr(line, "description", None), "value", None) or f"Line {line.line_number}"
-            code_desc = f"unrecognized rate/token '{cpt_clean}'" if cpt_clean and cpt_clean.lower() not in ("none", "unknown", "null") else "missing CPT/HCPCS code (None)"
-            uncoded_line_details.append((line.line_number, desc, amt, code_desc))
+            code_desc = f"unrecognized rate/token '{cpt_clean}'" if cpt_clean and cpt_clean.lower() not in ("none", "unknown", "null") else "missing CPT/HCPCS or Revenue code"
+            uncoded_line_details.append((line.line_number, desc, amt, code_desc, curr_sym))
 
     if uncoded_line_details:
-        for ln_num, desc, amt, code_desc in uncoded_line_details:
+        for ln_num, desc, amt, code_desc, curr_sym in uncoded_line_details:
             conflicts.append(
-                f"Unvalidated billed charge: Service line {ln_num} ('{desc}') has a billed amount of ${amt:,.2f} "
+                f"Unvalidated billed charge: Service line {ln_num} ('{desc}') has a billed amount of {curr_sym}{amt:,.2f} "
                 f"with {code_desc}. Billed charges cannot be validated without an authoritative procedure code."
             )
             specific_reasons.append(
-                f"Unvalidated billed charge: Service line {ln_num} ('{desc}', ${amt:,.2f}) has {code_desc}; "
+                f"Unvalidated billed charge: Service line {ln_num} ('{desc}', {curr_sym}{amt:,.2f}) has {code_desc}; "
                 f"billed charges cannot be validated without an authoritative procedure code"
             )
 
@@ -537,6 +750,7 @@ def evaluate_case_consistency(
         and amounts_consistent
         and doctor_signature_verified
         and patient_signature_verified
+        and officer_signature_verified
         and npi_verified
         and prior_authorization_verified
         and procedure_codes_verified
@@ -551,6 +765,7 @@ def evaluate_case_consistency(
         verdict_override=AgentVerdict.CONFLICT if not is_consistent else None,
         doctor_signature_verified=doctor_signature_verified,
         patient_signature_verified=patient_signature_verified,
+        officer_signature_verified=officer_signature_verified,
         npi_verified=npi_verified,
         prior_authorization_verified=prior_authorization_verified,
         procedure_codes_verified=procedure_codes_verified,

@@ -12,7 +12,9 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, ClassVar, Protocol, runtime_checkable
 
-from medishield.db.enums import AgentVerdict
+from sqlalchemy.exc import OperationalError
+
+from medishield.db.enums import AgentVerdict, CodingSystem
 from medishield.domain.contracts import (
     BedDayBillingRuleContract,
     BedDayReconciliation,
@@ -32,7 +34,17 @@ from medishield.domain.contracts import (
     build_clinical_alignment_output,
 )
 from medishield.domain.faithfulness import parse_medical_date
-from medishield.domain.provenance import FieldProvenance
+from medishield.domain.provenance import (
+    ClinicalAssertionStatus,
+    EvidenceSource,
+    EvidenceVerificationStatus,
+    FieldProvenance,
+)
+from medishield.ocr.multilingual import (
+    extract_multilingual_clinical_indications,
+    extract_multilingual_icd_codes,
+    translate_devanagari_numerals,
+)
 
 
 @dataclass
@@ -60,8 +72,9 @@ class DischargeSummaryAnalysis:
 class DischargeSummaryParser:
     """Authoritative deterministic parser for hospital discharge summaries (ADR-015, Spec 01 § 4)."""
 
-    ICD_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"\b([A-TV-Z][0-9]{2}(?:\.[0-9]{1,4})?)\b")
-    CPT_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"\b([0-9]{5})\b")
+    ICD_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"\b([A-TV-Z][0-9]{2}(?:\.?[0-9A-Z]{1,4})?)\b")
+    # OCR often glues the label to the code ("CPT59400"), so \b cannot be used; amounts are excluded.
+    CPT_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"(?<![0-9$.,])([0-9]{5})(?![0-9]|[.,][0-9])")
 
     @classmethod
     def parse(cls, text: str) -> DischargeSummaryAnalysis:
@@ -69,10 +82,23 @@ class DischargeSummaryParser:
             return DischargeSummaryAnalysis()
 
         patterns = {
-            "primary": r"(?:FINAL\s*DIAGNOSES?[\s\S]*?)?(?:Primary(?:\s+Diagnosis)?\s*[:\-]?\s*)([^\n]+(?:\n(?!(?:Secondary|PROCEDURE|HOSPITAL|DISCHARGE))[^\n]+)?)",
-            "secondary": r"(?:Secondary(?:\s+Diagnosis)?\s*[:\-]?\s*)([^\n]+(?:\n(?!(?:PROCEDURE|HOSPITAL|DISCHARGE|Primary))[^\n]+)?)",
-            "procedures": r"(?:PROCEDURES?\s*(?:PERFORMED)?\s*[:\-]?\s*)([^\n]+(?:\n(?!(?:HOSPITAL|DISCHARGE|FINAL|Primary))[^\n]+)*)",
-            "hospital_course": r"(?:HOSPITAL\s*COURSE\s*[:\-]?\s*)([^\n]+(?:\n(?!(?:DISCHARGE|FINAL|PROCEDURE))[^\n]+)*)",
+            "primary": (
+                r"(?:FINAL\s*DIAGNOSES?|अंतिम\s*निदान|Diagnóstico\s*final[\s\S]*?)?"
+                r"(?:(?:Primary(?:\s+Diagnosis)?|मुख्य\s*निदान|प्राथमिक\s*निदान|निदान|Diagnóstico(?:\s*Principal)?|Diagnostico(?:\s*Principal)?)\s*[:\-]?\s*)"
+                r"([^\n]+(?:\n(?!\s*(?:Secondary|द्वितीयक|PROCEDURE|प्रक्रिया|HOSPITAL|अस्पताल|DISCHARGE|छुट्टी|Diagnóstico|Diagnostico|Procedimiento))[^\n]+)?)"
+            ),
+            "secondary": (
+                r"(?:(?:Secondary(?:\s+Diagnosis)?|द्वितीयक\s*निदान|गौण\s*निदान|Diagnóstico\s*secundario|Diagnostico\s*secundario)\s*[:\-]?\s*)"
+                r"([^\n]+(?:\n(?!\s*(?:PROCEDURE|प्रक्रिया|HOSPITAL|अस्पताल|DISCHARGE|छुट्टी|Primary|मुख्य|Diagnóstico|Diagnostico))[^\n]+)?)"
+            ),
+            "procedures": (
+                r"(?:(?:PROCEDURES?\s*(?:PERFORMED)?|प्रक्रिया(?:\s*कोड|\s*विवरण)?|प्रक्रियाएं|Procedimientos?(?:\s*realizados?)?)\s*[:\-]?\s*)"
+                r"([^\n]+(?:\n(?!\s*(?:HOSPITAL|अस्पताल|DISCHARGE|छुट्टी|FINAL|अंतिम|Primary|मुख्य|Diagnóstico|Diagnostico))[^\n]+)*)"
+            ),
+            "hospital_course": (
+                r"(?:(?:HOSPITAL\s*COURSE|अस्पताल\s*(?:का\s*)?विवरण|इलाज\s*का\s*विवरण|Curso\s*hospitalario|Evolución\s*hospitalaria)\s*[:\-]?\s*)"
+                r"([^\n]+(?:\n(?!\s*(?:DISCHARGE|छुट्टी|FINAL|अंतिम|PROCEDURE|प्रक्रिया|Procedimiento))[^\n]+)*)"
+            ),
         }
         extracted: dict[str, str] = {}
         for k, pat in patterns.items():
@@ -80,32 +106,53 @@ class DischargeSummaryParser:
             extracted[k] = m.group(1).strip() if m else ""
 
         def _extract_icd(t: str) -> list[str]:
-            codes = cls.ICD_PATTERN.findall(t)
+            if not t:
+                return []
+            translated_t = translate_devanagari_numerals(t)
+            codes = cls.ICD_PATTERN.findall(translated_t)
             # Normalize OCR misreadings of ICD letter 'I' as digit '1' in e.g. ICD-10: 110 -> I10
-            for m in re.finditer(r"ICD(?:-10)?\s*[:\-]?\s*1([0-9]{2}(?:\.[0-9]{1,4})?)", t, re.IGNORECASE):
+            for m in re.finditer(r"ICD(?:-10)?\s*[:\-]?\s*1([0-9]{2}(?:\.[0-9]{1,4})?)", translated_t, re.IGNORECASE):
                 cand = f"I{m.group(1)}"
                 if cand not in codes:
                     codes.append(cand)
-            return list(dict.fromkeys(codes))
+
+            # Multilingual clinical terminology entity linking (ADR-018)
+            multi_codes = extract_multilingual_icd_codes(t)
+            for mc in multi_codes:
+                if mc not in codes:
+                    codes.append(mc)
+
+            code_repo = DeterministicClinicalAlignmentEngine._get_default_repo()
+            normalize_code = getattr(code_repo, "normalize_diagnosis_code", None)
+            normalized_codes = [normalize_code(code) or code for code in codes] if normalize_code else codes
+            return list(dict.fromkeys(normalized_codes))
 
         p_icd = _extract_icd(extracted["primary"])
         s_icd = _extract_icd(extracted["secondary"])
         c_icd = _extract_icd(extracted["hospital_course"])
         all_icd = list(dict.fromkeys(p_icd + s_icd + c_icd))
 
-        proc_cpt = cls.CPT_PATTERN.findall(extracted["procedures"])
-        course_cpt = cls.CPT_PATTERN.findall(extracted["hospital_course"])
+        proc_cpt = cls.CPT_PATTERN.findall(translate_devanagari_numerals(extracted["procedures"]))
+        course_cpt = cls.CPT_PATTERN.findall(translate_devanagari_numerals(extracted["hospital_course"]))
         all_cpt = list(dict.fromkeys(proc_cpt + course_cpt))
 
         h_course_lower = extracted["hospital_course"].lower()
-        has_lab = any(w in h_course_lower for w in ("laboratory", "lab evaluation", "lab workup", "diagnostic workup", "metabolic panel"))
-        has_imaging = any(w in h_course_lower for w in ("imaging", "radiology", "x-ray", "mri", "ct scan", "ultrasound", "echocardiogram", "diagnostic workup"))
-        has_stay = any(w in h_course_lower for w in ("admitted", "hospitalization", "inpatient", "discharge", "vital signs", "hospital stay"))
+        has_lab = any(w in h_course_lower for w in ("laboratory", "lab evaluation", "lab workup", "diagnostic workup", "metabolic panel", "प्रयोगशाला", "जांच", "laboratorio"))
+        has_imaging = any(w in h_course_lower for w in ("imaging", "radiology", "x-ray", "mri", "ct scan", "ultrasound", "echocardiogram", "diagnostic workup", "रेडियोलॉजी", "एक्स-रे", "imagen"))
+        has_stay = any(w in h_course_lower for w in ("admitted", "hospitalization", "inpatient", "discharge", "vital signs", "hospital stay", "दाखिला", "भर्ती", "hospitalización", "ingreso"))
 
-        admit_match = re.search(r"(?:Admit(?:Date)?|Admission\s*Date)\s*[:\-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})", text, re.IGNORECASE)
-        disch_match = re.search(r"(?:Discharge\s*Date)\s*[:\-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})", text, re.IGNORECASE)
-        parsed_admit = parse_medical_date(admit_match.group(1)) if admit_match else None
-        parsed_disch = parse_medical_date(disch_match.group(1)) if disch_match else None
+        admit_match = re.search(
+            r"(?:Admit\s*Date|Admission\s*Date|दाखिला\s*(?:दिनांक|तिथि)?|भर्ती\s*(?:दिनांक|तिथि)?|Fecha\s*de\s*ingreso)\s*[:\-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})",
+            text,
+            re.IGNORECASE,
+        )
+        disch_match = re.search(
+            r"(?:Discharge\s*Date|छुट्टी\s*(?:दिनांक|तिथि)?|डिस्चार्ज\s*(?:दिनांक|तिथि)?|Fecha\s*de\s*alta)\s*[:\-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})",
+            text,
+            re.IGNORECASE,
+        )
+        parsed_admit = parse_medical_date(translate_devanagari_numerals(admit_match.group(1))) if admit_match else None
+        parsed_disch = parse_medical_date(translate_devanagari_numerals(disch_match.group(1))) if disch_match else None
 
         return DischargeSummaryAnalysis(
             primary_diagnosis_text=extracted["primary"],
@@ -129,9 +176,9 @@ class DischargeSummaryParser:
 
 @runtime_checkable
 class ClinicalGuidelineRepository(Protocol):
-    """Protocol for dynamic clinical guideline and indication repository (ADR-015, Spec 09 § 4)."""
+    """Protocol for dynamic clinical guideline and indication repository (ADR-015, ADR-016)."""
 
-    def get_guideline(self, service_code: str) -> dict[str, Any] | None:
+    def get_guideline(self, service_code: str, service_date: date | None = None) -> dict[str, Any] | None:
         ...
 
     def get_indication(self, service_code: str) -> dict[str, Any] | None:
@@ -144,6 +191,48 @@ class ClinicalGuidelineRepository(Protocol):
         ...
 
 
+class _StandardGuidelineCatalogProxy(dict[str, Any]):
+    """Dynamic catalog proxy delegating lookups to authoritative relational storage (ADR-016)."""
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        repo = DeterministicClinicalAlignmentEngine._get_default_repo()
+        res = repo.get_guideline(str(key))
+        return res if res is not None else default
+
+    def __getitem__(self, key: Any) -> Any:
+        res = self.get(key)
+        if res is None:
+            raise KeyError(key)
+        return res
+
+    def __contains__(self, key: Any) -> bool:
+        return self.get(key) is not None
+
+    def __bool__(self) -> bool:
+        return True
+
+
+class _DiagnosisIndicationMapProxy(dict[str, Any]):
+    """Dynamic diagnosis indication proxy delegating lookups to authoritative relational storage (ADR-016)."""
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        repo = DeterministicClinicalAlignmentEngine._get_default_repo()
+        res = repo.get_indication(str(key))
+        return res if res is not None else default
+
+    def __getitem__(self, key: Any) -> Any:
+        res = self.get(key)
+        if res is None:
+            raise KeyError(key)
+        return res
+
+    def __contains__(self, key: Any) -> bool:
+        return self.get(key) is not None
+
+    def __bool__(self) -> bool:
+        return True
+
+
 class DeterministicClinicalAlignmentEngine:
     """
     Authoritative, deterministic clinical verification engine.
@@ -151,308 +240,11 @@ class DeterministicClinicalAlignmentEngine:
     units against verified clinical evidence and coverage guidelines.
     """
 
-    _default_repo_instance: ClassVar[DefaultClinicalGuidelineRepository | None] = None
+    _default_repo_instance: ClassVar[ClinicalGuidelineRepository | None] = None
 
-    # ── Standard Clinical Guideline Registry ─────────────────────────────────
-    STANDARD_GUIDELINE_CATALOG: ClassVar[dict[str, dict[str, Any]]] = {
-        "99214": {
-            "guideline_id": "LCD-99214-01",
-            "guideline_version": "2026.1",
-            "guideline_title": "Evaluation and Management Services - Level 4 Established Patient",
-            "effective_date": date(2025, 1, 1),
-            "requires_prior_auth": False,
-            "mandatory_criteria": [
-                {
-                    "criterion_id": "CRIT-99214-01",
-                    "description": "Documented moderate complexity medical decision making or >= 30 minutes visit time",
-                }
-            ],
-        },
-        "99213": {
-            "guideline_id": "LCD-99213-01",
-            "guideline_version": "2026.1",
-            "guideline_title": "Evaluation and Management Services - Level 3 Established Patient",
-            "effective_date": date(2025, 1, 1),
-            "requires_prior_auth": False,
-            "mandatory_criteria": [
-                {
-                    "criterion_id": "CRIT-99213-01",
-                    "description": "Documented low complexity medical decision making or >= 20 minutes visit time",
-                }
-            ],
-        },
-        "93000": {
-            "guideline_id": "LCD-93000-01",
-            "guideline_version": "2026.1",
-            "guideline_title": "Diagnostic Electrocardiogram (ECG/EKG) with Interpretation and Report",
-            "effective_date": date(2025, 1, 1),
-            "requires_prior_auth": False,
-            "mandatory_criteria": [
-                {
-                    "criterion_id": "CRIT-93000-01",
-                    "description": "Documented cardiac symptoms, rhythm disturbance, or baseline pre-operative assessment",
-                }
-            ],
-        },
-        "44970": {
-            "guideline_id": "LCD-44970-01",
-            "guideline_version": "2026.1",
-            "guideline_title": "Laparoscopic Appendectomy",
-            "effective_date": date(2025, 1, 1),
-            "requires_prior_auth": False,
-            "mandatory_criteria": [
-                {
-                    "criterion_id": "CRIT-44970-01",
-                    "description": "Clinical, laboratory, or imaging evidence of acute or suspected appendicitis",
-                }
-            ],
-        },
-        "80053": {
-            "guideline_id": "LCD-80053-01",
-            "guideline_version": "2026.1",
-            "guideline_title": "Comprehensive Metabolic Panel (CMP)",
-            "effective_date": date(2025, 1, 1),
-            "requires_prior_auth": False,
-            "mandatory_criteria": [
-                {
-                    "criterion_id": "CRIT-80053-01",
-                    "description": "Documented medical indication for electrolyte, renal, or hepatic assessment",
-                }
-            ],
-        },
-        "70553": {
-            "guideline_id": "LCD-70553-01",
-            "guideline_version": "2026.1",
-            "guideline_title": "Magnetic Resonance Imaging (MRI) Brain With and Without Contrast",
-            "effective_date": date(2025, 1, 1),
-            "requires_prior_auth": True,
-            "mandatory_criteria": [
-                {
-                    "criterion_id": "CRIT-70553-01",
-                    "description": "Documented focal neurological signs, intractable headache, seizure, or intracranial lesion",
-                }
-            ],
-        },
-        "27447": {
-            "guideline_id": "LCD-27447-01",
-            "guideline_version": "2026.1",
-            "guideline_title": "Total Knee Arthroplasty (TKA)",
-            "effective_date": date(2025, 1, 1),
-            "requires_prior_auth": False,
-            "mandatory_criteria": [
-                {
-                    "criterion_id": "CRIT-27447-CONSERVATIVE",
-                    "description": "Documented failure of non-surgical conservative therapy for >= 6 weeks",
-                },
-                {
-                    "criterion_id": "CRIT-27447-RADIOGRAPHIC",
-                    "description": "Severe advanced joint disease demonstrated radiographically (Kellgren-Lawrence Grade 3 or 4)",
-                },
-            ],
-        },
-        "47562": {
-            "guideline_id": "LCD-47562-01",
-            "guideline_version": "2026.1",
-            "guideline_title": "Laparoscopic Cholecystectomy",
-            "effective_date": date(2025, 1, 1),
-            "requires_prior_auth": False,
-            "mandatory_criteria": [
-                {
-                    "criterion_id": "CRIT-47562-01",
-                    "description": "Documented symptomatic cholelithiasis, acute cholecystitis, or biliary dyskinesia",
-                }
-            ],
-        },
-        "71045": {
-            "guideline_id": "LCD-71045-01",
-            "guideline_version": "2026.1",
-            "guideline_title": "Chest Radiography Single View",
-            "effective_date": date(2025, 1, 1),
-            "requires_prior_auth": False,
-            "mandatory_criteria": [
-                {
-                    "criterion_id": "CRIT-71045-01",
-                    "description": "Documented respiratory symptoms, pulmonary evaluation, or chest trauma",
-                }
-            ],
-        },
-        "49000": {
-            "guideline_id": "LCD-49000-01",
-            "guideline_version": "2026.1",
-            "guideline_title": "Exploratory Laparotomy",
-            "effective_date": date(2025, 1, 1),
-            "requires_prior_auth": False,
-            "mandatory_criteria": [
-                {
-                    "criterion_id": "CRIT-49000-01",
-                    "description": "Documented acute abdomen, blunt/penetrating abdominal trauma, or hemoperitoneum",
-                }
-            ],
-        },
-        "0120": {
-            "guideline_id": "LCD-REV-0120",
-            "guideline_version": "2026.1",
-            "guideline_title": "Inpatient Room and Board - Semi-Private Two Bed",
-            "effective_date": date(2025, 1, 1),
-            "requires_prior_auth": False,
-            "mandatory_criteria": [
-                {
-                    "criterion_id": "CRIT-REV-01",
-                    "description": "Documented formal physician inpatient admission order and continuous nursing care",
-                }
-            ],
-        },
-        "33533": {
-            "guideline_id": "LCD-33533-01",
-            "guideline_version": "2026.1",
-            "guideline_title": "Coronary Artery Bypass Graft (CABG)",
-            "effective_date": date(2025, 1, 1),
-            "requires_prior_auth": False,
-            "mandatory_criteria": [
-                {
-                    "criterion_id": "CRIT-33533-01",
-                    "description": "Documented coronary artery disease, multivessel disease, or angina pectoris",
-                }
-            ],
-        },
-        "36415": {
-            "guideline_id": "LCD-36415-01",
-            "guideline_version": "2026.1",
-            "guideline_title": "Routine Venipuncture for Laboratory Specimen Collection",
-            "effective_date": date(2025, 1, 1),
-            "requires_prior_auth": False,
-            "mandatory_criteria": [
-                {
-                    "criterion_id": "CRIT-36415-01",
-                    "description": "Documented physician order for blood specimen or diagnostic laboratory workup",
-                }
-            ],
-        },
-        "43239": {
-            "guideline_id": "LCD-43239-01",
-            "guideline_version": "2026.1",
-            "guideline_title": "Esophagogastroduodenoscopy (EGD) with Biopsy",
-            "effective_date": date(2025, 1, 1),
-            "requires_prior_auth": False,
-            "mandatory_criteria": [
-                {
-                    "criterion_id": "CRIT-43239-01",
-                    "description": "Documented dyspepsia, GERD, abdominal pain, gastrointestinal bleeding, or ulcer evaluation",
-                }
-            ],
-        },
-        "90837": {
-            "guideline_id": "LCD-90837-01",
-            "guideline_version": "2026.1",
-            "guideline_title": "Psychotherapy Services - 60 Minutes",
-            "effective_date": date(2025, 1, 1),
-            "requires_prior_auth": False,
-            "mandatory_criteria": [
-                {
-                    "criterion_id": "CRIT-90837-01",
-                    "description": "Documented psychiatric evaluation, depressive disorder, anxiety, or behavioral health management",
-                }
-            ],
-        },
-        "71046": {
-            "guideline_id": "LCD-71046-01",
-            "guideline_version": "2026.1",
-            "guideline_title": "Chest Radiography Two Views",
-            "effective_date": date(2025, 1, 1),
-            "requires_prior_auth": False,
-            "mandatory_criteria": [
-                {
-                    "criterion_id": "CRIT-71046-01",
-                    "description": "Documented respiratory symptoms, pulmonary evaluation, or chest trauma",
-                }
-            ],
-        },
-        "93306": {
-            "guideline_id": "LCD-93306-01",
-            "guideline_version": "2026.1",
-            "guideline_title": "Transthoracic Echocardiography with Doppler",
-            "effective_date": date(2025, 1, 1),
-            "requires_prior_auth": False,
-            "mandatory_criteria": [
-                {
-                    "criterion_id": "CRIT-93306-01",
-                    "description": "Documented cardiac symptoms, murmur, heart failure, or ischemic heart disease assessment",
-                }
-            ],
-        },
-        "99215": {
-            "guideline_id": "LCD-99215-01",
-            "guideline_version": "2026.1",
-            "guideline_title": "Evaluation and Management Services - Level 5 Established Patient",
-            "effective_date": date(2025, 1, 1),
-            "requires_prior_auth": False,
-            "mandatory_criteria": [
-                {
-                    "criterion_id": "CRIT-99215-01",
-                    "description": "Documented high complexity medical decision making or >= 40 minutes visit time",
-                }
-            ],
-        },
-    }
-
-    # ── Standard Clinical Diagnosis-to-Procedure Indication Map ─────────────
-    # Validates clinical and anatomical compatibility between documented ICD-10 diagnoses and billed CPT procedures
-    DIAGNOSIS_INDICATION_MAP: ClassVar[dict[str, dict[str, Any]]] = {
-        "27447": {
-            "name": "Total Knee Arthroplasty (TKA)",
-            "valid_icd_prefixes": ("M17", "M25.56", "M23", "M84.56", "M05", "M06"),
-            "anatomy": "Knee Joint",
-            "contraindicated_incompatible_prefixes": ("S52", "S62", "F32", "F33", "J01"),
-        },
-        "44970": {
-            "name": "Laparoscopic Appendectomy",
-            "valid_icd_prefixes": ("K35", "K36", "K37", "R10.31"),
-            "anatomy": "Appendix / Lower Right Abdomen",
-            "contraindicated_incompatible_prefixes": ("F32", "F33", "F41", "S52", "S62", "M17"),
-        },
-        "47562": {
-            "name": "Laparoscopic Cholecystectomy",
-            "valid_icd_prefixes": ("K80", "K81", "K82", "R10.13"),
-            "anatomy": "Gallbladder / Biliary Tract",
-            "contraindicated_incompatible_prefixes": ("F32", "F33", "J01", "S52"),
-        },
-        "33533": {
-            "name": "Coronary Artery Bypass Graft (CABG)",
-            "valid_icd_prefixes": ("I25", "I20", "I21"),
-            "anatomy": "Coronary Arteries / Cardiovascular",
-            "contraindicated_incompatible_prefixes": ("S52", "F32", "M17"),
-        },
-        "43239": {
-            "name": "Esophagogastroduodenoscopy (EGD) with Biopsy",
-            "valid_icd_prefixes": ("K21", "K29", "K25", "K26", "K27", "R10", "K92", "K30"),
-            "anatomy": "Upper Gastrointestinal Tract / Esophagus / Stomach",
-            "contraindicated_incompatible_prefixes": ("S52", "M17"),
-        },
-        "90837": {
-            "name": "Psychotherapy 60 min",
-            "valid_icd_prefixes": ("F32", "F33", "F41", "F43", "F31", "F10", "F90"),
-            "anatomy": "Mental / Behavioral Health",
-            "contraindicated_incompatible_prefixes": ("S52", "M17"),
-        },
-        "93306": {
-            "name": "Transthoracic Echocardiography",
-            "valid_icd_prefixes": ("I25", "I50", "I20", "I21", "I48", "I34", "I35", "R00", "R01", "R07"),
-            "anatomy": "Heart / Cardiovascular",
-            "contraindicated_incompatible_prefixes": ("S52", "M17"),
-        },
-        "36415": {
-            "name": "Venipuncture for Specimen Collection",
-            "valid_icd_prefixes": ("I", "E", "K", "J", "M", "N", "R", "F", "S", "G"),
-            "anatomy": "Venous System / Diagnostic Workup",
-            "contraindicated_incompatible_prefixes": (),
-        },
-        "71046": {
-            "name": "Chest Radiography 2 Views",
-            "valid_icd_prefixes": ("J", "R05", "R06", "R07", "I25", "I50"),
-            "anatomy": "Thorax / Lungs",
-            "contraindicated_incompatible_prefixes": (),
-        },
-    }
+    # Dynamic proxies to relational catalog (ADR-016)
+    STANDARD_GUIDELINE_CATALOG: ClassVar[_StandardGuidelineCatalogProxy] = _StandardGuidelineCatalogProxy()
+    DIAGNOSIS_INDICATION_MAP: ClassVar[_DiagnosisIndicationMapProxy] = _DiagnosisIndicationMapProxy()
 
     @classmethod
     def parse_discharge_summary(cls, text: str) -> DischargeSummaryAnalysis:
@@ -461,12 +253,30 @@ class DeterministicClinicalAlignmentEngine:
 
     @classmethod
     def classify_modality(cls, service_code: str) -> ServiceModality:
-        """Determines the clinical service modality from CPT, HCPCS, or Revenue code."""
+        """Determines the clinical service modality from CPT, HCPCS, or Revenue code (Spec 01 § 4, ADR-021)."""
         code = service_code.strip().upper()
-        if code.startswith("REV") or code in ("0100", "0110", "0120", "0130", "0140", "0150", "0200", "0210"):
+        clean_code = code.replace("REV_", "").strip()
+
+        # UB-04 Revenue Code ranges (3-4 digits, < 1000)
+        if clean_code.isdigit() and len(clean_code) in (3, 4) and int(clean_code) < 1000:
+            rev_int = int(clean_code)
+            if 100 <= rev_int <= 219:
+                return ServiceModality.ROOM_AND_BOARD
+            if 250 <= rev_int <= 259:
+                return ServiceModality.PHARMACEUTICAL
+            if 300 <= rev_int <= 319:
+                return ServiceModality.LABORATORY_TEST
+            if (320 <= rev_int <= 359) or (400 <= rev_int <= 409):
+                return ServiceModality.DIAGNOSTIC_IMAGING
+            if (360 <= rev_int <= 379) or rev_int in (710, 720):
+                return ServiceModality.SURGICAL_PROCEDURE
+            if (450 <= rev_int <= 459) or (510 <= rev_int <= 529):
+                return ServiceModality.MEDICAL_VISIT_OR_EVAL
+
+        if code.startswith("REV"):
             return ServiceModality.ROOM_AND_BOARD
 
-        # Numeric CPT ranges
+        # Numeric CPT ranges (5 digits)
         if code.isdigit():
             cpt_num = int(code)
             if 10000 <= cpt_num <= 69999:
@@ -478,13 +288,21 @@ class DeterministicClinicalAlignmentEngine:
             if (99201 <= cpt_num <= 99499) or cpt_num == 93000:
                 return ServiceModality.MEDICAL_VISIT_OR_EVAL
 
+        # Standard institutional text revenue tokens (ADR-022)
+        if clean_code in ("PHARM", "RX", "MED", "DRUGS", "MEDS", "PHARMACY"):
+            return ServiceModality.PHARMACEUTICAL
+        if clean_code in ("ROOM", "BED", "R&B", "BOARD"):
+            return ServiceModality.ROOM_AND_BOARD
+        if clean_code in ("DIAG", "LAB", "DIAGNOSTICS") or (clean_code.isdigit() and int(clean_code) in (800, 801, 802, 803, 804)):
+            return ServiceModality.LABORATORY_TEST
+
         if code.startswith(("J", "Q")) or len(code) == 11:
             return ServiceModality.PHARMACEUTICAL
 
         return ServiceModality.OTHER_SERVICE
 
     @classmethod
-    def _get_default_repo(cls) -> DefaultClinicalGuidelineRepository:
+    def _get_default_repo(cls) -> ClinicalGuidelineRepository:
         if cls._default_repo_instance is None:
             cls._default_repo_instance = DefaultClinicalGuidelineRepository()
         return cls._default_repo_instance
@@ -494,14 +312,15 @@ class DeterministicClinicalAlignmentEngine:
         cls,
         service_code: str,
         service_date: date | None = None,
-        criteria_satisfied_overrides: dict[str, bool] | None = None,
         spans_override: list[FieldProvenance] | None = None,
         guideline_repo: ClinicalGuidelineRepository | None = None,
+        payer_product: str | None = None,
+        jurisdiction: str | None = None,
     ) -> GuidelineCitation | None:
         """Retrieves and populates a GuidelineCitation for an authoritative medical code."""
         code_key = service_code.strip().replace("REV_", "")
         repo = guideline_repo or cls._get_default_repo()
-        template = repo.get_guideline(code_key) if hasattr(repo, "get_guideline") else cls.STANDARD_GUIDELINE_CATALOG.get(code_key)
+        template = repo.get_guideline(code_key, service_date=service_date) if hasattr(repo, "get_guideline") else cls.STANDARD_GUIDELINE_CATALOG.get(code_key)
         if not template:
             return None
 
@@ -512,35 +331,26 @@ class DeterministicClinicalAlignmentEngine:
         if service_date and exp_date and service_date > exp_date:
             return None
 
-        overrides = criteria_satisfied_overrides or {}
-        spans = spans_override or [
-            FieldProvenance(
-                document_id=f"DOC-GUIDELINE-{template['guideline_id']}",
-                page_number=1,
-                span_id=None,
-                text_content=template["guideline_title"],
-                bbox=None,
-                bounding_box=None,
-                evidence_quality_score=0.95,
-            )
-        ]
-
+        source_verified = bool(template.get("source_verified"))
+        source_reference = template.get("source_reference")
+        source_chunk_id = template.get("source_chunk_id")
+        configured_payer = template.get("payer_product")
+        configured_jurisdiction = template.get("jurisdiction")
         criteria = []
         for c in template["mandatory_criteria"]:
             crit_id = c["criterion_id"]
-            satisfied = overrides.get(crit_id, True)
             criteria.append(
                 MandatoryGuidelineCriterion(
                     criterion_id=crit_id,
                     description=c["description"],
+                    requirement_reference_id=crit_id,
+                    requirement_source_reference=c.get("source_reference"),
+                    requirement_source_chunk_id=c.get("source_chunk_id"),
+                    requirement_source_verified=bool(c.get("source_verified")),
                     is_mandatory=True,
-                    evaluation_outcome=(
-                        CriterionEvaluationOutcome.SATISFIED
-                        if satisfied
-                        else CriterionEvaluationOutcome.NOT_SATISFIED
-                    ),
-                    supporting_spans=spans if satisfied else [],
-                    rationale="Evaluated against clinical documentation." if satisfied else "Criteria not satisfied in clinical record.",
+                    evaluation_outcome=CriterionEvaluationOutcome.UNASSESSED_EVIDENCE_UNAVAILABLE,
+                    supporting_spans=[],
+                    rationale="Patient-specific criterion evidence has not been independently verified.",
                 )
             )
 
@@ -548,10 +358,133 @@ class DeterministicClinicalAlignmentEngine:
             guideline_id=template["guideline_id"],
             guideline_version=template["guideline_version"],
             guideline_title=template["guideline_title"],
+            jurisdiction=configured_jurisdiction,
+            payer_product=configured_payer,
+            source_reference=source_reference,
+            source_chunk_id=source_chunk_id,
+            source_verified=source_verified,
+            applicable_to_claim=bool(
+                payer_product
+                and jurisdiction
+                and configured_payer
+                and configured_jurisdiction
+                and payer_product.casefold() == configured_payer.casefold()
+                and jurisdiction.casefold() == configured_jurisdiction.casefold()
+            ),
             effective_date=eff_date,
             expiration_date=exp_date,
             criteria_evaluations=criteria,
         )
+
+    @classmethod
+    def evaluate_guideline_criteria(
+        cls,
+        guideline: dict[str, Any],
+        patient_evidence: list[FieldProvenance],
+        validated_diagnosis_codes: list[str],
+    ) -> list[MandatoryGuidelineCriterion]:
+        """Evaluate database-configured criterion patterns against verified patient OCR evidence."""
+        evaluated: list[MandatoryGuidelineCriterion] = []
+        for definition in guideline.get("mandatory_criteria", []):
+            parameters = definition.get("evaluation_parameters") or {}
+            requirement_type = definition.get("requirement_type")
+            relevant: list[FieldProvenance] = []
+            outcome = CriterionEvaluationOutcome.UNASSESSED_EVIDENCE_UNAVAILABLE
+            interpretation: str | None = None
+            rationale = "Required patient evidence is unavailable or insufficient."
+
+            if requirement_type == "DIAGNOSIS_CODE_PREFIX":
+                prefixes = tuple(str(p).replace(".", "").upper() for p in parameters.get("valid_prefixes", ()))
+                matching_codes = [
+                    code
+                    for code in validated_diagnosis_codes
+                    if str(code).replace(".", "").upper().startswith(prefixes)
+                ]
+                relevant = [
+                    item
+                    for item in patient_evidence
+                    if any(code.casefold() in item.text_content.casefold() for code in matching_codes)
+                ]
+                if matching_codes and relevant:
+                    outcome = CriterionEvaluationOutcome.SATISFIED
+                    interpretation = ", ".join(matching_codes)
+                    rationale = "Catalog-validated diagnosis code is present in verified patient OCR evidence."
+            elif requirement_type == "EVIDENCE_REGEX":
+                pattern = parameters.get("pattern")
+                if isinstance(pattern, str) and pattern:
+                    matches = [item for item in patient_evidence if re.search(pattern, item.text_content, re.IGNORECASE)]
+                    negative_patterns = parameters.get("negation_patterns", [])
+                    uncertain_patterns = parameters.get("uncertainty_patterns", [])
+                    positive = [
+                        item for item in matches
+                        if not any(re.search(p, item.text_content, re.IGNORECASE) for p in negative_patterns)
+                        and not any(re.search(p, item.text_content, re.IGNORECASE) for p in uncertain_patterns)
+                    ]
+                    negative = [
+                        item for item in matches
+                        if any(re.search(p, item.text_content, re.IGNORECASE) for p in negative_patterns)
+                    ]
+                    uncertain = [
+                        item for item in matches
+                        if any(re.search(p, item.text_content, re.IGNORECASE) for p in uncertain_patterns)
+                    ]
+                    if positive and negative:
+                        relevant = positive + negative
+                        outcome = CriterionEvaluationOutcome.CONTRADICTORY
+                        rationale = "Verified patient evidence contains both affirmative and negated findings."
+                    elif negative:
+                        relevant = negative
+                        outcome = CriterionEvaluationOutcome.NOT_SATISFIED
+                        rationale = "Verified patient evidence explicitly negates the required finding."
+                    elif positive:
+                        relevant = positive
+                        outcome = CriterionEvaluationOutcome.SATISFIED
+                        rationale = "Verified patient evidence matches the configured criterion pattern."
+                    elif uncertain:
+                        relevant = uncertain
+                        rationale = "Evidence is explicitly uncertain and cannot establish the criterion."
+
+                    if relevant:
+                        match = re.search(pattern, relevant[0].text_content, re.IGNORECASE)
+                        if match:
+                            interpretation = match.group(0)
+
+            evidence_relevance_verified = bool(relevant) and outcome in (
+                CriterionEvaluationOutcome.SATISFIED,
+                CriterionEvaluationOutcome.NOT_SATISFIED,
+                CriterionEvaluationOutcome.CONTRADICTORY,
+            )
+            annotated = [
+                item.model_copy(update={
+                    "normalized_interpretation": interpretation,
+                    "assertion_status": (
+                        ClinicalAssertionStatus.AFFIRMED
+                        if outcome == CriterionEvaluationOutcome.SATISFIED
+                        else ClinicalAssertionStatus.NEGATED
+                        if outcome == CriterionEvaluationOutcome.NOT_SATISFIED
+                        else ClinicalAssertionStatus.CONTRADICTORY
+                        if outcome == CriterionEvaluationOutcome.CONTRADICTORY
+                        else ClinicalAssertionStatus.UNCERTAIN
+                    ),
+                    "evidence_relevance_verified": evidence_relevance_verified,
+                })
+                for item in relevant
+            ]
+            evaluated.append(MandatoryGuidelineCriterion(
+                criterion_id=str(definition["criterion_id"]),
+                description=str(definition["description"]),
+                requirement_reference_id=str(definition["criterion_id"]),
+                requirement_source_reference=definition.get("source_reference"),
+                requirement_source_chunk_id=definition.get("source_chunk_id"),
+                requirement_source_verified=bool(definition.get("source_verified")),
+                is_mandatory=bool(definition.get("is_mandatory", True)),
+                evaluation_outcome=outcome,
+                supporting_spans=annotated,
+                evidence_interpretation=interpretation,
+                evidence_relevance_verified=evidence_relevance_verified,
+                rationale=rationale,
+            ))
+        return evaluated
 
     @classmethod
     def reconcile_bed_days(
@@ -676,27 +609,85 @@ class DeterministicClinicalAlignmentEngine:
 
         timestamps_complete = admission_datetime is not None and discharge_datetime is not None
 
-        # 4. Ambiguous Date-Only Stay (EVAL-CLIN-14)
+        # 4. Date-Only Stay Reconciliation (ADR-022, EVAL-CLIN-14)
         if not timestamps_complete:
             days_span = calendar_days if calendar_days is not None else 1
             min_u = float(max(0, days_span))
             max_u = float(max(1, days_span + 1))
-            return BedDayReconciliation(
-                billing_rule=billing_rule,
-                claim_facility_type=claim_facility_type,
-                claim_type=claim_type,
-                admission_date=a_d,
-                discharge_date=d_d,
-                timestamps_complete=False,
-                calendar_days_stayed=calendar_days,
-                expected_billable_units_min=min_u,
-                expected_billable_units_max=max_u,
-                billed_bed_days=billed_bed_days,
-                is_reconciled=False,
-                uncertainty_flag=True,
-                reconciliation_verdict=AgentVerdict.INDETERMINATE,
-                remarks=f"Date-only stay without timestamps produces ambiguous expected unit range [{min_u}, {max_u}].",
-            )
+
+            if billed_bed_days == min_u:
+                return BedDayReconciliation(
+                    billing_rule=billing_rule,
+                    claim_facility_type=claim_facility_type,
+                    claim_type=claim_type,
+                    admission_date=a_d,
+                    discharge_date=d_d,
+                    timestamps_complete=False,
+                    calendar_days_stayed=calendar_days,
+                    expected_billable_units_min=min_u,
+                    expected_billable_units_max=min_u,
+                    billed_bed_days=billed_bed_days,
+                    is_reconciled=True,
+                    discrepancy_units=0.0,
+                    uncertainty_flag=False,
+                    reconciliation_verdict=AgentVerdict.PASS,
+                    remarks=f"Date-only stay reconciled affirmatively: billed {billed_bed_days} matches expected midnight census {min_u}.",
+                )
+            elif billed_bed_days == max_u and billing_rule.convention == FacilityBillingConvention.CALENDAR_DAY_SPAN:
+                return BedDayReconciliation(
+                    billing_rule=billing_rule,
+                    claim_facility_type=claim_facility_type,
+                    claim_type=claim_type,
+                    admission_date=a_d,
+                    discharge_date=d_d,
+                    timestamps_complete=False,
+                    calendar_days_stayed=calendar_days,
+                    expected_billable_units_min=max_u,
+                    expected_billable_units_max=max_u,
+                    billed_bed_days=billed_bed_days,
+                    is_reconciled=True,
+                    discrepancy_units=0.0,
+                    uncertainty_flag=False,
+                    reconciliation_verdict=AgentVerdict.PASS,
+                    remarks=f"Date-only stay reconciled affirmatively: billed {billed_bed_days} matches calendar day span {max_u}.",
+                )
+            elif billed_bed_days == max_u and billing_rule.convention == FacilityBillingConvention.MIDNIGHT_CENSUS:
+                # Ambiguous boundary: facility billed discharge day as full bed day under midnight census without hourly timestamps (EVAL-CLIN-14)
+                return BedDayReconciliation(
+                    billing_rule=billing_rule,
+                    claim_facility_type=claim_facility_type,
+                    claim_type=claim_type,
+                    admission_date=a_d,
+                    discharge_date=d_d,
+                    timestamps_complete=False,
+                    calendar_days_stayed=calendar_days,
+                    expected_billable_units_min=min_u,
+                    expected_billable_units_max=max_u,
+                    billed_bed_days=billed_bed_days,
+                    is_reconciled=False,
+                    uncertainty_flag=True,
+                    reconciliation_verdict=AgentVerdict.INDETERMINATE,
+                    remarks=f"Date-only stay without timestamps produces ambiguous expected unit range [{min_u}, {max_u}].",
+                )
+            else:
+                discrepancy = billed_bed_days - min_u
+                return BedDayReconciliation(
+                    billing_rule=billing_rule,
+                    claim_facility_type=claim_facility_type,
+                    claim_type=claim_type,
+                    admission_date=a_d,
+                    discharge_date=d_d,
+                    timestamps_complete=False,
+                    calendar_days_stayed=calendar_days,
+                    expected_billable_units_min=min_u,
+                    expected_billable_units_max=max_u,
+                    billed_bed_days=billed_bed_days,
+                    is_reconciled=False,
+                    discrepancy_units=discrepancy,
+                    uncertainty_flag=True,
+                    reconciliation_verdict=AgentVerdict.CONFLICT,
+                    remarks=f"Billed bed days ({billed_bed_days}) exceeds documented stay window [{min_u}, {max_u}].",
+                )
 
         # 5. Calculate Expected Units from Complete Timestamps
         assert admission_datetime is not None
@@ -783,8 +774,16 @@ class DeterministicClinicalAlignmentEngine:
         encounter_discharge_datetime: datetime | None = None,
         service_timestamp: datetime | None = None,
         clinical_notes_text: str | None = None,
+        clinical_notes_verified: bool = False,
+        encounter_dates_verified: bool = False,
         diagnosis_codes: list[str] | None = None,
         guideline_repo: ClinicalGuidelineRepository | None = None,
+        payer_product: str | None = None,
+        jurisdiction: str | None = None,
+        performance_evidence: list[FieldProvenance] | None = None,
+        indication_evidence: list[FieldProvenance] | None = None,
+        criterion_evaluations: list[MandatoryGuidelineCriterion] | None = None,
+        indication_conflict: bool = False,
         # Authoritative discharge summary section inputs (Spec 01 § 4, ADR-015)
         primary_icd10_codes: list[str] | None = None,
         secondary_icd10_codes: list[str] | None = None,
@@ -800,11 +799,17 @@ class DeterministicClinicalAlignmentEngine:
         repo = guideline_repo or cls._get_default_repo()
         resolved_modality = modality or cls.classify_modality(service_code)
         spans = list(supporting_spans or [])
+        diag_rule = (
+            repo.get_indication(service_code)
+            if hasattr(repo, "get_indication")
+            else cls.DIAGNOSIS_INDICATION_MAP.get(service_code.strip().replace("REV_", ""))
+        )
+        assertion_patterns = (diag_rule or {}).get("assertion_patterns") or {}
 
         # 1. Date Boundary & Post-Discharge Non-Performance Check (EVAL-CLIN-10)
         is_post_discharge = False
         resolved_necessity: MedicalNecessityStatus
-        if encounter_discharge_datetime and (
+        if encounter_dates_verified and encounter_discharge_datetime and (
             (service_timestamp and service_timestamp > encounter_discharge_datetime)
             or (service_date and service_date > encounter_discharge_datetime.date())
         ):
@@ -840,15 +845,19 @@ class DeterministicClinicalAlignmentEngine:
 
         # 2. Clinical Explicit Contradiction Check (EVAL-CLIN-09)
         text_lower = (clinical_notes_text or "").lower()
-        if (
-            "patient refused" in text_lower
-            or "refused surgery" in text_lower
-            or "procedure canceled" in text_lower
-            or "procedure cancelled" in text_lower
-            or "surgery canceled" in text_lower
-            or "surgery cancelled" in text_lower
-            or performance_status == PerformanceEvidenceStatus.EXPLICITLY_CONTRADICTED
-        ):
+        contradiction_patterns = assertion_patterns.get("contradicted_performance_patterns", [])
+        verified_contradiction = clinical_notes_verified and any(
+            re.search(pattern, text_lower, re.IGNORECASE)
+            for pattern in contradiction_patterns
+        )
+        verified_conflict_spans = [
+            span for span in spans
+            if span.evidence_source == EvidenceSource.OCR
+            and span.verification_status == EvidenceVerificationStatus.VERIFIED
+            and span.evidence_relevance_verified
+            and span.assertion_status in (ClinicalAssertionStatus.NEGATED, ClinicalAssertionStatus.CONTRADICTORY)
+        ]
+        if verified_contradiction and verified_conflict_spans:
             resolved_performance = PerformanceEvidenceStatus.EXPLICITLY_CONTRADICTED
             resolved_indication = indication_status or ClinicalIndicationStatus.NO_DOCUMENTED_INDICATION
             resolved_necessity = MedicalNecessityStatus.NOT_MET
@@ -869,7 +878,9 @@ class DeterministicClinicalAlignmentEngine:
                 prior_auth_requirement=resolved_prior_auth_req,
                 prior_auth_verification=resolved_prior_auth_ver,
                 repeat_service_status=resolved_repeat,
-                supporting_spans=[],
+                supporting_spans=verified_conflict_spans,
+                performance_evidence=verified_conflict_spans,
+                indication_evidence=verified_conflict_spans,
                 line_verdict=AgentVerdict.CONFLICT,
                 clinical_finding_summary=clinical_finding_summary or "Clinical documentation explicitly contradicts performance.",
                 discrepancy_flag=True,
@@ -878,11 +889,11 @@ class DeterministicClinicalAlignmentEngine:
 
         # 3. Prior Authorization Requirement Resolution
         template = (
-            repo.get_guideline(service_code)
+            repo.get_guideline(service_code, service_date=service_date)
             if hasattr(repo, "get_guideline")
             else cls.STANDARD_GUIDELINE_CATALOG.get(service_code.strip().replace("REV_", ""))
         )
-        requires_pa_catalog = template["requires_prior_auth"] if template else False
+        requires_pa_catalog = template.get("requires_prior_auth", False) if template else False
 
         if prior_auth_requirement is not None:
             resolved_prior_auth_req = prior_auth_requirement
@@ -910,44 +921,82 @@ class DeterministicClinicalAlignmentEngine:
 
         # 6. Clinical Indication Status Resolution
         resolved_indication = indication_status or ClinicalIndicationStatus.NO_DOCUMENTED_INDICATION
-        diag_rule = (
-            repo.get_indication(service_code)
-            if hasattr(repo, "get_indication")
-            else cls.DIAGNOSIS_INDICATION_MAP.get(service_code.strip().replace("REV_", ""))
-        )
-        if diag_rule:
+        if diag_rule and indication_status is None:
             proc_name = diag_rule["name"]
             all_eval_diags: list[str] = []
-            if diagnosis_codes:
-                all_eval_diags.extend(diagnosis_codes)
-            if primary_icd10_codes:
-                all_eval_diags.extend(primary_icd10_codes)
-            if secondary_icd10_codes:
-                all_eval_diags.extend(secondary_icd10_codes)
+            unvalidated_diags: list[str] = []
+            code_validator = getattr(repo, "is_valid_diagnosis_code", None)
+            documented_diags = list(dict.fromkeys(
+                str(code)
+                for code in (diagnosis_codes or []) + (primary_icd10_codes or []) + (secondary_icd10_codes or [])
+                if code
+            ))
+            if code_validator:
+                for code in documented_diags:
+                    (all_eval_diags if code_validator(code, service_date) else unvalidated_diags).append(code)
+            else:
+                unvalidated_diags.extend(documented_diags)
 
             has_matching_diag = False
+            has_contraindicated_diag = False
             if all_eval_diags:
                 clean_diag = [str(d).upper().replace(".", "").strip() for d in all_eval_diags if d]
-                valid_prefixes = tuple(p.replace(".", "").upper() for p in diag_rule["valid_icd_prefixes"])
+                valid_prefixes = tuple(p.replace(".", "").upper() for p in diag_rule.get("valid_icd_prefixes", ()))
+                contraindicated_prefixes = tuple(
+                    p.replace(".", "").upper()
+                    for p in diag_rule.get("contraindicated_incompatible_prefixes", ())
+                )
                 has_matching_diag = any(any(d.startswith(p) for p in valid_prefixes) for d in clean_diag)
+                has_contraindicated_diag = any(
+                    d.startswith(prefix)
+                    for d in clean_diag
+                    for prefix in contraindicated_prefixes
+                )
 
-            # Check if condition anatomy or diagnosis keywords are in primary, secondary, or hospital course text
-            diag_keywords = {
-                "27447": ("knee", "osteoarthritis", "arthroplasty", "joint disease", "gonarthrosis", "condyle", "m17"),
-                "44970": ("appendectomy", "appendix", "appendicitis", "lower right abdominal", "rlq", "k35"),
-                "47562": ("cholecystectomy", "cholecystitis", "gallbladder", "cholelithiasis", "biliary", "k80", "k81"),
-                "33533": ("coronary", "cad", "angina", "myocardial", "ischemic heart", "bypass", "i25"),
-                "43239": ("endoscopy", "egd", "gastritis", "dyspepsia", "gerd", "ulcer", "upper gi", "biopsy", "k21"),
-                "90837": ("psychotherapy", "depression", "depressive", "anxiety", "mental health", "behavioral", "f32"),
-            }
-            code_clean = service_code.strip().replace("REV_", "")
-            kw_candidates = diag_keywords.get(code_clean, ())
-            clin_context_text = f"{primary_diagnosis_text or ''} {secondary_diagnosis_text or ''} {hospital_course_text or ''} {clinical_notes_text or ''}".lower()
-            text_indicated = any(kw in clin_context_text for kw in kw_candidates)
+            diagnosis_text = f"{primary_diagnosis_text or ''} {secondary_diagnosis_text or ''}"
+            if not has_matching_diag:
+                for ind in extract_multilingual_clinical_indications(
+                    diagnosis_text,
+                    enable_llm_fallback=False,
+                ):
+                    candidate_code = ind.get("icd10_code")
+                    if not candidate_code or not code_validator or not code_validator(candidate_code, service_date):
+                        continue
+                    ind_code = candidate_code.upper().replace(".", "").strip()
+                    has_matching_diag = any(
+                        ind_code.startswith(prefix.replace(".", "").upper())
+                        for prefix in diag_rule.get("valid_icd_prefixes", ())
+                    )
+                    if has_matching_diag:
+                        break
 
-            if has_matching_diag or text_indicated:
+            if has_contraindicated_diag:
+                resolved_indication = ClinicalIndicationStatus.CLINICALLY_CONTRAINDICATED
+                contraindicated_codes = [
+                    code for code in all_eval_diags
+                    if any(
+                        code.upper().replace(".", "").startswith(prefix)
+                        for prefix in contraindicated_prefixes
+                    )
+                ]
+                discrepancy_description = (
+                    f"Configured diagnosis-procedure contraindication: validated diagnosis code(s) "
+                    f"{', '.join(contraindicated_codes)} are contraindicated for CPT {service_code} "
+                    f"({proc_name}) by the active diagnosis-indication catalog."
+                )
+                clinical_finding_summary = discrepancy_description
+            elif has_matching_diag:
                 resolved_indication = ClinicalIndicationStatus.EXPLICITLY_INDICATED
                 discrepancy_description = None
+            elif unvalidated_diags and not all_eval_diags:
+                # Documented but unverifiable codes are uncertainty, not evidence of misalignment.
+                resolved_indication = ClinicalIndicationStatus.POTENTIALLY_RELATED
+                discrepancy_description = (
+                    f"Diagnosis validation unavailable: documented code(s) {', '.join(unvalidated_diags)} "
+                    f"could not be validated against the ICD-10-CM catalog, so the indication for CPT "
+                    f"{service_code} ({proc_name}) cannot be confirmed or refuted."
+                )
+                clinical_finding_summary = discrepancy_description
             else:
                 resolved_indication = ClinicalIndicationStatus.NO_DOCUMENTED_INDICATION
                 diag_str = ", ".join(all_eval_diags) if all_eval_diags else "None documented"
@@ -960,7 +1009,7 @@ class DeterministicClinicalAlignmentEngine:
 
         # 7. Guideline Citation & Medical Necessity Resolution
         resolved_guideline = guideline_citation
-        if resolved_guideline is None and resolved_performance in (
+        if resolved_guideline is None and necessity_status is None and resolved_performance in (
             PerformanceEvidenceStatus.DIRECTLY_DOCUMENTED_PERFORMANCE,
             PerformanceEvidenceStatus.RESULTED,
         ):
@@ -969,22 +1018,63 @@ class DeterministicClinicalAlignmentEngine:
                 service_date=service_date,
                 spans_override=spans,
                 guideline_repo=guideline_repo,
+                payer_product=payer_product,
+                jurisdiction=jurisdiction,
+            )
+        if resolved_guideline is not None and criterion_evaluations is not None:
+            resolved_guideline = resolved_guideline.model_copy(
+                update={"criteria_evaluations": criterion_evaluations}
             )
 
         if necessity_status is not None:
             resolved_necessity = necessity_status
         elif resolved_guideline is None:
-            resolved_necessity = MedicalNecessityStatus.GUIDELINE_UNAVAILABLE
+            # Ancillary facility revenue codes (Room & Board, Inpatient Pharmacy, Operating Room) substantiated by
+            # a verified inpatient hospital stay or surgery do not require a standalone outpatient CPT guideline (ADR-021).
+            if (
+                resolved_modality in (
+                    ServiceModality.ROOM_AND_BOARD,
+                    ServiceModality.PHARMACEUTICAL,
+                    ServiceModality.SURGICAL_PROCEDURE,
+                    ServiceModality.LABORATORY_TEST,
+                    ServiceModality.DIAGNOSTIC_IMAGING,
+                )
+                and resolved_performance in (
+                    PerformanceEvidenceStatus.DIRECTLY_DOCUMENTED_PERFORMANCE,
+                    PerformanceEvidenceStatus.RESULTED,
+                )
+                and resolved_indication == ClinicalIndicationStatus.EXPLICITLY_INDICATED
+            ):
+                resolved_necessity = MedicalNecessityStatus.MET
+            else:
+                resolved_necessity = MedicalNecessityStatus.GUIDELINE_UNAVAILABLE
         elif resolved_guideline.all_mandatory_criteria_satisfied:
             resolved_necessity = MedicalNecessityStatus.MET
-        else:
+        elif any(
+            criterion.is_mandatory
+            and criterion.evaluation_outcome == CriterionEvaluationOutcome.NOT_SATISFIED
+            for criterion in resolved_guideline.criteria_evaluations
+        ):
             resolved_necessity = MedicalNecessityStatus.NOT_MET
+        else:
+            resolved_necessity = MedicalNecessityStatus.CRITERIA_INCOMPLETE
 
         # 8. Deterministic Line Verdict Derivation
         # CONFLICT cases
-        if resolved_performance in (
-            PerformanceEvidenceStatus.EXPLICITLY_CONTRADICTED,
-            PerformanceEvidenceStatus.CONFIRMED_NON_PERFORMANCE,
+        if (
+            indication_conflict
+            or resolved_performance in (
+                PerformanceEvidenceStatus.EXPLICITLY_CONTRADICTED,
+                PerformanceEvidenceStatus.CONFIRMED_NON_PERFORMANCE,
+            )
+            or (
+                resolved_guideline is not None
+                and any(
+                    criterion.is_mandatory
+                    and criterion.evaluation_outcome == CriterionEvaluationOutcome.CONTRADICTORY
+                    for criterion in resolved_guideline.criteria_evaluations
+                )
+            )
         ):
             line_verdict = AgentVerdict.CONFLICT
         # FAIL cases (e.g. EVAL-CLIN-05, EVAL-CLIN-06)
@@ -1015,8 +1105,8 @@ class DeterministicClinicalAlignmentEngine:
                 RepeatServiceStatus.REPEATED_AND_UNJUSTIFIED,
             )
             or not spans
-            or resolved_guideline is None
-            or not resolved_guideline.all_mandatory_criteria_satisfied
+            or (necessity_status is None and resolved_guideline is None)
+            or (resolved_guideline is not None and not resolved_guideline.all_mandatory_criteria_satisfied)
         ):
             line_verdict = AgentVerdict.INDETERMINATE
         else:
@@ -1040,6 +1130,8 @@ class DeterministicClinicalAlignmentEngine:
             indication_status=resolved_indication,
             necessity_status=resolved_necessity,
             guideline_citation=resolved_guideline,
+            performance_evidence=list(performance_evidence or []),
+            indication_evidence=list(indication_evidence or []),
             prior_auth_requirement=resolved_prior_auth_req,
             prior_auth_verification=resolved_prior_auth_ver,
             repeat_service_status=resolved_repeat,
@@ -1076,37 +1168,104 @@ class DeterministicClinicalAlignmentEngine:
 
 
 class DefaultClinicalGuidelineRepository:
-    """Authoritative in-memory clinical guideline repository allowing dynamic registration (ADR-015)."""
+    """Authoritative clinical guideline repository backed by database storage (ADR-015, ADR-016)."""
 
     def __init__(
         self,
         guidelines: dict[str, dict[str, Any]] | None = None,
         indications: dict[str, dict[str, Any]] | None = None,
+        db: Any = None,
     ) -> None:
-        self._guidelines = (
-            dict(guidelines)
-            if guidelines is not None
-            else dict(DeterministicClinicalAlignmentEngine.STANDARD_GUIDELINE_CATALOG)
-        )
-        self._indications = (
-            dict(indications)
-            if indications is not None
-            else dict(DeterministicClinicalAlignmentEngine.DIAGNOSIS_INDICATION_MAP)
-        )
+        self._guidelines = dict(guidelines) if guidelines is not None else {}
+        self._indications = dict(indications) if indications is not None else {}
+        self._sql_repo = None
+        self._code_repo = None
+        if not guidelines and not indications:
+            try:
+                from medishield.db.catalog import (
+                    SqlClinicalGuidelineRepository,
+                    SqlCodeCatalogRepository,
+                )
+                from medishield.db.session import sync_engine
+                self._sql_repo = SqlClinicalGuidelineRepository(db or sync_engine)
+                self._code_repo = SqlCodeCatalogRepository(db or sync_engine)
+            except Exception:  # noqa: BLE001
+                self._sql_repo = None
+                self._code_repo = None
 
-    def get_guideline(self, service_code: str) -> dict[str, Any] | None:
-        code_key = service_code.strip().replace("REV_", "")
-        return self._guidelines.get(code_key)
+    def get_guideline(self, service_code: str, service_date: date | None = None) -> dict[str, Any] | None:
+        code_key = service_code.strip().replace("REV_", "").upper()
+        if code_key in self._guidelines:
+            entry = self._guidelines[code_key]
+            if service_date:
+                eff = entry.get("effective_date")
+                exp = entry.get("expiration_date")
+                if eff and service_date < eff:
+                    return None
+                if exp and service_date > exp:
+                    return None
+            return entry
+        if self._sql_repo is not None:
+            return self._sql_repo.get_guideline(code_key, service_date=service_date)
+        return None
 
     def get_indication(self, service_code: str) -> dict[str, Any] | None:
-        code_key = service_code.strip().replace("REV_", "")
-        return self._indications.get(code_key)
+        code_key = service_code.strip().replace("REV_", "").upper()
+        if code_key in self._indications:
+            return self._indications[code_key]
+        if self._sql_repo is not None:
+            return self._sql_repo.get_indication(code_key)
+        return None
+
+    def is_valid_diagnosis_code(self, code: str, service_date: date | None = None) -> bool:
+        try:
+            return bool(
+                self._code_repo
+                and self._code_repo.is_valid_code(code, CodingSystem.ICD10_CM, service_date=service_date)
+            )
+        except OperationalError:
+            return False
+
+    def normalize_diagnosis_code(self, raw_code: str, service_date: date | None = None) -> str | None:
+        clean = re.sub(r"[^A-Z0-9]", "", raw_code.upper())
+        if not clean or self._code_repo is None:
+            return None
+        try:
+            active_codes = self._code_repo.get_active_codes(CodingSystem.ICD10_CM)
+        except OperationalError:
+            return None
+        matches = [
+            code for code in active_codes
+            if re.sub(r"[^A-Z0-9]", "", code.upper()) == clean
+            and self.is_valid_diagnosis_code(code, service_date)
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def get_active_code_details(
+        self,
+        code: str,
+        coding_system: CodingSystem,
+        service_date: date | None = None,
+    ) -> dict[str, str] | None:
+        try:
+            if not self._code_repo or not self._code_repo.is_valid_code(code, coding_system, service_date):
+                return None
+            record = self._code_repo.get_code_details(code, coding_system)
+        except OperationalError:
+            return None
+        if record is None:
+            return None
+        return {
+            "code": record.code,
+            "description": record.long_description or record.short_description,
+            "coding_system": record.coding_system.value,
+        }
 
     def register_guideline(self, service_code: str, data: dict[str, Any]) -> None:
-        code_key = service_code.strip().replace("REV_", "")
+        code_key = service_code.strip().replace("REV_", "").upper()
         self._guidelines[code_key] = data
 
     def register_indication(self, service_code: str, data: dict[str, Any]) -> None:
-        code_key = service_code.strip().replace("REV_", "")
+        code_key = service_code.strip().replace("REV_", "").upper()
         self._indications[code_key] = data
 

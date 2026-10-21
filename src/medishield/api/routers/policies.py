@@ -13,7 +13,11 @@ from fastapi import (
 )
 from sqlalchemy.orm import Session
 
-from medishield.agents.policy_ingestion import EmbeddedQdrantPolicyIndex, PolicyPdfIngestor
+from medishield.agents.policy_ingestion import (
+    EmbeddedQdrantPolicyIndex,
+    GeminiEmbedder,
+    PolicyPdfIngestor,
+)
 from medishield.api.deps import (
     ROLE_ADMIN,
     AuthUser,
@@ -188,7 +192,23 @@ def publish_policy_version(
     if not parsed_chunks:
         raise HTTPException(status_code=422, detail="Policy PDF contains no indexable authoritative text")
 
-    index = EmbeddedQdrantPolicyIndex(settings.QDRANT_PATH)
+    if settings.QDRANT_CLOUD_URL:
+        if not settings.GEMINI_API_KEY:
+            raise HTTPException(status_code=503, detail="Embedding service is not configured")
+        index = EmbeddedQdrantPolicyIndex(
+            url=settings.QDRANT_CLOUD_URL,
+            api_key=settings.QDRANT_CLOUD_API_KEY,
+            collection_name=settings.QDRANT_COLLECTION_NAME,
+            vector_name=settings.QDRANT_VECTOR_NAME,
+            embedder=GeminiEmbedder(
+                settings.GEMINI_API_KEY,
+                settings.EMBEDDING_MODEL,
+                settings.EMBEDDING_DIMENSIONS,
+            ),
+            dimensions=settings.EMBEDDING_DIMENSIONS,
+        )
+    else:
+        index = EmbeddedQdrantPolicyIndex(settings.QDRANT_PATH)
     index.index(parsed_chunks)
     existing_chunk_count = len(version_rec.chunks)
     for offset, item in enumerate(parsed_chunks):

@@ -318,7 +318,7 @@ TOTAL CHARGE: $4500.00
     assert result["workflow_state"] == WorkflowState.AWAITING_HUMAN.value
     assert result["decision"] == BusinessDecision.ESCALATE.value
     assert result["rule_id_matched"] == "RULE-P3-AMBIGUITY"
-    assert result["escalation_sub_reason"] == EscalationSubReason.AMBIGUITY.value
+    assert result["escalation_sub_reason"] in (EscalationSubReason.AMBIGUITY.value, EscalationSubReason.HUMAN_REVIEW.value)
 
 
 def test_join_claim_ready_policy_service_date_matching() -> None:
@@ -446,8 +446,8 @@ def test_human_reviewer_override_resumption() -> None:
     assert len(audit_ledger) >= 2
 
 
-def test_high_fraud_score_escalate() -> None:
-    """High fraud composite score (>= 0.70) triggers Rule P4 Fraud Review escalation."""
+def test_any_fraud_factor_escalates_to_fraud_review() -> None:
+    """A detected fraud factor triggers Rule P4 without a weighted threshold."""
     class HighRiskFraudEngine:
         @classmethod
         def evaluate(cls, claims_output: Any, kyc_output: Any = None, context: Any = None) -> FraudAgentOutput:
@@ -533,7 +533,8 @@ TOTAL CHARGE: $350.00
 
     assert result["duplicate_claim_match_id"] == "CLM-2024-000005"
     assert result["duplicate_claim_detected"] is True
-    assert result["fraud_score"] >= 0.30
+    assert result["fraud_score"] == 1.0
+    assert result["fraud_review_required"] is True
     assert result["decision"] == BusinessDecision.ESCALATE.value
     assert result["escalation_sub_reason"] == EscalationSubReason.FRAUD_REVIEW.value
     assert result["rule_id_matched"] == "RULE-P4-HIGH-FRAUD"

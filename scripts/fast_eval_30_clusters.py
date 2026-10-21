@@ -4,38 +4,29 @@ Captures all preflight, measurement, rule breakdown, and case check data.
 
 import json
 import os
-import re
-import socket
 import sys
 import time
-import os
+
 os.environ["MEDISHIELD_STRICT_EVAL"] = "0"
 from collections import Counter, defaultdict
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from pathlib import Path
-from urllib.parse import urlparse
 
 sys.stdout.reconfigure(line_buffering=True)
 
 from medishield.agents.claims import ClaimsAgent
 from medishield.agents.classifier import DocumentClassifierAgent
-from medishield.agents.kyc import InMemoryMemberRepository, KYCAgent, SqlMemberRepository
+from medishield.agents.kyc import KYCAgent, SqlMemberRepository
 from medishield.agents.policy import (
-    InMemoryPolicyEnrollmentRepository,
     PolicyContextAgent,
-    PolicyCorpusRepository,
     PolicyCoverageAgent,
     SqlPolicyEnrollmentRepository,
     resolve_claim_ready_policy,
 )
 from medishield.core.config import settings
-from medishield.db.enums import AgentVerdict, BusinessDecision, DocumentType, EscalationSubReason
-from medishield.db.session import _use_sqlite, sync_engine
+from medishield.db.enums import AgentVerdict, BusinessDecision
+from medishield.db.session import sync_engine
 from medishield.domain.contracts import (
-    CandidatePolicy,
-    ClaimsAgentOutput,
-    FraudAgentOutput,
-    KYCAgentOutput,
     OCRDocumentPayload,
     OCRPagePayload,
     OCRTextSpan,
@@ -50,6 +41,10 @@ from medishield.domain.decision import (
     DeterministicDecisionEngine,
 )
 from medishield.domain.fraud import DeterministicFraudEngine, FraudEvaluationContext
+from medishield.eval.decision_labels import (
+    compute_decision_label_metrics,
+    resolve_adjudication_label,
+)
 from medishield.intake.completeness import ClassifiedDocumentItem, evaluate_case_completeness
 from medishield.ocr.preprocessor import DefaultOCREngine
 
@@ -74,8 +69,10 @@ sorted_cids = sorted(clusters.keys())
 print(f"Loaded {len(sorted_cids)} patient clusters from dataset/.", flush=True)
 
 from sqlalchemy.orm import Session
+
 from medishield.db.models import Base
 from medishield.db.seeder import seed_benchmark_dataset
+
 print("Resetting database for strict eval...", flush=True)
 Base.metadata.drop_all(bind=sync_engine)
 Base.metadata.create_all(bind=sync_engine)
@@ -96,7 +93,7 @@ sql_policy_repo = SqlPolicyEnrollmentRepository(sql_sess)
 # EVALUATION RUN METADATA (STAMP)
 # ------------------------------------------------------------------------------
 from medishield.db.session import sync_engine
-from medishield.core.config import settings
+
 print("="*80)
 print("EVALUATION STAMP")
 print("="*80)
@@ -140,7 +137,7 @@ for cid in sorted_cids:
 print(f"{'Cluster':<8} | {'Patient ID':<10} | {'Policy ID':<16} | {'Member DB':<10} | {'SQL Policy':<10} | {'InMem Policy':<12} | {'Qdrant Chunks':<13}")
 print("-" * 88)
 for r in preflight_rows:
-    print(f"{r['cluster_id']:<8} | {str(r['patient_id']):<10} | {str(r['policy_id']):<16} | {'RESOLVED' if r['sql_member_found'] else 'MISSING':<10} | {'RESOLVED' if r['sql_policy_resolves'] else 'MISSING':<10} | {'RESOLVED' if r['in_mem_policy_resolves'] else 'MISSING':<12} | {r['qdrant_chunks']:<13}")
+    print(f"{r['cluster_id']:<8} | {r['patient_id']!s:<10} | {r['policy_id']!s:<16} | {'RESOLVED' if r['sql_member_found'] else 'MISSING':<10} | {'RESOLVED' if r['sql_policy_resolves'] else 'MISSING':<10} | {'RESOLVED' if r['in_mem_policy_resolves'] else 'MISSING':<12} | {r['qdrant_chunks']:<13}")
 
 sql_policy_resolved_total = sum(1 for r in preflight_rows if r["sql_policy_resolves"])
 in_mem_policy_resolved_total = sum(1 for r in preflight_rows if r["in_mem_policy_resolves"])
@@ -150,8 +147,10 @@ print(f"\nSQL Policy Resolution: {sql_policy_resolved_total}/30 | In-Memory Poli
 # STEP 2: MEASURE (FULL EVALUATION)
 # ------------------------------------------------------------------------------
 from medishield.agents.policy_ingestion import EmbeddedQdrantPolicyIndex, PolicyPdfIngestor
+
 qdrant_path = REPO_ROOT / "data" / "qdrant_eval"
 import shutil
+
 if qdrant_path.exists(): shutil.rmtree(qdrant_path)
 qdrant_path.mkdir(parents=True, exist_ok=True)
 qdrant_idx = EmbeddedQdrantPolicyIndex(qdrant_path)
@@ -223,7 +222,7 @@ for idx, cid in enumerate(sorted_cids):
     pol_id = next((d.get("policy_number") for d in docs if d.get("policy_number")), "UNKNOWN")
     is_fraud = any(d.get("fraud_label", False) for d in docs)
     fraud_reasons = [d.get("fraud_reason") for d in docs if d.get("fraud_reason")]
-    expected_dec = BusinessDecision.ESCALATE if is_fraud else BusinessDecision.APPROVE
+    adjudication_label = resolve_adjudication_label(docs)
 
     # Classify all documents & evaluate completeness
     classified_items = []
@@ -387,11 +386,11 @@ for idx, cid in enumerate(sorted_cids):
             pair = tuple(sorted([failing_checks[i], failing_checks[j]]))
             blocker_pairs[pair] += 1
 
-    is_correct = (expected_dec == final_out.decision) or (expected_dec == BusinessDecision.ESCALATE and final_out.decision in (BusinessDecision.ESCALATE, BusinessDecision.REJECT))
-    if is_correct:
-        conf_correct.append(final_out.decision_confidence)
-    else:
-        conf_wrong.append(final_out.decision_confidence)
+    if adjudication_label is not None:
+        if adjudication_label == final_out.decision.value:
+            conf_correct.append(final_out.decision_confidence)
+        else:
+            conf_wrong.append(final_out.decision_confidence)
 
     eval_records.append({
         "cluster_id": cid,
@@ -411,7 +410,8 @@ for idx, cid in enumerate(sorted_cids):
         "pol_cov_conf": pol_cov_out.confidence,
         "fraud_score": fraud_out.fraud_score,
         "fraud_verdict": fraud_out.verdict.value,
-        "expected_decision": expected_dec.value,
+        "reviewed_adjudication_label": adjudication_label,
+        "fraud_metadata_label": is_fraud,
         "justification": final_out.justification,
     })
     print(f"[{idx+1:02d}/30] {cid} ({pt_id}) -> {final_out.decision.value} via {rule_name} (Failing checks: {failing_checks or 'NONE'})", flush=True)
@@ -422,19 +422,17 @@ print(f"\nCompleted evaluation of 30 clusters in {dt:.2f}s.", flush=True)
 # Metrics calculation
 tot = len(eval_records)
 appr_count = sum(1 for r in eval_records if r["final_decision"] == BusinessDecision.APPROVE.value)
-exp_appr_count = sum(1 for r in eval_records if r["expected_decision"] == BusinessDecision.APPROVE.value)
-appr_of_exp_appr = sum(1 for r in eval_records if r["expected_decision"] == BusinessDecision.APPROVE.value and r["final_decision"] == BusinessDecision.APPROVE.value)
-false_appr_count = sum(1 for r in eval_records if r["expected_decision"] != BusinessDecision.APPROVE.value and r["final_decision"] == BusinessDecision.APPROVE.value)
-false_deny_count = sum(1 for r in eval_records if r["expected_decision"] == BusinessDecision.APPROVE.value and r["final_decision"] == BusinessDecision.REJECT.value)
+decision_metrics = compute_decision_label_metrics(eval_records)
 
 print("\n" + "="*80)
 print("EMPIRICAL METRICS TABLE")
 print("="*80)
 print(f"Overall Approval Rate                 : {appr_count}/{tot} ({appr_count/tot*100:.1f}%)")
-print(f"Ground Truth Expected Approvals       : {exp_appr_count}")
-print(f"% Approved of Expected Approvals      : {appr_of_exp_appr}/{exp_appr_count} ({appr_of_exp_appr/max(exp_appr_count,1)*100:.1f}%)")
-print(f"False-Approve Rate                    : {false_appr_count}/{tot} ({false_appr_count/tot*100:.1f}%)")
-print(f"False-Recommend-Deny (Reject) Rate    : {false_deny_count}/{exp_appr_count} ({false_deny_count/max(exp_appr_count,1)*100:.1f}%)")
+print(f"Independently Labelled Cases           : {decision_metrics['labelled_case_count']}/{tot}")
+print(f"Unlabelled Cases                       : {decision_metrics['unlabelled_case_count']}")
+print(f"Decision Accuracy (labelled only)      : {decision_metrics['decision_accuracy'] if decision_metrics['decision_accuracy'] is not None else 'N/A'}")
+print(f"False-Approve Rate (labelled only)     : {decision_metrics['false_approve_rate'] if decision_metrics['false_approve_rate'] is not None else 'N/A'}")
+print(f"False-Deny Rate (labelled approvals)   : {decision_metrics['false_deny_rate'] if decision_metrics['false_deny_rate'] is not None else 'N/A'}")
 
 print("\n--- Histogram of First Failing Rules ---")
 for r, c in first_failing_rules.most_common():
@@ -456,13 +454,7 @@ with open(out_path, "w", encoding="utf-8") as f:
             "total_cases": tot,
             "approved_count": appr_count,
             "approval_rate": round(appr_count / tot, 4),
-            "expected_approvals": exp_appr_count,
-            "approved_of_expected": appr_of_exp_appr,
-            "percent_approved_of_expected": round(appr_of_exp_appr / max(exp_appr_count, 1), 4),
-            "false_approve_count": false_appr_count,
-            "false_approve_rate": round(false_appr_count / tot, 4),
-            "false_deny_count": false_deny_count,
-            "false_deny_rate": round(false_deny_count / max(exp_appr_count, 1), 4),
+            **decision_metrics,
         },
         "first_failing_rules": dict(first_failing_rules),
         "all_failing_rules": dict(all_failing_rules),

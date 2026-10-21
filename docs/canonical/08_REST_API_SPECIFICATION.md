@@ -37,6 +37,8 @@
 
 ## 2. Document Intake & Case Management Endpoints
 
+Case-detail `agent_findings.fraud` follows the binary contract in Canonical Spec 05: `fraud_review_required` is true when any factor is detected, and `fraud_score` is a compatibility value of `1.0` or `0.0`, not a percentage or probability. Feature entries expose `detected`, raw measurement, and description.
+
 ### 2.1 Multipart Case Intake
 - **Endpoint:** `POST /api/v1/cases`
 - **Auth:** `OPERATIONS_REVIEWER`, `OPERATIONS_MANAGER`, `ADMINISTRATOR`
@@ -139,7 +141,7 @@
 - **Request:** `multipart/form-data`
   - `files`: List of binary files (JPEG, PNG, PDF, TIFF; max 25MB each).
   - `metadata`: Optional JSON string.
-- **Behavior:** Validates MIME magic bytes, generates SHA-256 checksums, creates new `documents` rows linked to the existing case, streams files to object storage (`/raw/{case_id}/{doc_id}`). Updates `cases.missing_documents` by removing doc types that are now satisfied. Does **not** automatically resume processing — the client must explicitly call `POST /api/v1/cases/{case_id}/process`.
+- **Behavior:** Validates MIME magic bytes, generates SHA-256 checksums, creates new `documents` rows linked to the existing case, streams files to object storage (`/raw/{case_id}/{doc_id}`), and increments the case version. Does **not** automatically resume processing — the client must explicitly call `POST /api/v1/cases/{case_id}/process`.
 - **Response:** `201 Created`
   ```json
   {
@@ -302,6 +304,13 @@
     ]
   }
   ```
+
+### 2.10 Get Operational Metrics
+- **Endpoint:** `GET /api/v1/metrics/operational`
+- **Auth:** `OPERATIONS_MANAGER`, `ADMINISTRATOR`
+- **Behavior:** Returns database-derived case, decision, queue, and agent-latency metrics. Rates and latency values are `null` when the database has no adjudicated sample; the API must not substitute example or target values.
+- **LLM telemetry:** `llm_runtime` counters aggregate `run_type=llm` trace spans, including direct OCR SDK calls, and are process-local since process start, not durable or cluster-wide. `stages` is keyed by sanitized trace component/operation. Token totals are `null` until a successful provider response reports token usage; `token_usage_complete` is false if any successful response omitted usage. Provider request attempts count calls through the shared gateway and may not include retries hidden inside its HTTP transport. Direct-provider OCR failures are reflected in stage call failures, not the gateway provider-failure map. No prompts, outputs, or credentials are returned.
+- **Response fields:** `insufficient_data`, `total_adjudicated_cases`, `latency_p50_ms`, `latency_p95_ms`, plus `llm_runtime` fields `calls_total`, `calls_success`, `calls_failed`, `provider_attempts`, `provider_attempts_success`, `provider_attempts_failed`, `provider_failures`, `provider_failure_categories`, `stages`, `prompt_tokens`, `completion_tokens`, `total_tokens`, `responses_with_token_usage`, `responses_without_token_usage`, `token_usage_complete`, `latency_p50_ms`, `latency_p95_ms`, `provider_latency_p50_ms`, and `provider_latency_p95_ms`.
 
 ---
 

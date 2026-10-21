@@ -34,6 +34,10 @@ from medishield.domain.decision import (
     DeterministicDecisionEngine,
 )
 from medishield.domain.fraud import DeterministicFraudEngine
+from medishield.eval.decision_labels import (
+    compute_decision_label_metrics,
+    resolve_adjudication_label,
+)
 from medishield.intake.completeness import ClassifiedDocumentItem, evaluate_case_completeness
 from medishield.intake.storage import LocalFilesystemStorageBackend
 from medishield.ocr.preprocessor import DefaultOCREngine
@@ -227,7 +231,7 @@ for cid in sorted_cluster_ids:
     # Ground truth determination from metadata
     is_fraud_cluster = any(d.get("fraud_label", False) for d in docs)
     fraud_reasons = [d.get("fraud_reason") for d in docs if d.get("fraud_reason")]
-    expected_decision = BusinessDecision.ESCALATE if is_fraud_cluster else BusinessDecision.APPROVE
+    adjudication_label = resolve_adjudication_label(docs)
 
     # 1. OCR all documents
     ocr_payloads = []
@@ -409,11 +413,11 @@ for cid in sorted_cluster_ids:
             pair = tuple(sorted([failing_rules_for_case[i], failing_rules_for_case[j]]))
             blocker_cooccurrence[pair] += 1
 
-    is_correct = (expected_decision == final_output.decision) or (expected_decision == BusinessDecision.ESCALATE and final_output.decision in (BusinessDecision.ESCALATE, BusinessDecision.REJECT))
-    if is_correct:
-        confidence_correct.append(final_output.decision_confidence)
-    else:
-        confidence_wrong.append(final_output.decision_confidence)
+    if adjudication_label is not None:
+        if adjudication_label == final_output.decision.value:
+            confidence_correct.append(final_output.decision_confidence)
+        else:
+            confidence_wrong.append(final_output.decision_confidence)
 
     eval_results.append({
         "cluster_id": cid,
@@ -431,26 +435,23 @@ for cid in sorted_cluster_ids:
         "policy_confidence": pol_cov_out.confidence,
         "fraud_score": fraud_out.fraud_score,
         "fraud_verdict": fraud_out.verdict.value,
-        "expected_decision": expected_decision.value,
-        "is_fraud_ground_truth": is_fraud_cluster,
+        "reviewed_adjudication_label": adjudication_label,
+        "fraud_metadata_label": is_fraud_cluster,
         "justification": final_output.justification,
     })
 
 # Compute aggregate metrics
 total_cases = len(eval_results)
 approved_count = sum(1 for r in eval_results if r["final_decision"] == BusinessDecision.APPROVE.value)
-expected_approve_count = sum(1 for r in eval_results if r["expected_decision"] == BusinessDecision.APPROVE.value)
-approved_of_expected_approve = sum(1 for r in eval_results if r["expected_decision"] == BusinessDecision.APPROVE.value and r["final_decision"] == BusinessDecision.APPROVE.value)
-
-false_approve_count = sum(1 for r in eval_results if r["expected_decision"] != BusinessDecision.APPROVE.value and r["final_decision"] == BusinessDecision.APPROVE.value)
-false_deny_count = sum(1 for r in eval_results if r["expected_decision"] == BusinessDecision.APPROVE.value and r["final_decision"] == BusinessDecision.REJECT.value)
+decision_metrics = compute_decision_label_metrics(eval_results)
 
 print(f"\nTotal Cases Evaluated                  : {total_cases}")
 print(f"Total Approved (P6)                    : {approved_count} ({approved_count/total_cases*100:.1f}%)")
-print(f"Cases with Ground Truth = APPROVE      : {expected_approve_count}")
-print(f"Approved among Ground Truth APPROVE    : {approved_of_expected_approve} / {expected_approve_count} ({approved_of_expected_approve/max(expected_approve_count,1)*100:.1f}%)")
-print(f"False-Approve Rate                     : {false_approve_count} / {total_cases} ({false_approve_count/total_cases*100:.1f}%)")
-print(f"False-Recommend-Deny (Reject) Rate     : {false_deny_count} / {expected_approve_count} ({false_deny_count/max(expected_approve_count,1)*100:.1f}%)")
+print(f"Independently Labelled Cases           : {decision_metrics['labelled_case_count']}/{total_cases}")
+print(f"Unlabelled Cases                       : {decision_metrics['unlabelled_case_count']}")
+print(f"Decision Accuracy (labelled only)      : {decision_metrics['decision_accuracy'] if decision_metrics['decision_accuracy'] is not None else 'N/A'}")
+print(f"False-Approve Rate (labelled only)     : {decision_metrics['false_approve_rate'] if decision_metrics['false_approve_rate'] is not None else 'N/A'}")
+print(f"False-Deny Rate (labelled approvals)   : {decision_metrics['false_deny_rate'] if decision_metrics['false_deny_rate'] is not None else 'N/A'}")
 
 print("\n--- Histogram of First Failing Rules ---")
 for rule, cnt in first_failing_rules.most_common():
@@ -523,10 +524,7 @@ with open(summary_path, "w", encoding="utf-8") as f:
     json.dump({
         "total_cases": total_cases,
         "approved_count": approved_count,
-        "expected_approve_count": expected_approve_count,
-        "approved_of_expected_approve": approved_of_expected_approve,
-        "false_approve_count": false_approve_count,
-        "false_deny_count": false_deny_count,
+        "decision_metrics": decision_metrics,
         "first_failing_rules": dict(first_failing_rules),
         "all_failing_rules": dict(all_failing_rules),
         "blocker_cooccurrence": {f"{k[0]}___{k[1]}": v for k, v in blocker_cooccurrence.items()},

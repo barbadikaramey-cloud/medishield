@@ -2,6 +2,7 @@ import json
 import os
 import random
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
@@ -279,6 +280,13 @@ AMENDMENT_TYPES = [
     ("Cancellation",                    "Requesting policy cancellation -- coverage termination"),
 ]
 
+RIDER_CATALOG_PATH = Path(__file__).resolve().parents[2] / "data/config/policy_riders_gold.json"
+with RIDER_CATALOG_PATH.open(encoding="utf-8") as rider_catalog_file:
+    RIDER_REQUEST_CODES = {
+        rider["request_type"]: rider["rider_code"]
+        for rider in json.load(rider_catalog_file)
+    }
+
 # Amendment-type-specific supporting documents
 AMEND_DOCS = {
     "Change of Address":           ["Government-issued Photo ID", "Utility bill or Lease Agreement (new address)", "Previous Policy Schedule"],
@@ -318,6 +326,47 @@ ID_TYPES = ["drivers_license", "passport", "state_id", "insurance_card", "medica
 # Seeded RNG for reproducibility
 # ──────────────────────────────────────────────
 rng = random.Random(42)
+
+
+def _set_low_total_cpt_prices(cpt_list, claim_type, los):
+    room_charge = 1250.0 * los if claim_type == "UB04" else 0.0
+    target_procedure_total = 9875.0 - room_charge
+    original_procedure_total = sum(item[2] for item in cpt_list)
+    adjusted_cpt_list = []
+    allocated_total = 0.0
+    for index, (code, description, price) in enumerate(cpt_list):
+        if index == len(cpt_list) - 1:
+            adjusted_price = round(target_procedure_total - allocated_total, 2)
+        else:
+            adjusted_price = round(price * target_procedure_total / original_procedure_total, 2)
+            allocated_total += adjusted_price
+        adjusted_cpt_list.append((code, description, adjusted_price))
+    return adjusted_cpt_list
+
+
+def _prepare_stay_dates(c):
+    schedule_rng = random.Random(f"{c['cluster_id']}:{c['treatment_date'].isoformat()}")
+    admit_date = c["treatment_date"]
+    prior_admit_date = None
+    prior_discharge_date = None
+    if c["fraud_reason"] == "readmission_30d":
+        prior_discharge_date = admit_date - timedelta(days=schedule_rng.randint(5, 25))
+        prior_admit_date = prior_discharge_date - timedelta(days=schedule_rng.randint(2, 5))
+
+    c["admit_date"] = admit_date
+    c["discharge_date"] = admit_date + timedelta(days=schedule_rng.randint(2, 5))
+    c["prior_admit_date"] = prior_admit_date
+    c["prior_discharge_date"] = prior_discharge_date
+    c["los"] = (c["discharge_date"] - admit_date).days
+    if c["fraud_reason"] == "amount_under_10k":
+        c["cpt_list"] = _set_low_total_cpt_prices(c["cpt_list"], c["claim_type"], c["los"])
+
+
+def _advance_legacy_stay_rng(c):
+    if c["fraud_reason"] == "readmission_30d":
+        rng.randint(5, 25)
+        rng.randint(2, 5)
+    rng.randint(2, 5)
 
 
 def _mismatch_name(name, rng):
@@ -457,6 +506,7 @@ def generate_patient_clusters(num_clusters=30):
             "cpt_list":             cpt_list,
             "rx_list":              rx_list,
             "amendment":            amendment,
+            "rider_request_code":   RIDER_REQUEST_CODES.get(amendment[0]),
             "claim_number":         claim_number,
             "theme_idx":            HOSPITALS.index(hospital) % len(THEMES),
             "id_type":              ID_TYPES[i % len(ID_TYPES)],
@@ -625,7 +675,7 @@ def _id_passport(c, expired=False, blur=False, tampered=False, display_name=None
     return img
 
 # ── 3. Illinois State ID (Non-Driver) ────────────────
-def _id_state_id(c, expired=False, blur=False):
+def _id_state_id(c, expired=False, blur=False, tampered=False, display_name=None):
     W, H = 856, 540
     img = Image.new("RGB", (W, H), (245, 252, 248))
     d   = ImageDraw.Draw(img)
@@ -644,7 +694,7 @@ def _id_state_id(c, expired=False, blur=False):
     exp_date, exp_color = _exp_dates(c, expired)
     pairs = [
         ("ID NUMBER:", id_num),
-        ("NAME:", c["name"].upper()),
+        ("NAME:", (display_name or c["name"]).upper()),
         ("ADDRESS:", c["address"].split(",")[0].strip().upper()),
     ]
     y = 108
@@ -659,7 +709,9 @@ def _id_state_id(c, expired=False, blur=False):
     d.text((490, 305), "SEX:", font=fnt(FONT_BOLD, 13), fill=(20, 80, 40))
     d.text((530, 305), c["gender"], font=fnt(FONT_REG, 18), fill=(0, 0, 0))
     d.text((250, 350), "EXP:", font=fnt(FONT_BOLD, 13), fill=(20, 80, 40))
-    d.text((292, 350), exp_date.strftime("%m/%d/%Y"), font=fnt(FONT_BOLD, 18), fill=exp_color)
+    exp_x = 300 if tampered else 292
+    d.text((exp_x, 350), exp_date.strftime("%m/%d/%Y"), font=fnt(FONT_BOLD, 18),
+           fill=(20, 20, 120) if tampered else exp_color)
     if expired:
         d.text((435, 350), "** EXPIRED **", font=fnt(FONT_BOLD, 15), fill=(200, 0, 0))
 
@@ -671,7 +723,7 @@ def _id_state_id(c, expired=False, blur=False):
     return img
 
 # ── 4. Health Insurance Member ID Card ───────────────
-def _id_insurance_card(c, expired=False, blur=False):
+def _id_insurance_card(c, expired=False, blur=False, tampered=False, display_name=None):
     W, H = 856, 540
     img = Image.new("RGB", (W, H), (250, 252, 255))
     d   = ImageDraw.Draw(img)
@@ -687,7 +739,7 @@ def _id_insurance_card(c, expired=False, blur=False):
 
     # Card fields - left column
     left = [
-        ("Member Name",    c["name"]),
+        ("Member Name",    display_name or c["name"]),
         ("Member ID",      c["policy"]),
         ("Group Number",   c["group_number"]),
         ("Effective Date", c["treatment_date"].strftime("%m/%d/%Y")),
@@ -697,8 +749,11 @@ def _id_insurance_card(c, expired=False, blur=False):
     for label, val in left:
         d.text((28, y), label + ":", font=fnt(FONT_BOLD, 14), fill=(0, 90, 120))
         color = exp_color if "Expiration" in label and expired else (0, 0, 0)
-        d.text((28, y + 20), val, font=fnt(FONT_MONO if "ID" in label or "Group" in label or "Date" in label
-                                           else FONT_BOLD, 17), fill=color)
+        field_x = 36 if tampered and label == "Expiration Date" else 28
+        if tampered and label == "Expiration Date":
+            color = (20, 20, 120)
+        d.text((field_x, y + 20), val, font=fnt(FONT_MONO if "ID" in label or "Group" in label or "Date" in label
+                                                else FONT_BOLD, 17), fill=color)
         d.line([(26, y + 42), (410, y + 42)], fill=(200, 215, 225), width=1)
         y += 55
 
@@ -733,7 +788,7 @@ def _id_insurance_card(c, expired=False, blur=False):
     return img
 
 # ── 5. Medicare / Medicaid Card ───────────────────────
-def _id_medicare_card(c, expired=False, blur=False):
+def _id_medicare_card(c, expired=False, blur=False, tampered=False, display_name=None):
     W, H = 856, 540
     img = Image.new("RGB", (W, H), (255, 255, 255))
     d   = ImageDraw.Draw(img)
@@ -753,7 +808,7 @@ def _id_medicare_card(c, expired=False, blur=False):
     exp_date, exp_color = _exp_dates(c, expired)
 
     fields = [
-        ("NAME",                  c["name"].upper()),
+        ("NAME",                  (display_name or c["name"]).upper()),
         ("MEDICARE CLAIM NUMBER", mbi),
         ("DATE OF BIRTH",         c["dob"]),
         ("SEX",                   "MALE" if c["gender"] == "M" else "FEMALE"),
@@ -761,7 +816,9 @@ def _id_medicare_card(c, expired=False, blur=False):
     y = 120
     for label, val in fields:
         d.text((30, y), label, font=fnt(FONT_BOLD, 14), fill=(60, 60, 80))
-        d.text((30, y + 20), val, font=fnt(FONT_MONO, 20), fill=(0, 0, 0))
+        field_x = 38 if tampered and label == "MEDICARE CLAIM NUMBER" else 30
+        field_color = (20, 20, 120) if tampered and label == "MEDICARE CLAIM NUMBER" else (0, 0, 0)
+        d.text((field_x, y + 20), val, font=fnt(FONT_MONO, 20), fill=field_color)
         y += 58
 
     # Part A / Part B
@@ -798,7 +855,13 @@ _ID_GENERATORS = {
 }
 
 def generate_id_document(c, expired=False, blur=False):
-    return _ID_GENERATORS[c["id_type"]](c, expired=expired, blur=blur)
+    return _ID_GENERATORS[c["id_type"]](
+        c,
+        expired=expired,
+        blur=blur,
+        tampered="tampered_id" in c.get("edge_flags", []),
+        display_name=c.get("id_display_name"),
+    )
 
 
 def generate_claim_form(c, missing_fields=False, th=None):
@@ -1036,16 +1099,6 @@ def generate_claim_form(c, missing_fields=False, th=None):
         total += price
         row_y += 48
 
-    if c["fraud_reason"] == "amount_under_10k":
-        total = 9_875.00
-        next_line = len(c["cpt_list"]) + 1
-        d.text((col_x[0], row_y), str(next_line),           font=fnt(FONT_BOLD, 15), fill=RED)
-        d.text((col_x[1], row_y), dt_str,                   font=fnt(FONT_MONO, 15), fill=(0, 0, 0))
-        d.text((col_x[3], row_y), "99999",                  font=fnt(FONT_MONO, 15), fill=(0, 0, 0))
-        d.text((col_x[4], row_y), "Additional Services (combined)", font=fnt(FONT_MONO, 13), fill=(0, 0, 0))
-        d.text((col_x[5], row_y), f"${total:,.2f}",         font=fnt(FONT_MONO, 15), fill=(0, 0, 0))
-        d.text((col_x[6], row_y), "1",                      font=fnt(FONT_MONO, 15), fill=(0, 0, 0))
-
     total_y = y + 510
     d.text((900, total_y + 10), "28. TOTAL CHARGE:", font=fnt(FONT_BOLD, 14), fill=RED)
     d.text((1150, total_y),     f"${total:,.2f}",    font=fnt(FONT_BOLD, 28), fill=(0, 0, 0))
@@ -1085,12 +1138,9 @@ def generate_ub04_form(c, th=None):
     d   = ImageDraw.Draw(img)
     BX  = P   # box border colour matches theme
 
-    admit_dt    = c["treatment_date"]
-    if c["fraud_reason"] == "readmission_30d":
-        prior_end = admit_dt - timedelta(days=12)
-        admit_dt  = prior_end - timedelta(days=3)
-    discharge_dt = admit_dt + timedelta(days=3)
-    los = (discharge_dt - admit_dt).days
+    admit_dt = c["admit_date"]
+    discharge_dt = c["discharge_date"]
+    los = c["los"]
 
     # ── Form header ─────────────────────────────────────
     d.rectangle([50, 25, W - 50, 105], outline=BX, width=2)
@@ -1291,13 +1341,17 @@ def generate_discharge_summary(c, th=None):
     style = HOSPITAL_DOC_STYLES.get(c["hospital"], 0)
     hosp  = HOSPITAL_INFO.get(c["hospital"], {"addr": c["hospital"], "phone": "312-000-0000", "fax": "312-000-0001"})
 
-    dt = c["treatment_date"]
-    admit_dt = dt
-    if c["fraud_reason"] == "readmission_30d":
-        prior_end = dt - timedelta(days=rng.randint(5, 25))
-        admit_dt  = prior_end - timedelta(days=rng.randint(2, 5))
-    discharge_dt = admit_dt + timedelta(days=rng.randint(2, 5))
-    los = (discharge_dt - admit_dt).days
+    admit_dt = c["admit_date"]
+    discharge_dt = c["discharge_date"]
+    los = c["los"]
+
+    prior_stay = ""
+    if c.get("prior_admit_date") and c.get("prior_discharge_date"):
+        prior_stay = (
+            f" A prior hospitalization was recorded from "
+            f"{c['prior_admit_date'].strftime('%m/%d/%Y')} through "
+            f"{c['prior_discharge_date'].strftime('%m/%d/%Y')}."
+        )
 
     course = (
         f"Patient {c['name']} was admitted on {admit_dt.strftime('%m/%d/%Y')} presenting "
@@ -1307,7 +1361,7 @@ def generate_discharge_summary(c, th=None):
         "responded favorably. Vital signs remained stable throughout the hospitalization. "
         "No significant adverse events were recorded during the inpatient stay. "
         f"The patient was cleared for discharge on {discharge_dt.strftime('%m/%d/%Y')} "
-        "with outpatient follow-up instructions."
+        f"with outpatient follow-up instructions.{prior_stay}"
     )
 
     # ── Style 0: Academic gradient (Northwestern, Rush) ──────────────────────
@@ -2226,6 +2280,8 @@ if __name__ == "__main__":
         })
         doc_counter += 1
 
+        _prepare_stay_dates(c)
+
         # ── Claim Form (CMS-1500 for outpatient, UB-04 for inpatient) ────
         is_blur    = doc_counter in blurry_doc_idx
         is_missing = "missing_fields" in c["edge_flags"]
@@ -2270,6 +2326,7 @@ if __name__ == "__main__":
 
         # ── Discharge Summary ────────────────────────────────
         is_blur = doc_counter in blurry_doc_idx
+        _advance_legacy_stay_rng(c)
         img = generate_discharge_summary(c, th=th)
         path = os.path.join(OUT, "discharge_summaries", f"discharge_{c['patient_id']}.png")
         save_image(img, path, scan=True, blur=is_blur)

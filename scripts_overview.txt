@@ -11,7 +11,8 @@
      - prescriptions/      : 30 files (3 visual styles)
      - policy_amendments/  : 30 files (typed + handwritten mix)
    Also writes dataset/metadata.json with fraud labels, edge flags,
-   and expected_decision (APPROVE / REJECT / ESCALATE) for every document.
+  and document provenance for every generated file. It does not assign
+  case-level adjudication labels; fraud flags are not decision ground truth.
 
    Key Assignment 2 features:
      - 30 patient case clusters (all 5 docs tied to one patient/episode)

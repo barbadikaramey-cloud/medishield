@@ -1,7 +1,7 @@
 # Architecture Decision Record (ADR)
 ## ADR-005: Deterministic Explainable Fraud Scoring Over Synthetic ML or Generative AI
 
-**Status:** Accepted  
+**Status:** Superseded in part by [ADR-033](ADR-033_BINARY_FRAUD_INDICATORS_AND_ANY_FACTOR_REVIEW.md)  
 **Date:** 2026-10-02  
 **Context:** Reviewer Feedback on Advanced Fraud Scoring vs. Healthcare Compliance Reality  
 **Deciders:** Lead Software Architect & AI Systems Engineer
@@ -9,6 +9,8 @@
 ---
 
 ## 1. Context and Problem Statement
+
+> **Supersession note:** ADR-033 replaces the weighted sum, fractional feature contributions, and LOW/MEDIUM/HIGH thresholds described below. This ADR remains the historical record for the original deterministic feature-selection decision. Current behavior is binary: any detected factor requires `FRAUD_REVIEW`.
 
 The reviewer feedback recommended upgrading the Fraud Detection Agent to an "advanced machine learning model." 
 

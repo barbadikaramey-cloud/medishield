@@ -1,11 +1,19 @@
 import uuid
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Optional
 
+
+def utcnow() -> datetime:
+    """Return timezone-aware UTC datetime."""
+    return datetime.now(UTC)
+
+
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -79,17 +87,16 @@ class Case(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
-        onupdate=datetime.utcnow,
+        onupdate=utcnow,
     )
-
     # Relationships
     documents: Mapped[list["Document"]] = relationship(
         "Document", back_populates="case", cascade="all, delete-orphan"
@@ -151,7 +158,7 @@ class Document(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
     )
 
@@ -184,7 +191,7 @@ class DocumentPage(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
     )
 
@@ -216,7 +223,7 @@ class Member(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
     )
 
@@ -238,13 +245,15 @@ class Policy(Base):
     policy_id: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
     plan_name: Mapped[str] = mapped_column(String(128), nullable=False)
     policy_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    payer_product: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    jurisdiction: Mapped[str | None] = mapped_column(String(64), nullable=True)
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true")
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
     )
 
@@ -281,13 +290,16 @@ class PolicyVersion(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
     )
 
     policy: Mapped["Policy"] = relationship("Policy", back_populates="versions")
     enrollments: Mapped[list["Enrollment"]] = relationship(
         "Enrollment", back_populates="policy_version"
+    )
+    riders: Mapped[list["PolicyRider"]] = relationship(
+        "PolicyRider", back_populates="policy_version", cascade="all, delete-orphan"
     )
     chunks: Mapped[list["PolicyChunk"]] = relationship(
         "PolicyChunk", back_populates="policy_version", cascade="all, delete-orphan"
@@ -322,13 +334,120 @@ class Enrollment(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
     )
 
     member: Mapped["Member"] = relationship("Member", back_populates="enrollments")
     policy_version: Mapped["PolicyVersion"] = relationship(
         "PolicyVersion", back_populates="enrollments"
+    )
+    rider_applications: Mapped[list["EnrollmentRiderApplication"]] = relationship(
+        "EnrollmentRiderApplication",
+        back_populates="enrollment",
+        cascade="all, delete-orphan",
+    )
+
+
+class PolicyRider(Base):
+    """Version-scoped rider terms extracted from an authoritative policy."""
+
+    __tablename__ = "policy_riders"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    policy_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("policy_versions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    rider_code: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    waiting_period_value: Mapped[int] = mapped_column(Integer, nullable=False)
+    waiting_period_unit: Mapped[str] = mapped_column(String(16), nullable=False)
+    waiting_period_start_event: Mapped[str] = mapped_column(String(64), nullable=False)
+    benefit_limit_text: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    covered_services: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    exclusions: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    source_section: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_page: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_pdf_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    source_text: Mapped[str] = mapped_column(Text, nullable=False)
+    source_verified: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow,
+        server_default=text("CURRENT_TIMESTAMP")
+    )
+
+    policy_version: Mapped["PolicyVersion"] = relationship(
+        "PolicyVersion", back_populates="riders"
+    )
+    applications: Mapped[list["EnrollmentRiderApplication"]] = relationship(
+        "EnrollmentRiderApplication", back_populates="policy_rider"
+    )
+
+    __table_args__ = (
+        CheckConstraint("waiting_period_value >= 0", name="ck_policy_rider_wait_value"),
+        CheckConstraint(
+            "waiting_period_unit IN ('DAY', 'MONTH')", name="ck_policy_rider_wait_unit"
+        ),
+        UniqueConstraint(
+            "policy_version_id", "rider_code", name="uq_policy_rider_version_code"
+        ),
+    )
+
+
+class EnrollmentRiderApplication(Base):
+    """Patient-specific request or approved activation of a policy rider."""
+
+    __tablename__ = "enrollment_rider_applications"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    enrollment_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("enrollments.id", ondelete="CASCADE"), nullable=False
+    )
+    policy_rider_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("policy_riders.id", ondelete="RESTRICT"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="REQUESTED", server_default=text("'REQUESTED'")
+    )
+    requested_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    requested_effective_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    effective_start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    effective_end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    source_document_ref: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True)
+    approval_reference: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    approved_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow,
+        server_default=text("CURRENT_TIMESTAMP")
+    )
+
+    enrollment: Mapped["Enrollment"] = relationship(
+        "Enrollment", back_populates="rider_applications"
+    )
+    policy_rider: Mapped["PolicyRider"] = relationship(
+        "PolicyRider", back_populates="applications"
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('REQUESTED', 'APPROVED', 'DENIED', 'WITHDRAWN')",
+            name="ck_enrollment_rider_application_status",
+        ),
+        CheckConstraint(
+            "status != 'APPROVED' OR "
+            "(approved_by IS NOT NULL AND approved_at IS NOT NULL "
+            "AND effective_start_date IS NOT NULL)",
+            name="ck_approved_rider_has_authorization",
+        ),
     )
 
 
@@ -356,7 +475,7 @@ class PolicyChunk(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
     )
 
@@ -398,7 +517,7 @@ class Claim(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
     )
 
@@ -434,7 +553,7 @@ class ClaimLine(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
     )
 
@@ -513,7 +632,7 @@ class Decision(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
     )
 
@@ -537,7 +656,7 @@ class ReviewLock(Base):
     locked_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -570,7 +689,7 @@ class HumanReview(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
     )
 
@@ -605,7 +724,7 @@ class AuditEvent(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
     )
 
@@ -627,7 +746,7 @@ class IdempotencyKey(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -660,13 +779,13 @@ class MedicalCode(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
     )
 
@@ -674,4 +793,124 @@ class MedicalCode(Base):
         UniqueConstraint("coding_system", "code", name="uq_medical_codes_system_code"),
         Index("idx_medical_codes_active_system", "is_active", "coding_system"),
     )
+
+
+class ClinicalGuideline(Base):
+    """Authoritative Clinical Practice Guideline (LCD/NCD) entry (ADR-015, ADR-016)."""
+    __tablename__ = "clinical_guidelines"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("uuid_generate_v4()"),
+    )
+    guideline_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    service_code: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    guideline_version: Mapped[str] = mapped_column(String(32), nullable=False, default="2026.1")
+    guideline_title: Mapped[str] = mapped_column(String(255), nullable=False)
+    payer_product: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    jurisdiction: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_reference: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    source_chunk_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    effective_date: Mapped[date] = mapped_column(Date, nullable=False)
+    expiration_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    requires_prior_auth: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=utcnow,
+    )
+
+    criteria: Mapped[list["GuidelineCriterion"]] = relationship(
+        "GuidelineCriterion", back_populates="guideline", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index("idx_guidelines_service_code", "service_code", "is_active"),
+    )
+
+
+class GuidelineCriterion(Base):
+    """Mandatory or supporting criterion under a Clinical Practice Guideline."""
+    __tablename__ = "guideline_criteria"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("uuid_generate_v4()"),
+    )
+    guideline_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("clinical_guidelines.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    criterion_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    source_reference: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    source_chunk_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    requirement_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    evaluation_parameters: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    is_mandatory: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+    guideline: Mapped["ClinicalGuideline"] = relationship("ClinicalGuideline", back_populates="criteria")
+
+
+class DiagnosisIndication(Base):
+    """Standard Clinical Diagnosis-to-Procedure Indication & Anatomical Compatibility Rule (ADR-015, ADR-016)."""
+    __tablename__ = "diagnosis_indications"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("uuid_generate_v4()"),
+    )
+    service_code: Mapped[str] = mapped_column(String(32), unique=True, nullable=False, index=True)
+    procedure_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    anatomy: Mapped[str] = mapped_column(String(255), nullable=False)
+    valid_icd_prefixes: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    contraindicated_prefixes: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    keywords: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    assertion_patterns: Mapped[dict[str, list[str]] | None] = mapped_column(JSONB, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=utcnow,
+    )
+
 

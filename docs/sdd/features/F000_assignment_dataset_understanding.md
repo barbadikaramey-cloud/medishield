@@ -214,12 +214,7 @@ flowchart TD
 1. **Missing `expected_decision` in `generate_docs.py`:**
    - *Observation:* While `scripts_overview.txt` claims `metadata.json` contains `expected_decision` for every document, in reality only the 4 `unknown` entries include `"expected_decision": "ESCALATE"`. The 151 cluster documents do **not** have an `expected_decision` field in `metadata.json`.
    - *Impact:* The evaluation benchmark runner cannot simply check `row["expected_decision"]` for claim documents.
-   - *Resolution for Evaluation:* The evaluation harness must compute the ground-truth expected decision at the **cluster level** by combining `fraud_label` and `edge_flags`:
-     - If `expired_id` $\rightarrow$ `REJECT` (Rule P5)
-     - If `uncovered_procedure` $\rightarrow$ `REJECT` (Rule P5)
-     - If `duplicate_claim` or `tampered_id` $\rightarrow$ `ESCALATE(FRAUD_REVIEW)` (Rule P4)
-     - If `missing_fields` or `date_conflict` $\rightarrow$ `ESCALATE(AMBIGUITY)` (Rule P3)
-     - If completely clean $\rightarrow$ `APPROVE` (Rule P6).
+    - *Evaluation constraint:* `fraud_label` and `edge_flags` describe fraud or document characteristics; they are not a case-level adjudication label. They must not be combined into an expected `APPROVE`, `REJECT`, or `ESCALATE` outcome. Decision-quality metrics require an independently reviewed case-level `adjudication_label`; otherwise the case is unlabelled and excluded from those metrics.
 
 2. **Single-Page PNG Format vs Multi-Page PDF:**
    - *Observation:* The dataset generates individual PNG images rather than bundled multi-page PDFs.

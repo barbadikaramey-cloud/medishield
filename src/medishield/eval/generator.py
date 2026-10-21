@@ -460,3 +460,8 @@ class RelationalSyntheticGenerator:
             data = json.load(f)
         return [GroundTruthCase.model_validate(item) for item in data]
 
+
+# Alias for backward compatibility
+SyntheticDatasetGenerator = RelationalSyntheticGenerator
+
+

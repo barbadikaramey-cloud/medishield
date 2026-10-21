@@ -79,8 +79,9 @@ class CaseState(TypedDict, total=False):
 
     fraud_execution_id: Optional[str]
     fraud_verdict: Optional[str]
-    fraud_score: Optional[float]
-    fraud_risk_level: Optional[str]     # LOW, MEDIUM, HIGH
+    fraud_score: Optional[float]        # Compatibility indicator: 1.0 when review is required, else 0.0
+    fraud_review_required: Optional[bool]
+    fraud_risk_level: Optional[str]     # REVIEW_REQUIRED or LOW
     fraud_summary: Optional[Dict[str, Any]]
 
     # Faithfulness & Integrity Gate
@@ -204,11 +205,11 @@ flowchart TD
 ### Node 6B: Fraud Detection Agent (`fraud_agent_node`)
 - **Concurrency Advantage:** Executes immediately once claims amounts and provider NPI are available, without waiting for the Policy RAG node.
 - **Action:** Evaluates 7 deterministic fraud features against historical claims DB.
-- **Output:** Emits `fraud_score` (0.0 to 1.0), `fraud_risk_level`, and `fraud_verdict`.
+- **Output:** Emits one boolean `detected` value per factor. Any detected factor sets `fraud_review_required = True`, `fraud_score = 1.0` (binary compatibility field), `fraud_risk_level = REVIEW_REQUIRED`, and `fraud_verdict = INDETERMINATE`; no detected factors yield `False`, `0.0`, `LOW`, and `PASS`. Incomplete billing extraction does not count as arithmetic drift.
 
 ### Node 6C: Clinical Alignment Specialist (`clinical_alignment_node`)
 - **Precondition:** Triggered in Stage B parallel phase once Claims extraction (Node 5B) completes and clinical documents are available.
-- **Action:** Deterministically cross-verifies billed claim service lines (CPT/HCPCS, revenue codes, bed-day units) against physical clinical documentation (discharge summaries, operative notes, diagnostic reports) using versioned LCD/NCD coverage policies (ADR-015).
+- **Action:** Cross-verifies billed claim service lines (CPT/HCPCS, revenue codes, bed-day units) against physical clinical documentation using versioned LCD/NCD coverage policies (ADR-015). Diagnosis-to-service relevancy is assessed by at most one structured LLM call per case that returns only `SUPPORTED`, `UNCERTAIN`, or `NOT_ESTABLISHED` per line with span citations (ADR-025). Citations are verified against supplied OCR spans; invalid, uncited, or unavailable output stays `INDETERMINATE`. The model returns a verdict only; performance, guideline criteria, prior authorization, bed days, and the P1–P8 business decision remain deterministic. Mandatory `EVIDENCE_REGEX` guideline criteria left unassessed by pattern matching are sent in at most one additional structured call per case. the model may only return `SATISFIED` or `UNCERTAIN` with citations to supplied verified spans, and it never produces negated or contradictory outcomes (ADR-031).
 - **State Mutation:** Updates `clinical_alignment_execution_id`, `clinical_alignment_verdict`, `clinical_alignment_confidence`, and `clinical_alignment_summary` on `CaseState`.
 - **Output:** Emits typed `ClinicalAlignmentOutput` to `JoinAll` synchronization barrier.
 
@@ -218,6 +219,7 @@ flowchart TD
 
 ### Node 8: Decision Engine (`decision_engine_node`)
 - **Action:** Purely deterministic execution of priority rules P1–P8. Emits binding `BusinessDecision`. Generates rich clinical and financial `detailed_explanation` (via Groq LLM or deterministic fallback per ADR-011).
+- **Clinical discrepancy approval (ADR-028):** When `CLINICAL_UNCERTAINTY_APPROVAL_ENABLED` is true, a clinical `INDETERMINATE` result caused only by configured missing-support reasons may satisfy P6 if clinical schema/OCR quality are valid, no line is contradicted/failed/unavailable, and no bed-day conflict exists. Other P6 gates remain mandatory. Verified catalog contraindications, explicit performance contradictions, and bed-day conflicts remain P3 blockers. An approval using this exception includes a clinical discrepancy notice in `justification`; the full specialist output remains in the immutable agent snapshot.
 - **State Mutation:** Updates `decision`, `escalation_sub_reason`, `workflow_state` (`COMPLETED` or `AWAITING_HUMAN`), `justification`, and `detailed_explanation`.
 
 ### Node 9: Audit & State Persistence (`audit_persistence_node`)

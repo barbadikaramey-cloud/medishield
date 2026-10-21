@@ -18,7 +18,7 @@ from medishield.core.llm import (
     wrap_untrusted_content,
 )
 from medishield.db.catalog import CodeCatalogRepository
-from medishield.db.enums import AgentVerdict, CodingSystem, DocumentType
+from medishield.db.enums import AgentVerdict, CodingSystem, DocumentType, IndeterminateReason
 from medishield.domain.contracts import (
     ClaimsAgentOutput,
     OCRBoundingBox,
@@ -29,30 +29,32 @@ from medishield.domain.contracts import (
     VisualEvidenceStatus,
 )
 from medishield.domain.faithfulness import parse_medical_date, verify_extracted_span
-from medishield.domain.provenance import FieldProvenance, ProvenanceType, ProvenanceValue
+from medishield.domain.provenance import (
+    ClinicalAssertionStatus,
+    EvidenceSource,
+    EvidenceVerificationStatus,
+    FieldProvenance,
+    ProvenanceType,
+    ProvenanceValue,
+)
 from medishield.intake.storage import StorageBackend
+from medishield.ocr.multilingual import extract_multilingual_clinical_indications
 from medishield.ocr.ocr_reconcile import (
     RE_ADDRESS_INDICATOR,
     RE_HEADER_METADATA_INDICATOR,
-    SYNTHETIC_VALID_CPT_CODES,
     ArithmeticCheckStatus,
     ResilientVisionClient,
+    detect_claim_currency,
     evaluate_claim_totals,
     extract_cpt_codes_from_table,
     extract_money_value_geometrically,
     extract_service_lines_from_table,
+    find_unassigned_charge_anchors,
+    is_plausible_revenue_code,
 )
 from medishield.ocr.preprocessor import get_rapid_ocr_engine
 
 logger = logging.getLogger(__name__)
-
-# Benchmark catalog of recognized procedural codes
-SUPPORTED_CPT_CATALOG: frozenset[str] = SYNTHETIC_VALID_CPT_CODES | frozenset({
-    "99213", "99214", "99215", "71046", "85025", "80053", "44970", "27447",
-    "99284", "93000", "71250", "70553", "36415", "43239", "99291", "93306",
-    "72148", "90837", "33533", "47562", "29827", "15822", "17000", "58300",
-    "86849", "21120", "00790", "15780", "99203", "99204", "99205", "99283", "71045",
-})
 
 RE_HEADER_FIELD_PREFIX = re.compile(
     r"^(?:\d{1,2}[a-zA-Z]?\s*[-:.]?\s*)?"
@@ -88,7 +90,18 @@ class ClaimsAgent:
         self.llm_client = llm_client if llm_client is not None else (default_groq_client if self.enable_model_fallback else None)
         self.vision_client = vision_client if vision_client is not None else (ResilientVisionClient() if self.enable_model_fallback else None)
         self.storage_backend = storage_backend
-        self.code_catalog = code_catalog
+        if code_catalog is not None:
+            self.code_catalog = code_catalog
+        else:
+            try:
+                from medishield.db.catalog import SqlCodeCatalogRepository
+                from medishield.db.session import sync_engine
+
+                self.code_catalog = SqlCodeCatalogRepository(sync_engine)
+            except Exception:  # noqa: BLE001
+                from medishield.db.catalog import InMemoryCodeCatalogRepository
+
+                self.code_catalog = InMemoryCodeCatalogRepository()
 
     def execute(
         self,
@@ -179,6 +192,7 @@ class ClaimsAgent:
             ] or all_spans_with_doc
 
         # 2. Extract header financial and provider fields strictly from claim billing documents
+        claim_currency, claim_currency_symbol = detect_claim_currency(claim_billing_spans or all_spans_with_doc)
         claim_amount_pv, raw_claim_amount, has_total_label = self._extract_claim_amount(claim_billing_spans)
 
         # Service date: search claim form first; fallback to discharge summary if missing
@@ -198,12 +212,31 @@ class ClaimsAgent:
         # 3. Extract diagnostic and procedural coding
         # ICD-10 diagnostic codes come from clinical discharge summaries and claim forms
         icd10_codes = self._extract_icd10_codes(clinical_spans + claim_billing_spans)
+        unverified_icd10_codes = [
+            str(item.value)
+            for item in icd10_codes
+            if self.code_catalog is None
+            or not self.code_catalog.is_valid_code(str(item.value), CodingSystem.ICD10_CM)
+            or item.provenance is None
+            or item.provenance.evidence_source != EvidenceSource.OCR
+            or item.provenance.verification_status != EvidenceVerificationStatus.VERIFIED
+        ]
+        if unverified_icd10_codes:
+            validation_errors.append(
+                "UNVERIFIED_ICD10_CODES: Diagnosis code(s) "
+                f"{', '.join(sorted(set(unverified_icd10_codes)))} lack verified OCR provenance or active catalog entries."
+            )
 
         # CPT procedural codes strictly from claim billing table
         cpt_codes = self._extract_cpt_codes(claim_billing_spans)
 
         # 4. Extract granular billing service line items strictly from claim billing table (Pass 1)
-        service_lines = self._extract_service_lines(claim_billing_spans, y_tolerance=0.012)
+        service_lines = self._extract_service_lines(
+            claim_billing_spans,
+            y_tolerance=0.012,
+            currency=claim_currency,
+            currency_symbol=claim_currency_symbol,
+        )
 
         # 4b. Hybrid LLM Extraction fallback for unstructured text (Rule 11 & Spec 01 § 1.1)
         # Bounded to at most 1 external model call across the entire execution.
@@ -246,12 +279,12 @@ class ClaimsAgent:
         schema_valid = True
         calculated_lines_sum = 0.0
 
-        # Validate Provider NPI format (10-digit standard)
+        # Validate Provider NPI format (10-digit standard for US claims)
         if raw_npi:
             if not re.match(r"^\d{10}$", raw_npi):
                 validation_errors.append("INVALID_PROVIDER_NPI: Provider NPI must be exactly 10 digits.")
                 schema_valid = False
-        else:
+        elif claim_currency == "USD":
             validation_errors.append("MISSING_PROVIDER_NPI: Provider NPI could not be extracted.")
             schema_valid = False
 
@@ -276,7 +309,7 @@ class ClaimsAgent:
 
             calculated_lines_sum = max(0.0, round(line_sum, 2))
 
-        # Reconcile claim totals and line items sum deterministically (Rule 10-14)
+        # Reconcile claim totals and line items sum deterministically (Rule 10-14, ADR-018)
         (
             final_claim_pv,
             final_raw_amount,
@@ -287,6 +320,7 @@ class ClaimsAgent:
             declared_total_pv=claim_amount_pv,
             service_lines=service_lines,
             has_total_label=has_total_label,
+            currency_symbol=claim_currency_symbol,
         )
         validation_errors.extend(total_validation_errors)
         claim_amount_pv = final_claim_pv
@@ -311,6 +345,7 @@ class ClaimsAgent:
         has_uncoded_charged_lines = any(
             line.amount and line.amount.value is not None and float(line.amount.value) > 0
             and (not line.hcpcs or not line.hcpcs.value or str(line.hcpcs.value).strip() in ("", "None", "UNKNOWN", "null"))
+            and (not line.rev_code or not line.rev_code.value or str(line.rev_code.value).strip() in ("", "None", "UNKNOWN", "null"))
             for line in service_lines
         )
 
@@ -318,7 +353,12 @@ class ClaimsAgent:
         if arithmetic_status == ArithmeticCheckStatus.FAIL or bool(missing_table_cpts) or has_uncoded_charged_lines:
             # Pass 2: Bounded deterministic geometry retry with slightly wider y_tolerance (0.024 vs 0.012)
             # Recovers rows dropped due to minor scanner/table jitter (e.g. PT_20322 CPT 93000)
-            retry_lines = self._extract_service_lines(claim_billing_spans, y_tolerance=0.024)
+            retry_lines = self._extract_service_lines(
+                claim_billing_spans,
+                y_tolerance=0.024,
+                currency=claim_currency,
+                currency_symbol=claim_currency_symbol,
+            )
             if retry_lines and retry_lines != service_lines:
                 (
                     retry_claim_pv,
@@ -330,6 +370,7 @@ class ClaimsAgent:
                     declared_total_pv=claim_amount_pv,
                     service_lines=retry_lines,
                     has_total_label=has_total_label,
+                    currency_symbol=claim_currency_symbol,
                 )
                 retry_service_cpt_counts = Counter(
                     str(line.hcpcs.value).strip()
@@ -360,7 +401,7 @@ class ClaimsAgent:
             # Determine if there is an unresolved table extraction problem:
             # - Arithmetic check failed
             # - Missing procedure codes detected in table compared to service lines
-            # - Any service line has an amount but lacks a verified CPT procedure code
+            # - Any service line has an amount but lacks both a verified CPT procedure code AND a revenue code
             current_service_cpt_counts = Counter(
                 str(line.hcpcs.value).strip()
                 for line in service_lines
@@ -373,10 +414,13 @@ class ClaimsAgent:
             has_uncoded_charged_lines = any(
                 line.amount and line.amount.value is not None and float(line.amount.value) > 0
                 and (not line.hcpcs or not line.hcpcs.value or str(line.hcpcs.value).strip() in ("", "None", "UNKNOWN", "null"))
+                and (not getattr(line, "rev_code", None) or not line.rev_code.value or str(line.rev_code.value).strip() in ("", "None", "UNKNOWN", "null"))
                 for line in service_lines
             )
+            # Only trigger expensive external VLM/LLM calls if arithmetic failed or table CPTs are missing (ADR-020 & Rule 12).
+            # When arithmetic passes and all table CPTs are matched, deterministic extraction is authoritative.
             unresolved_issue = (
-                arithmetic_status == ArithmeticCheckStatus.FAIL
+                arithmetic_status != ArithmeticCheckStatus.PASS
                 or has_table_missing_cpts
                 or has_uncoded_charged_lines
             )
@@ -453,12 +497,38 @@ class ClaimsAgent:
 
                             # If any lines or codes were recovered, re-extract or update service lines
                             if any(c.status == VisualEvidenceStatus.OCR_CORROBORATED for c in visual_candidates):
-                                recovered_lines = self._extract_service_lines(claim_billing_spans, y_tolerance=0.012)
+                                recovered_lines = self._extract_service_lines(
+                                    claim_billing_spans,
+                                    y_tolerance=0.012,
+                                    currency=claim_currency,
+                                    currency_symbol=claim_currency_symbol,
+                                )
                                 if len(recovered_lines) >= len(service_lines):
+                                    for idx, r_line in enumerate(recovered_lines):
+                                        if (
+                                            (not r_line.hcpcs or not r_line.hcpcs.value)
+                                            and idx < len(service_lines)
+                                            and service_lines[idx].hcpcs
+                                            and service_lines[idx].hcpcs.value
+                                        ):
+                                            r_line.hcpcs = service_lines[idx].hcpcs
                                     service_lines = recovered_lines
                                 else:
-                                    recovered_retry = self._extract_service_lines(claim_billing_spans, y_tolerance=0.024)
+                                    recovered_retry = self._extract_service_lines(
+                                        claim_billing_spans,
+                                        y_tolerance=0.024,
+                                        currency=claim_currency,
+                                        currency_symbol=claim_currency_symbol,
+                                    )
                                     if len(recovered_retry) >= len(service_lines):
+                                        for idx, r_line in enumerate(recovered_retry):
+                                            if (
+                                                (not r_line.hcpcs or not r_line.hcpcs.value)
+                                                and idx < len(service_lines)
+                                                and service_lines[idx].hcpcs
+                                                and service_lines[idx].hcpcs.value
+                                            ):
+                                                r_line.hcpcs = service_lines[idx].hcpcs
                                         service_lines = recovered_retry
 
                                 existing_cpt_set = {pv.value for pv in cpt_codes if pv.value}
@@ -477,6 +547,7 @@ class ClaimsAgent:
                                     declared_total_pv=claim_amount_pv,
                                     service_lines=service_lines,
                                     has_total_label=has_total_label,
+                                    currency_symbol=claim_currency_symbol,
                                 )
                                 if v_status == ArithmeticCheckStatus.PASS:
                                     service_lines_sum = sum(float(l.amount.value) for l in service_lines)
@@ -537,7 +608,23 @@ class ClaimsAgent:
             for code, table_cnt in table_cpt_counts.items()
             if final_service_cpt_counts.get(code, 0) < table_cnt
         ]
+        unassigned_charge_spans = find_unassigned_charge_anchors(claim_billing_spans, service_lines)
+        if unassigned_charge_spans:
+            validation_errors = [
+                error for error in validation_errors
+                if not error.startswith("ARITHMETIC_DRIFT:")
+            ]
+            validation_errors.append(
+                "INCOMPLETE_BILL_EXTRACTION: Positive charge rows in the OCR table are not represented "
+                f"by extracted service lines ({len(unassigned_charge_spans)} unassigned amount span(s))."
+            )
+            arithmetic_status = ArithmeticCheckStatus.INDETERMINATE
         if remaining_missing_table_cpts:
+            validation_errors = [
+                error for error in validation_errors
+                if not error.startswith("ARITHMETIC_DRIFT:")
+            ]
+            arithmetic_status = ArithmeticCheckStatus.INDETERMINATE
             validation_errors.append(
                 f"INCOMPLETE_SERVICE_LINES: Detected billing procedure code(s) {sorted(set(remaining_missing_table_cpts))} in claim table are missing from itemized service lines."
             )
@@ -552,6 +639,8 @@ class ClaimsAgent:
             validation_errors.append("UNVERIFIED_LINE_CHARGES: Service line charges lack verified OCR provenance.")
         elif remaining_missing_table_cpts:
             # Completeness guard: detected table procedure codes are missing from itemized lines
+            line_items_sum_valid = False
+        elif unassigned_charge_spans:
             line_items_sum_valid = False
         elif arithmetic_status == ArithmeticCheckStatus.PASS:
             line_items_sum_valid = True
@@ -617,11 +706,23 @@ class ClaimsAgent:
 
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
 
+        reason_codes = self._indeterminate_reasons(
+            verdict=verdict,
+            validation_errors=validation_errors,
+            schema_valid=schema_valid,
+            raw_claim_amount=raw_claim_amount,
+            raw_npi=raw_npi,
+            service_lines=service_lines,
+        )
+
         return ClaimsAgentOutput(
             agent_name="claims_agent",
             verdict=verdict,
             confidence=confidence,
+            reason_codes=reason_codes,
             claim_amount=claim_amount_pv,
+            currency=claim_currency,
+            currency_symbol=claim_currency_symbol,
             service_date=service_date_pv,
             provider_name=provider_name_pv,
             provider_npi=provider_npi_pv,
@@ -727,17 +828,22 @@ class ClaimsAgent:
         self,
         spans: list[tuple[OCRDocumentPayload, int, OCRTextSpan]],
     ) -> list[ProvenanceValue]:
-        """Extracts ICD-10 diagnostic codes (e.g. I21.9, E11.9, I10, J45.909)."""
-        icd_pattern = re.compile(r"\b([A-TV-Z][0-9]{2}(?:\.[0-9]{1,4})?)\b")
+        """Extracts ICD-10 diagnostic codes across English, Hindi, and Spanish clinical documentation (ADR-018)."""
+        icd_pattern = re.compile(r"\b([A-TV-Z][0-9]{2}(?:\.[0-9A-Z]{1,4})?)\b")
         found_codes: list[ProvenanceValue] = []
         seen: set[str] = set()
 
         for doc, page_num, span in spans:
-            span_lower = span.text.lower()
-            if any(k in span_lower for k in ("diagnosis", "diagnoses", "icd", "primary", "secondary", "hospital course")):
-                matches = icd_pattern.findall(span.text)
+            span_text = span.text.strip()
+            span_lower = span_text.lower()
+            if any(k in span_lower for k in (
+                "diagnosis", "diagnoses", "icd", "primary", "secondary", "hospital course",
+                "निदान", "मुख्य", "प्राथमिक", "गौण", "अस्पताल", "रोग", "लक्षण",
+                "diagnóstico", "diagnostico", "secundario", "enfermedad",
+            )):
+                matches = icd_pattern.findall(span_text)
                 # Normalize OCR misreadings of ICD letter 'I' as digit '1' (e.g. ICD-10: 110 -> I10, ICD-10: 125 -> I25)
-                for m in re.finditer(r"ICD(?:-10)?\s*[:\-]?\s*1([0-9]{2}(?:\.[0-9]{1,4})?)", span.text, re.IGNORECASE):
+                for m in re.finditer(r"ICD(?:-10)?\s*[:\-]?\s*1([0-9]{2}(?:\.[0-9]{1,4})?)", span_text, re.IGNORECASE):
                     cand = f"I{m.group(1)}"
                     if cand not in matches:
                         matches.append(cand)
@@ -745,8 +851,51 @@ class ClaimsAgent:
                 for code in matches:
                     if code not in seen and len(code) >= 3:
                         seen.add(code)
-                        _, prov = verify_extracted_span(code, span.span_id, page_num, doc)
+                        _, prov = verify_extracted_span(span_text, span.span_id, page_num, doc)
+                        prov = prov.model_copy(update={
+                            "normalized_interpretation": code,
+                            "evidence_source": EvidenceSource.OCR,
+                            "verification_status": EvidenceVerificationStatus.VERIFIED
+                            if prov.provenance_type != ProvenanceType.INFERRED
+                            else EvidenceVerificationStatus.REJECTED,
+                            "assertion_status": ClinicalAssertionStatus.NOT_ASSESSED,
+                        })
                         found_codes.append(ProvenanceValue(value=code, confidence=0.95, provenance=prov))
+
+            # Multilingual Clinical Terminology Entity Linking (Hindi & Spanish vernacular terms)
+            multi_indications = extract_multilingual_clinical_indications(
+                span_text,
+                llm_client=None,
+                enable_llm_fallback=False,
+            )
+            for ind in multi_indications:
+                code = ind["icd10_code"]
+                if code and code not in seen and self.code_catalog and self.code_catalog.is_valid_code(code, CodingSystem.ICD10_CM):
+                    seen.add(code)
+                    verified, prov = verify_extracted_span(span_text, span.span_id, page_num, doc)
+                    if not verified:
+                        continue
+                    prov = prov.model_copy(update={
+                        "normalized_interpretation": code,
+                        "evidence_source": EvidenceSource.OCR,
+                        "verification_status": EvidenceVerificationStatus.VERIFIED,
+                        "assertion_status": ClinicalAssertionStatus.NOT_ASSESSED,
+                    })
+                    found_codes.append(ProvenanceValue(value=code, confidence=ind.get("confidence", 0.95), provenance=prov))
+
+        # Full clinical narrative fallback when individual spans did not yield an ICD-10 code (Rule 11)
+        if not found_codes and getattr(self, "enable_model_fallback", False) and self.llm_client and self.llm_client.is_available():
+            full_text = "\n".join(s[2].text for s in spans if any(k in s[2].text.lower() for k in ("diagnos", "निदान", "अस्पताल", "curso", "alta", "ingreso", "summary", "msh-")))
+            if full_text and len(full_text.strip()) > 15:
+                full_indications = extract_multilingual_clinical_indications(
+                    full_text,
+                    llm_client=self.llm_client,
+                )
+                for ind in full_indications:
+                    code = ind["icd10_code"]
+                    if code not in seen:
+                        seen.add(code)
+                        found_codes.append(ProvenanceValue(value=code, confidence=ind.get("confidence", 0.92)))
 
         return found_codes
 
@@ -755,7 +904,8 @@ class ClaimsAgent:
         spans: list[tuple[OCRDocumentPayload, int, OCRTextSpan]],
     ) -> list[ProvenanceValue]:
         """Extracts 5-digit CPT procedure codes strictly from procedure table and catalog (Spec 05 § 5)."""
-        return extract_cpt_codes_from_table(spans, SYNTHETIC_VALID_CPT_CODES)
+        active_codes = self.code_catalog.get_active_codes(CodingSystem.CPT) if self.code_catalog else None
+        return extract_cpt_codes_from_table(spans, valid_cpt_codes=active_codes)
 
     def _extract_table_cpt_row_occurrences(
         self,
@@ -817,14 +967,27 @@ class ClaimsAgent:
             if bbox.y1 < 0.22 or bbox.y0 > min(0.88, max_y + 0.02):
                 continue
 
+            # Exclude CPT tokens that are field values on a claim summary form (e.g. "Procedure Code" -> "27447")
+            header_field_re = re.compile(
+                r"^\s*(?:procedure\s*code|cpt\s*code|hcpcs\s*code|principal\s*procedure|primary\s*procedure|admitting\s*procedure)\s*[:#]?\s*$",
+                re.IGNORECASE,
+            )
+            is_header_field_value = any(
+                d.document_id == doc.document_id
+                and p == page_num
+                and abs(((s.bbox.y0 + s.bbox.y1) / 2.0) - ((bbox.y0 + bbox.y1) / 2.0)) < 0.015
+                and s.bbox.x1 < bbox.x0
+                and header_field_re.match(s.text.strip())
+                for d, p, s in spans
+            )
+            if is_header_field_value:
+                continue
+
             tokens = re.split(r"[\s,;:/]+", text)
             for token in tokens:
                 clean_token = token.strip()
                 if re_cpt.fullmatch(clean_token):
-                    if self.code_catalog is not None:
-                        if not self.code_catalog.is_valid_code(clean_token, CodingSystem.CPT):
-                            continue
-                    elif clean_token not in SYNTHETIC_VALID_CPT_CODES:
+                    if self.code_catalog is not None and not self.code_catalog.is_valid_code(clean_token, CodingSystem.CPT):
                         continue
 
                     y_center = (bbox.y0 + bbox.y1) / 2.0
@@ -845,9 +1008,16 @@ class ClaimsAgent:
         self,
         spans: list[tuple[OCRDocumentPayload, int, OCRTextSpan]],
         y_tolerance: float = 0.012,
+        currency: str = "USD",
+        currency_symbol: str = "$",
     ) -> list[ServiceLine]:
-        """Extracts structured line items: line #, CPT, description, date, qty, unit, total."""
-        return extract_service_lines_from_table(spans, y_tolerance=y_tolerance)
+        """Extracts structured line items: line #, CPT, description, date, qty, unit, total (ADR-018)."""
+        return extract_service_lines_from_table(
+            spans,
+            y_tolerance=y_tolerance,
+            currency=currency,
+            currency_symbol=currency_symbol,
+        )
 
     def _ground_candidate_line(
         self,
@@ -909,6 +1079,11 @@ class ClaimsAgent:
                     _, desc_prov = verify_extracted_span(desc_val, span_d.span_id, page_d, doc_d)
                     break
 
+        rev_val = candidate.rev_code.value if candidate.rev_code else "UNKNOWN"
+        rev_prov = candidate.rev_code.provenance if candidate.rev_code else None
+        if not rev_prov and rev_val != "UNKNOWN" and desc_prov:
+            rev_prov = desc_prov
+
         date_prov = None
         date_val = candidate.service_date.value if candidate.service_date else "UNKNOWN"
         if candidate.service_date and candidate.service_date.provenance:
@@ -921,12 +1096,14 @@ class ClaimsAgent:
 
         return ServiceLine(
             line_number=candidate.line_number,
-            rev_code=candidate.rev_code,
+            rev_code=ProvenanceValue(value=rev_val, confidence=0.85 if rev_prov else (0.80 if rev_val != "UNKNOWN" else 0.0), provenance=rev_prov),
             description=ProvenanceValue(value=desc_val, confidence=0.85, provenance=desc_prov),
             hcpcs=ProvenanceValue(value=cpt_val, confidence=0.88, provenance=cpt_prov),
             service_date=ProvenanceValue(value=date_val, confidence=0.85, provenance=date_prov),
             units=candidate.units,
             amount=ProvenanceValue(value=amt_float, confidence=0.90, provenance=amt_prov),
+            currency=getattr(candidate, "currency", "USD"),
+            currency_symbol=getattr(candidate, "currency_symbol", "$"),
         )
 
     def _resolve_document_image(
@@ -1134,6 +1311,9 @@ class ClaimsAgent:
         if any("UNRESOLVED_VISUAL_CANDIDATE" in err for err in validation_errors):
             return AgentVerdict.INDETERMINATE, 0.50
 
+        if any("UNVERIFIED_ICD10_CODES" in err for err in validation_errors):
+            return AgentVerdict.INDETERMINATE, 0.50
+
         # Validate format of CPT / HCPCS procedural codes (5 digits or HCPCS alphanumeric)
         all_cpt_values: set[str] = set()
         if cpt_codes:
@@ -1159,7 +1339,7 @@ class ClaimsAgent:
                 and not self.code_catalog.is_valid_code(code, CodingSystem.HCPCS)
             ]
         else:
-            unsupported_codes = [code for code in all_cpt_values if code not in SUPPORTED_CPT_CATALOG]
+            unsupported_codes = []
 
         if unsupported_codes:
             validation_errors.append(
@@ -1184,19 +1364,45 @@ class ClaimsAgent:
             if any(l.amount and l.amount.provenance is None for l in service_lines):
                 return AgentVerdict.INDETERMINATE, 0.50
 
-            # Calibrate confidence based on whether codes are confirmed in catalog or benchmark
+            # Calibrate confidence based on whether codes are confirmed in catalog
             if self.code_catalog is not None:
                 all_in_catalog = bool(all_cpt_values) and all(
                     self.code_catalog.is_valid_code(code, CodingSystem.CPT) for code in all_cpt_values
                 )
                 confidence = 0.97 if all_in_catalog else 0.88
             else:
-                all_in_benchmark = bool(all_cpt_values) and all(code in SYNTHETIC_VALID_CPT_CODES for code in all_cpt_values)
-                confidence = 0.97 if all_in_benchmark else 0.88
+                confidence = 0.88
             return AgentVerdict.PASS, confidence
 
 
         return AgentVerdict.INDETERMINATE, 0.50
+
+    def _indeterminate_reasons(
+        self,
+        verdict: AgentVerdict,
+        validation_errors: list[str],
+        schema_valid: bool,
+        raw_claim_amount: float | None,
+        raw_npi: str | None,
+        service_lines: list[ServiceLine],
+    ) -> list[IndeterminateReason]:
+        """Maps the validation errors behind an INDETERMINATE verdict to structured reason codes."""
+        if verdict != AgentVerdict.INDETERMINATE:
+            return []
+        by_prefix = {
+            "UNRESOLVED_VISUAL_CANDIDATE": IndeterminateReason.UNRESOLVED_VISUAL_EVIDENCE,
+            "UNVERIFIED_ICD10_CODES": IndeterminateReason.UNVERIFIED_DIAGNOSIS_CODE,
+            "MALFORMED_CPT_CODES": IndeterminateReason.UNVERIFIED_PROCEDURE_CODE,
+            "UNSUPPORTED_CPT_CODES": IndeterminateReason.UNVERIFIED_PROCEDURE_CODE,
+            "MISSING_PROCEDURAL_CODES": IndeterminateReason.INCOMPLETE_CLAIM_DATA,
+        }
+        codes = [code for prefix, code in by_prefix.items() if any(prefix in err for err in validation_errors)]
+        if not codes:
+            if not schema_valid or raw_claim_amount is None or raw_npi is None:
+                codes.append(IndeterminateReason.INCOMPLETE_CLAIM_DATA)
+            if any(line.amount and line.amount.provenance is None for line in service_lines):
+                codes.append(IndeterminateReason.MISSING_PROVENANCE)
+        return list(dict.fromkeys(codes)) or [IndeterminateReason.OTHER]
 
     def _extract_with_groq_llm(
         self,
@@ -1212,11 +1418,20 @@ class ClaimsAgent:
         )
 
         system_prompt = (
-            "You are a medical claims extraction assistant.\n"
+            "You are a medical claims extraction assistant with comprehensive clinical and billing terminology understanding.\n"
             "Analyze the medical claim or clinical document text and extract:\n"
             "1. ICD-10 diagnosis codes (e.g., I21.9, E11.9, J45.909)\n"
             "2. CPT procedure codes (e.g., 99213, 93000, 71045)\n"
-            "3. Itemized service line items with line_number, cpt_code, description, service_date, quantity, unit_charge, total_charge.\n"
+            "3. Itemized service line items with line_number, cpt_code, rev_code, description, service_date, quantity, unit_charge, total_charge.\n"
+            "\n"
+            "SEMANTIC BILLING INSTRUCTIONS:\n"
+            "- Healthcare facilities worldwide use synonyms: e.g., 'Pharmacy', 'Medicines', 'Drugs', 'Consumables' represent Pharmacy services (Revenue Code 0250).\n"
+            "- 'Bed charges', 'Room rent', 'Ward charges' represent Room and Board (Revenue Code 0100).\n"
+            "- 'Lab tests', 'Pathology', 'Blood investigation' represent Laboratory (Revenue Code 0300).\n"
+            "- 'Operation theater', 'OT charges', 'Surgery' represent Surgical services (Revenue Code 0360).\n"
+            "- If a service line lacks a 5-digit CPT code, provide its UB-04 revenue code or category shorthand in 'rev_code' (e.g. '0250', '0100', '0300', 'PHARM', 'ROOM', 'LAB').\n"
+            "- Do NOT include header summary fields (such as 'Total Claim Amount' or top-level procedure indication) as service line items.\n"
+            "\n"
             "Respond in JSON format:\n"
             "{\n"
             '  "icd10_codes": ["I21.9"],\n'
@@ -1225,6 +1440,7 @@ class ClaimsAgent:
             '    {\n'
             '      "line_number": 1,\n'
             '      "cpt_code": "99213",\n'
+            '      "rev_code": null,\n'
             '      "description": "Office visit",\n'
             '      "service_date": "2026-03-15",\n'
             '      "quantity": 1.0,\n'
@@ -1285,10 +1501,24 @@ class ClaimsAgent:
                 unit_val = float(raw_line.get("unit_charge", 0.0))
                 tot_val = float(raw_line.get("total_charge", qty_val * unit_val))
 
+                raw_rev = raw_line.get("rev_code")
+                rev_val = "UNKNOWN"
+                if raw_rev and str(raw_rev).strip() not in ("", "None", "null", "UNKNOWN"):
+                    clean_rev = str(raw_rev).strip().upper()
+                    if is_plausible_revenue_code(clean_rev, self.code_catalog):
+                        rev_val = clean_rev
+
+                prov_rev = None
+                if rev_val != "UNKNOWN":
+                    for doc, page_num, span in spans:
+                        if (raw_rev and str(raw_rev) in span.text) or (desc_val and any(w in span.text for w in desc_val.split() if len(w) > 3)):
+                            _, prov_rev = verify_extracted_span(span.text, span.span_id, page_num, doc)
+                            break
+
                 extracted_lines.append(
                     ServiceLine(
                         line_number=line_no,
-                        rev_code=ProvenanceValue(value="UNKNOWN", confidence=0.0, provenance=None),
+                        rev_code=ProvenanceValue(value=rev_val, confidence=0.90 if prov_rev else (0.80 if rev_val != "UNKNOWN" else 0.0), provenance=prov_rev),
                         description=ProvenanceValue(value=desc_val, confidence=0.90, provenance=None),
                         hcpcs=ProvenanceValue(value=cpt_val, confidence=0.90, provenance=None),
                         service_date=ProvenanceValue(value=date_val, confidence=0.90, provenance=None),

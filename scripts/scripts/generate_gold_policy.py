@@ -1,6 +1,14 @@
+import json
 import os
+from pathlib import Path
 
 from fpdf import FPDF
+
+POLICY_RIDER_TERMS = json.loads(
+    (Path(__file__).resolve().parents[2] / "data/config/policy_riders_gold.json").read_text(
+        encoding="utf-8"
+    )
+)
 
 BRAND_BLUE  = (12,  40, 110)
 BRAND_GOLD  = (180, 140,  10)
@@ -490,92 +498,28 @@ def create_policy_document():
         "independent of the base policy."
     )
 
-    riders = [
-        (
-            "5.1 Maternity Rider",
-            "$10,000 per pregnancy (lifetime maximum: 2 pregnancies per policy)",
-            "9 months from rider effective date",
-            [
-                "Prenatal consultations and routine prenatal diagnostic tests.",
-                "Labor, normal vaginal delivery, and Cesarean section (C-section).",
-                "Hospital room and board during delivery admission.",
-                "Anesthesia (epidural or general) during delivery.",
-                "Postnatal care for mother: up to 6 weeks post-delivery.",
-                "Newborn care from birth through 31 days (must add infant to policy within 31 days).",
-                "Medically necessary fertility workup (diagnosis only, not treatment).",
-            ],
-            [
-                "Infertility treatment and assisted reproductive technology (IVF, IUI).",
-                "Elective abortion (therapeutic abortion for medical necessity is covered).",
-                "Maternity expenses beyond the $10,000 sub-limit.",
-            ],
-        ),
-        (
-            "5.2 Critical Illness Rider",
-            "$50,000 lump-sum upon first diagnosis (per covered condition, lifetime)",
-            "90 days from rider effective date",
-            [
-                "Invasive cancer (excluding skin cancer unless melanoma).",
-                "Acute myocardial infarction (heart attack) of specified severity.",
-                "Stroke resulting in permanent neurological deficit.",
-                "Coronary artery bypass graft (CABG) surgery.",
-                "Kidney failure requiring permanent dialysis.",
-                "Major organ transplant (heart, lung, liver, kidney, pancreas).",
-                "Coma of specified severity lasting >96 continuous hours.",
-                "Loss of limbs (permanent loss of use of two or more limbs).",
-                "Blindness (permanent and irrecoverable loss of sight in both eyes).",
-                "Alzheimer's disease (resulting in total dependency) -- subject to 6-month survival.",
-            ],
-            [
-                "Conditions diagnosed before the waiting period expires.",
-                "Non-invasive cancer or carcinoma in situ.",
-                "Alcohol- or drug-induced conditions.",
-                "Any condition arising from pre-existing conditions within the first 90 days.",
-            ],
-        ),
-        (
-            "5.3 Outpatient Department (OPD) Rider",
-            "$2,000 per policy year",
-            "30 days from rider effective date",
-            [
-                "Outpatient physician and specialist consultations not requiring hospitalization.",
-                "Diagnostic tests ordered on an outpatient basis (lab, imaging).",
-                "Outpatient prescription drugs up to the OPD sub-limit.",
-                "Outpatient physiotherapy, occupational therapy, and speech therapy sessions.",
-                "Minor outpatient procedures not requiring a Day Care designation.",
-                "Dental emergency treatment (accidental injury to teeth only).",
-            ],
-            [
-                "Cosmetic or aesthetic outpatient procedures.",
-                "Vitamins, supplements, and over-the-counter medications.",
-                "Outpatient services covered under the base policy (no double-dipping).",
-                "Services in excess of the $2,000 OPD sub-limit.",
-            ],
-        ),
-    ]
-
-    for rname, sublimit, wait, inclusions, exclusions in riders:
-        pdf.section_title(rname, level=2)
+    for rider in POLICY_RIDER_TERMS:
+        pdf.section_title(f"{rider['section_number']} {rider['name']}", level=2)
         pdf.set_font("helvetica", "B", 10)
         pdf.set_text_color(*BODY_GRAY)
         pdf.set_x(15)
         pdf.cell(60, 7, "Sub-Limit:")
         pdf.set_font("helvetica", "", 10)
-        pdf.cell(0, 7, sublimit, new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 7, rider["benefit_limit_text"], new_x="LMARGIN", new_y="NEXT")
         pdf.set_font("helvetica", "B", 10)
         pdf.set_x(15)
         pdf.cell(60, 7, "Waiting Period:")
         pdf.set_font("helvetica", "", 10)
-        pdf.cell(0, 7, wait, new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 7, rider["waiting_period_text"], new_x="LMARGIN", new_y="NEXT")
         pdf.ln(1)
         pdf.set_font("helvetica", "B", 10)
         pdf.set_x(15)
         pdf.cell(0, 7, "Covered under this Rider:", new_x="LMARGIN", new_y="NEXT")
-        pdf.bullet(inclusions, indent=8)
+        pdf.bullet(rider["covered_services"], indent=8)
         pdf.set_font("helvetica", "B", 10)
         pdf.set_x(15)
         pdf.cell(0, 7, "Excluded under this Rider:", new_x="LMARGIN", new_y="NEXT")
-        pdf.bullet(exclusions, indent=8)
+        pdf.bullet(rider["exclusions"], indent=8)
         pdf.ln(3)
 
     # ════════════════════════════════════════════════════════

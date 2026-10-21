@@ -1,5 +1,6 @@
 import logging
 import sys
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
@@ -27,7 +28,16 @@ logging.basicConfig(
 logging.getLogger("medishield").setLevel(logging.INFO)
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    # ADR-017: Register running event loop in broadcaster for worker thread dispatches
+    import asyncio
+
+    from medishield.api.events import broadcaster
+    try:
+        broadcaster.set_event_loop(asyncio.get_running_loop())
+    except RuntimeError:
+        pass
+
     # ADR-008: Initialize SQLite Schema and seed data on startup if fallback is active
     from medishield.db.session import Base, _use_sqlite, sync_engine
     if _use_sqlite:
@@ -39,6 +49,9 @@ async def lifespan(app: FastAPI):
         
         # Create all tables
         Base.metadata.create_all(bind=sync_engine)
+        from medishield.db.schema_compat import prepare_sqlite_schema
+
+        prepare_sqlite_schema()
         
         # Run seeder
         from sqlalchemy.orm import Session
@@ -125,4 +138,3 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
-

@@ -35,6 +35,7 @@ class CaseState(TypedDict, total=False):
     workflow_version: str
     execution_id: str
     trace_id: str
+    run_id: str
     created_at: str
 
     # Workflow Progression
@@ -74,6 +75,7 @@ class CaseState(TypedDict, total=False):
     fraud_execution_id: str | None
     fraud_verdict: str | None
     fraud_score: float | None
+    fraud_review_required: bool | None
     fraud_risk_level: str | None
     fraud_summary: dict[str, Any] | None
 
@@ -150,6 +152,7 @@ def create_initial_case_state(
         fraud_execution_id=None,
         fraud_verdict=None,
         fraud_score=None,
+        fraud_review_required=None,
         fraud_risk_level=None,
         fraud_summary=None,
         faithfulness_gate_passed=False,

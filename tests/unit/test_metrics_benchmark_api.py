@@ -82,3 +82,25 @@ def test_operational_metrics_enriched_fields() -> None:
     assert data["total_adjudicated_cases"] >= 0
     assert 0.0 <= data["auto_approval_rate"] <= 1.0
 
+
+def test_calibration_metrics_endpoint() -> None:
+    """Verifies that GET /api/v1/metrics/calibration returns Brier, ECE, and reliability curves (ADR-017)."""
+    client = TestClient(app)
+    response = client.get(
+        "/api/v1/metrics/calibration",
+        headers={"X-User-Role": ROLE_REVIEWER, "X-User-Id": "rev-01"},
+    )
+    assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
+    data = response.json()
+
+    assert data["total_samples"] > 0
+    assert "brier_score" in data
+    assert "expected_calibration_error" in data
+    assert "maximum_calibration_error" in data
+    assert "calibration_method" in data
+    assert len(data["bins"]) >= 3
+    assert "selective_risk_coverage" in data
+    assert len(data["selective_risk_coverage"]) > 0
+    assert "interpretation" in data
+
+

@@ -10,10 +10,10 @@ from medishield.domain.contracts import ClassifierAgentOutput, OCRDocumentPayloa
 # Filename patterns for clean contextual categorization
 FILENAME_PATTERNS: dict[DocumentType, re.Pattern[str]] = {
     DocumentType.CLAIM_FORM: re.compile(
-        r"(^|[_\-\./])(claim|clm|cms[-_]?1500|ub[-_]?04)($|[_\-\.])", re.IGNORECASE
+        r"(^|[_\-\./])(claim|clm|cms[-_]?1500|ub[-_]?04|bill|itemized|invoice)($|[_\-\.])", re.IGNORECASE
     ),
     DocumentType.ID_DOCUMENT: re.compile(
-        r"(^|[_\-\./])(id|dl|license|passport|identity|identification|photo_?id)($|[_\-\.])", re.IGNORECASE
+        r"(^|[_\-\./])(id|dl|license|passport|identity|identification|photo_?id|member_?card)($|[_\-\.])", re.IGNORECASE
     ),
     DocumentType.DISCHARGE_SUMMARY: re.compile(
         r"(^|[_\-\./])(discharge|inpatient)($|[_\-\.])", re.IGNORECASE
@@ -39,47 +39,57 @@ DATASET_FILENAME_PATTERNS: dict[DocumentType, re.Pattern[str]] = {
 # Keyword signatures and associated weights for document classification
 DOCUMENT_SIGNATURES: dict[DocumentType, list[tuple[re.Pattern[str], float]]] = {
     DocumentType.CLAIM_FORM: [
+        (re.compile(r"(casedocument[·\s:_-]*(itemized_bill|claim_form))", re.IGNORECASE), 6.0),
         (re.compile(r"\b(cms-?1500|ub-?04)\b", re.IGNORECASE), 6.0),
-        (re.compile(r"\bhealth\s+insurance\s+claim\s+form\b", re.IGNORECASE), 5.5),
+        (re.compile(r"\b(health\s+insurance\s+claim\s+form|healthinsuranceclaimform)\b", re.IGNORECASE), 5.5),
+        (re.compile(r"\b(itemized\s*hospital\s*bill|itemized\s*bill|hospital\s*bill|itemizedhospitalbill)\b", re.IGNORECASE), 5.5),
         (re.compile(r"\b(reimbursement\s+claim|claim\s+application|claim\s+form)\b", re.IGNORECASE), 4.5),
-        (re.compile(r"\binsured('s)?\s+(id|name|details|information)\b", re.IGNORECASE), 3.0),
-        (re.compile(r"\bpatient('s)?\s+(name|information|dob|details)\b", re.IGNORECASE), 2.5),
-        (re.compile(r"\b(total\s+charge|amount\s+claimed|service\s+lines?)\b", re.IGNORECASE), 2.5),
-        (re.compile(r"\b(member\s+id|policy\s+number|subscriber\s+id)\b", re.IGNORECASE), 2.0),
-        (re.compile(r"\b(itemized\s+bill|hospital\s+bill|invoice\s+number)\b", re.IGNORECASE), 3.0),
+        (re.compile(r"\b(bill\s*reference|billreference|invoice\s*number)\b", re.IGNORECASE), 3.5),
+        (re.compile(r"\b(tax\s*invoice|final\s*bill|hospital\s*invoice|inpatient\s*bill|अस्पताल\s*का\s*बिल|factura\s*médica)\b", re.IGNORECASE), 5.0),
+        (re.compile(r"\binsured('s)?\s*(id|name|details|information)\b", re.IGNORECASE), 3.0),
+        (re.compile(r"\bpatient('s)?\s*(name|information|dob|details)\b", re.IGNORECASE), 2.5),
+        (re.compile(r"\b(total\s*charge|amount\s*claimed|service\s*lines?|total\s*amount|totalamount)\b", re.IGNORECASE), 3.0),
+        (re.compile(r"\b(procedure\s*code|procedurecode|room\s*&?\s*board|surgical\s*service)\b", re.IGNORECASE), 3.0),
+        (re.compile(r"\b(member\s*id|memberid|policy\s*number|subscriber\s*id)\b", re.IGNORECASE), 2.5),
     ],
     DocumentType.ID_DOCUMENT: [
+        (re.compile(r"(casedocument[·\s:_-]*(id_document|member_card))", re.IGNORECASE), 6.0),
         (re.compile(r"\b(driver('?s)?\s+licen[sc]e|driving\s+licen[sc]e)\b", re.IGNORECASE), 6.0),
         (re.compile(r"\b(passport|passport\s+no)\b", re.IGNORECASE), 6.0),
         (re.compile(r"\b(national\s+identity\s+card|national\s+id|state\s+id(entification)?)\b", re.IGNORECASE), 5.5),
         (re.compile(r"\b(identification\s+card|identity\s+card|id\s+card|non-driver(\s+id)?)\b", re.IGNORECASE), 5.5),
-        (re.compile(r"\b(member\s+id\s+card|insurance\s+card|health\s+plan\s+card)\b", re.IGNORECASE), 5.5),
+        (re.compile(r"\b(member\s*id\s*card|insurance\s*card|health\s*plan\s*card|health\s*insurance\s*member\s*card|member\s*card)\b", re.IGNORECASE), 5.5),
         (re.compile(r"\b(permanent\s+resident|social\s+security|ssn)\b", re.IGNORECASE), 5.0),
-        (re.compile(r"\b(date\s+of\s+birth|d\.?o\.?b\.?)\b", re.IGNORECASE), 2.5),
+        (re.compile(r"\b(date\s*of\s*birth|dateofbirth|d\.?o\.?b\.?)\b", re.IGNORECASE), 2.5),
         (re.compile(r"\b(licen[sc]e\s+no|dl\s*#|card\s+number|id\s*number|idnumber)\b", re.IGNORECASE), 3.0),
         (re.compile(r"\b(expiration\s+date|exp\s+date|expires)\b", re.IGNORECASE), 2.0),
         (re.compile(r"\b(sex|eyes|height|iss|photo\s*id)\b", re.IGNORECASE), 1.5),
     ],
     DocumentType.DISCHARGE_SUMMARY: [
-        (re.compile(r"\b(discharge\s+summary|clinical\s+discharge\s+summary)\b", re.IGNORECASE), 6.0),
+        (re.compile(r"(casedocument[·\s:_-]*discharge_summary)", re.IGNORECASE), 6.0),
+        (re.compile(r"\b(discharge\s+summary|clinical\s+discharge\s+summary|dischargesummary)\b", re.IGNORECASE), 6.0),
         (re.compile(r"\b(hospital\s+discharge|inpatient\s+summary|discharge\s+note)\b", re.IGNORECASE), 5.0),
-        (re.compile(r"\b(admission\s+date|date\s+of\s+admission)\b", re.IGNORECASE), 3.5),
-        (re.compile(r"\b(discharge\s+date|date\s+of\s+discharge)\b", re.IGNORECASE), 3.5),
-        (re.compile(r"\b(primary\s+diagnosis|final\s+diagnosis|admitting\s+diagnosis)\b", re.IGNORECASE), 3.5),
+        (re.compile(r"\b(discharge\s*card|discharge\s*certificate|छुट्टी\s*का\s*सारांश|resumen\s*de\s*alta)\b", re.IGNORECASE), 5.0),
+        (re.compile(r"\b(admission\s*date|date\s+of\s+admission|admissiondate)\b", re.IGNORECASE), 3.5),
+        (re.compile(r"\b(discharge\s*date|date\s+of\s+discharge|dischargedate)\b", re.IGNORECASE), 3.5),
+        (re.compile(r"\b(primary\s*diagnosis|final\s*diagnosis|admitting\s*diagnosis|primarydiagnosis)\b", re.IGNORECASE), 3.5),
         (re.compile(r"\b(hospital\s+course|clinical\s+course)\b", re.IGNORECASE), 3.5),
         (re.compile(r"\b(attending\s+physician|consultant\s+physician)\b", re.IGNORECASE), 2.5),
         (re.compile(r"\b(condition\s+on\s+discharge|discharge\s+instructions)\b", re.IGNORECASE), 3.0),
     ],
     DocumentType.PRESCRIPTION: [
+        (re.compile(r"(casedocument[·\s:_-]*prescription)", re.IGNORECASE), 6.0),
         (re.compile(r"\b(prescription|prescribed\s+by)\b", re.IGNORECASE), 5.0),
         (re.compile(r"(\bRx\b|℞|Rx:)", re.IGNORECASE), 5.5),
+        (re.compile(r"\b(पर्चा|दवा\s*की\s*पर्ची|receta\s*médica)\b", re.IGNORECASE), 5.0),
         (re.compile(r"\b(dispense|refills?|refill\s+count)\b", re.IGNORECASE), 3.5),
         (re.compile(r"\b(sig:|dosage:|frequency:)\b", re.IGNORECASE), 3.5),
         (re.compile(r"\b(tablet[s]?|capsule[s]?|mg|ml|mcg|po\s+daily|bid|tid|qid)\b", re.IGNORECASE), 2.5),
         (re.compile(r"\b(dr\.|m\.?d\.?|physician\s+signature|dea\s*#)\b", re.IGNORECASE), 2.5),
-        (re.compile(r"\b(pharmacy|pharmacist)\b", re.IGNORECASE), 2.0),
+        (re.compile(r"\b(dispensing\s+pharmacy|retail\s+pharmacy|rx\s+pharmacy|pharmacist)\b", re.IGNORECASE), 2.5),
     ],
     DocumentType.POLICY_AMENDMENT: [
+        (re.compile(r"(casedocument[·\s:_-]*policy_amendment)", re.IGNORECASE), 6.0),
         (re.compile(r"\b(policy\s+amendment|policy\s+endorsement)\b", re.IGNORECASE), 6.0),
         (re.compile(r"\b(amendment\s+schedule|policy\s+rider)\b", re.IGNORECASE), 5.0),
         (re.compile(r"\b(schedule\s+of\s+benefits\s+amendment|coverage\s+modification)\b", re.IGNORECASE), 4.5),
@@ -269,7 +279,7 @@ class DocumentClassifierAgent:
         elif doc_type == DocumentType.DISCHARGE_SUMMARY:
             tags.append("INPATIENT_FACILITY")
 
-        if re.search(r"\b(itemized\s+bill|room\s+charges|pharmacy\s+charges|lab\s+charges)\b", text, re.IGNORECASE):
+        if re.search(r"(?:itemized[_\s]*(?:hospital[_\s]*)?bill|room\s+charges|pharmacy\s+charges|lab\s+charges)", text, re.IGNORECASE):
             tags.append("ITEMIZED_BILL")
 
         return tags
@@ -298,9 +308,17 @@ class DocumentClassifierAgent:
             return DocumentType.UNKNOWN, 0.0, []
 
         system_prompt = (
-            "You are a medical document intake classification assistant.\n"
+            "You are an authoritative medical document intake classification assistant.\n"
             "Analyze the document text and classify it into exactly one canonical DocumentType:\n"
             "CLAIM_FORM, ID_DOCUMENT, DISCHARGE_SUMMARY, PRESCRIPTION, POLICY_AMENDMENT, or UNKNOWN.\n"
+            "\n"
+            "SEMANTIC CLASSIFICATION GUIDELINES:\n"
+            "- CLAIM_FORM: Itemized hospital bills, UB-04/CMS-1500 forms, final invoices, tax invoices, summary claim forms, and payment statements with line charges (in English, Hindi, Spanish, or any regional format).\n"
+            "- ID_DOCUMENT: Passports, driver's licenses, national ID cards, state IDs, or insurance membership ID cards.\n"
+            "- DISCHARGE_SUMMARY: Hospital discharge summaries, clinical course notes, discharge cards, or inpatient release reports.\n"
+            "- PRESCRIPTION: Physician prescription slips, Rx doctor advice, or medication orders.\n"
+            "- POLICY_AMENDMENT: Insurance riders, policy endorsements, or schedule of benefits amendments.\n"
+            "\n"
             "You must return a JSON object with this exact structure:\n"
             '{"doc_type": "CLAIM_FORM", "confidence": 0.85, "routing_tags": ["EMERGENCY_ADMISSION"], "reasoning": "brief explanation"}'
         )

@@ -982,7 +982,7 @@ html_template = f"""<!DOCTYPE html>
               <li><strong>KYC Identity Agent:</strong> Employs fuzzy token sorting and normalized Levenshtein distance to verify member identity against corporate enrollment records, safely ignoring middle initials and suffixes.</li>
               <li><strong>Claims Specialist Agent:</strong> Audits line-item arithmetic ($Quantity \\times Unit Charge = Total$), verifies dates of service, and validates procedural codes against the dynamic <code>CodeCatalogRepository</code>.</li>
               <li><strong>Policy Coverage RAG Agent:</strong> Resolves active policy terms, deduces deductible and copay rates, and expands clinical terms using catalog descriptions.</li>
-              <li><strong>Deterministic Fraud Engine:</strong> Calculates fraud risk score $\in [0.0, 1.0]$ across 4 independent dimensions: identity tampering (+0.20), unbundled billing (+0.30), excessive velocity (+0.25), and duplicate billing (+0.35).</li>
+              <li><strong>Deterministic Fraud Engine:</strong> Calculates fraud risk score $\\in [0.0, 1.0]$ across 4 independent dimensions: identity tampering (+0.20), unbundled billing (+0.30), excessive velocity (+0.25), and duplicate billing (+0.35).</li>
             </ul>
           </div>
         </div>
@@ -1232,7 +1232,7 @@ html_template = f"""<!DOCTYPE html>
                 </div>
                 <div class="scorecard-box">
                   <div class="sc-label">Ground Truth Match</div>
-                  <div class="sc-value cyan-text">${{c.expected_decision}} (Fraud: ${{c.is_fraud_ground_truth ? 'YES' : 'NO'}})</div>
+                  <div class="sc-value cyan-text">${{c.reviewed_adjudication_label || 'UNREVIEWED'}} (Fraud metadata: ${{c.fraud_metadata_label ? 'YES' : 'NO'}})</div>
                 </div>
               </div>
 
@@ -1285,6 +1285,6 @@ html_template = f"""<!DOCTYPE html>
 with open(OUTPUT_HTML_PATH, "w", encoding="utf-8") as f:
     f.write(html_template)
 
-print(f"Successfully generated comprehensive architecture and evaluation report:")
+print("Successfully generated comprehensive architecture and evaluation report:")
 print(f"  {OUTPUT_HTML_PATH}")
 print(f"  File size: {len(html_template)} characters")

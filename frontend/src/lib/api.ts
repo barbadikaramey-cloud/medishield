@@ -1,4 +1,12 @@
-const API_BASE = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8001/api/v1").replace(/\/$/, "");
+const API_BASE = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1").replace(/\/$/, "");
+
+export function getCaseWebSocketUrl(caseId: string, token: string): string {
+  const apiUrl = new URL(API_BASE, window.location.origin);
+  apiUrl.protocol = apiUrl.protocol === "https:" ? "wss:" : "ws:";
+  apiUrl.pathname = `${apiUrl.pathname.replace(/\/$/, "")}/cases/${encodeURIComponent(caseId)}/ws`;
+  apiUrl.search = new URLSearchParams({ token }).toString();
+  return apiUrl.toString();
+}
 
 export interface CaseListItem {
   case_id: string;
@@ -30,6 +38,17 @@ export interface CaseDocument {
   ocr_payload_uri: string | null;
 }
 
+export interface HumanReviewItem {
+  id: string;
+  reviewer_id: string;
+  action: string;
+  new_decision?: string | null;
+  reason_code: string;
+  remarks: string;
+  expected_case_version: number;
+  created_at: string;
+}
+
 export interface CaseDetailResponse extends CaseListItem {
   workflow_version: string;
   missing_documents: string[];
@@ -38,6 +57,8 @@ export interface CaseDetailResponse extends CaseListItem {
   detailed_explanation: string | null;
   agent_findings: Record<string, any> | null;
   documents: CaseDocument[];
+  human_reviews?: HumanReviewItem[];
+  latest_human_review?: HumanReviewItem | null;
 }
 
 export interface ReviewLockResponse {
@@ -63,14 +84,45 @@ export interface OperationalMetricsResponse {
   cases_awaiting_human: number;
   cases_awaiting_info: number;
   completed_cases_24h: number;
-  straight_through_processing_rate: number;
-  average_adjudication_latency_ms: number;
+  straight_through_processing_rate: number | null;
+  average_adjudication_latency_ms: number | null;
+  latency_p50_ms: number | null;
+  latency_p95_ms: number | null;
   intake_queue_depth: number;
   workflow_queue_depth: number;
-  auto_approval_rate: number;
-  escalation_rate: number;
-  rejection_rate: number;
+  auto_approval_rate: number | null;
+  escalation_rate: number | null;
+  rejection_rate: number | null;
   total_adjudicated_cases: number;
+  insufficient_data: boolean;
+  llm_runtime: {
+    scope: string;
+    calls_total: number;
+    calls_success: number;
+    calls_failed: number;
+    provider_attempts: number;
+    provider_attempts_success: number;
+    provider_attempts_failed: number;
+    provider_failures: Record<string, number>;
+    provider_failure_categories: Record<string, number>;
+    stages: Record<string, {
+      calls_total: number;
+      calls_success: number;
+      calls_failed: number;
+      latency_p50_ms: number | null;
+      latency_p95_ms: number | null;
+    }>;
+    prompt_tokens: number | null;
+    completion_tokens: number | null;
+    total_tokens: number | null;
+    responses_with_token_usage: number;
+    responses_without_token_usage: number;
+    token_usage_complete: boolean;
+    latency_p50_ms: number | null;
+    latency_p95_ms: number | null;
+    provider_latency_p50_ms: number | null;
+    provider_latency_p95_ms: number | null;
+  };
   period_start: string | null;
   period_end: string | null;
 }
@@ -99,12 +151,56 @@ export interface BenchmarkEvaluationResponse {
     test_name: string;
     description: string;
     status: string;
+    fraud_review_required: boolean;
     score: number;
     details: string;
   }>;
   last_run_timestamp: string;
   execution_time_seconds: number;
   suite_status: string;
+}
+
+export interface CalibrationBin {
+  bin_index: number;
+  lower_bound: number;
+  upper_bound: number;
+  mean_predicted_confidence: number;
+  empirical_accuracy: number;
+  sample_count: number;
+  weight: number;
+}
+
+export interface SelectiveCoverageItem {
+  confidence_threshold: number;
+  coverage: number;
+  selective_accuracy: number;
+  accepted_samples: number;
+}
+
+export interface CalibrationMetricsResponse {
+  strategy: string;
+  total_samples: number;
+  brier_score: number;
+  expected_calibration_error: number;
+  maximum_calibration_error: number;
+  raw_confidence_mean: number;
+  calibrated_confidence_mean: number | null;
+  calibrated_brier_score: number | null;
+  calibrated_expected_calibration_error: number | null;
+  calibration_method: string;
+  bins: CalibrationBin[];
+  calibrated_bins: CalibrationBin[];
+  selective_risk_coverage: SelectiveCoverageItem[];
+  interpretation: string;
+}
+
+export async function fetchCalibrationMetrics(
+  strategy = "equal_width",
+  bins = 10
+): Promise<CalibrationMetricsResponse> {
+  const res = await apiFetch(`/metrics/calibration?strategy=${strategy}&bins_count=${bins}`);
+  if (!res.ok) throw new Error("Failed to fetch confidence calibration metrics");
+  return res.json();
 }
 
 async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
@@ -246,6 +342,24 @@ export function rerunCase(caseId: string): Promise<unknown> {
   return getJson(`/cases/${encodeURIComponent(caseId)}/rerun`, { method: "POST" });
 }
 
+export interface AgentExecutionEvent {
+  event_id: string;
+  case_id: string;
+  run_id: string;
+  agent_name: string;
+  event_type: "STARTED" | "HEARTBEAT" | "COMPLETED" | "FAILED" | "SKIPPED" | "RETRYING";
+  status: "RUNNING" | "SUCCESS" | "ERROR" | "BLOCKED";
+  sequence_number: number;
+  timestamp: string;
+  duration_ms: number | null;
+  safe_summary: string;
+  payload: Record<string, any>;
+}
+
+export function fetchCaseEvents(caseId: string): Promise<AgentExecutionEvent[]> {
+  return getJson(`/cases/${encodeURIComponent(caseId)}/events`);
+}
+
 export function fetchDocumentOcr(caseId: string, documentId: string): Promise<unknown> {
   return getJson(
     `/cases/${encodeURIComponent(caseId)}/documents/${encodeURIComponent(documentId)}/ocr`
@@ -257,6 +371,11 @@ export async function fetchDocumentImage(caseId: string, documentId: string): Pr
     `/cases/${encodeURIComponent(caseId)}/documents/${encodeURIComponent(documentId)}/content`
   );
   return URL.createObjectURL(await response.blob());
+}
+
+export async function downloadCaseReport(caseId: string): Promise<Blob> {
+  const response = await apiFetch(`/cases/${encodeURIComponent(caseId)}/report`);
+  return response.blob();
 }
 
 export function getAuditVerification(caseId: string): Promise<AuditVerifyResponse> {

@@ -43,9 +43,6 @@ from medishield.domain.faithfulness import (
     verify_extracted_span,
 )
 from medishield.domain.fraud import (
-    FEATURE_WEIGHTS,
-    FRAUD_THRESHOLD_HIGH,
-    FRAUD_THRESHOLD_LOW,
     FraudDetectionEngine,
     FraudEvaluationContext,
     calculate_duplicate_claim_feature,
@@ -73,9 +70,6 @@ from medishield.domain.state_machine import (
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
-    "FEATURE_WEIGHTS",
-    "FRAUD_THRESHOLD_HIGH",
-    "FRAUD_THRESHOLD_LOW",
     "RULE_P1_SECURITY",
     "RULE_P1_TECH_FAIL",
     "RULE_P2_INCOMPLETE",

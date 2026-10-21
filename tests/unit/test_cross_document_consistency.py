@@ -215,7 +215,7 @@ def test_fraud_engine_no_stale_penalty_when_dates_reconciled() -> None:
         discharge_date=date(2025, 9, 18),
         dates_reconciled=True,
     )
-    assert feat.normalized_score == 0.0
+    assert feat.detected is False
     assert "reconciles" in feat.description.lower()
 
 

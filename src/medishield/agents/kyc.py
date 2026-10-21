@@ -17,6 +17,7 @@ from medishield.domain.contracts import (
 )
 from medishield.domain.faithfulness import verify_extracted_span
 from medishield.domain.provenance import ProvenanceValue
+from medishield.ocr.forensics import ELAVerdict, default_ela_engine
 
 
 @dataclass
@@ -78,8 +79,19 @@ def _get_default_seed_members() -> list[MemberRecord]:
             policy_active_start=date(2025, 7, 1),
             policy_active_end=date(2026, 7, 1),
         ),
+        MemberRecord(
+            member_id="MSH-EN-004",
+            first_name="Kavita",
+            last_name="Rao",
+            date_of_birth=date(1992, 4, 18),
+            ssn_last4="0004",
+            status="ACTIVE",
+            policy_id="POL-CORP-2026",
+            policy_active_start=date(2026, 1, 1),
+            policy_active_end=date(2026, 12, 31),
+        ),
     ]
-    seen_ids = {"MEM-12345", "MED-GLD-3592974", "PT_15075"}
+    seen_ids = {"MEM-12345", "MED-GLD-3592974", "PT_15075", "MSH-EN-004"}
     try:
         from medishield.db.seeder import FALLBACK_CLUSTERS, _parse_dob
 
@@ -157,10 +169,13 @@ class SqlMemberRepository:
     def __init__(self, session_or_factory: Any) -> None:
         self._session_or_factory = session_or_factory
 
-    def _get_session(self) -> Any:
+    def _get_session(self) -> tuple[Any, bool]:
+        from sqlalchemy.orm import Session
+        if isinstance(self._session_or_factory, Session):
+            return self._session_or_factory, False
         if callable(self._session_or_factory):
-            return self._session_or_factory()
-        return self._session_or_factory
+            return self._session_or_factory(), True
+        return Session(bind=self._session_or_factory), True
 
     def find_member(self, member_id: str) -> MemberRecord | None:
         with trace_span(
@@ -175,8 +190,7 @@ class SqlMemberRepository:
             from medishield.db.models import Enrollment, Member, Policy, PolicyVersion
 
             clean_id = member_id.strip()
-            session = self._get_session()
-            should_close = callable(self._session_or_factory)
+            session, should_close = self._get_session()
 
             try:
                 m = session.query(Member).filter(func.upper(Member.member_id) == clean_id.upper()).first()
@@ -242,7 +256,14 @@ class KYCAgent:
     """
 
     def __init__(self, member_repo: MemberLookupProtocol | None = None) -> None:
-        self.member_repo = member_repo or InMemoryMemberRepository()
+        if member_repo is not None:
+            self.member_repo = member_repo
+        else:
+            try:
+                from medishield.db.session import sync_engine
+                self.member_repo = SqlMemberRepository(sync_engine)
+            except Exception:  # noqa: BLE001
+                self.member_repo = InMemoryMemberRepository()
 
     def execute(
         self,
@@ -250,6 +271,9 @@ class KYCAgent:
         document_payloads: list[OCRDocumentPayload],
         service_date: date | None = None,
         reference_date: date | None = None,
+        raw_images: list[bytes] | None = None,
+        storage_backend: Any | None = None,
+        documents: list[dict[str, Any]] | None = None,
     ) -> KYCAgentOutput:
         """
         Executes KYC extraction, member verification, and tamper analysis.
@@ -330,8 +354,80 @@ class KYCAgent:
         logger.info("-> Extracted GOV ID (Ignored for DB lookup): %s", g_val)
         logger.info("=" * 60)
 
-        # 3. Detect physical and digital tampering indicators
-        tamper_signals, tamper_score = self._assess_tampering(all_spans_with_doc)
+        # 3. Detect physical and digital tampering indicators (including ELA forensics)
+        retrieval_failed_count = 0
+        images_analyzed_count = 0
+        supported_images_found = False
+        document_names: dict[str, str] = {
+            str(d.get("document_id")): str(d["file_name"])
+            for d in (documents or [])
+            if d.get("document_id") and d.get("file_name")
+        }
+        raw_image_doc_ids: list[str | None] = []
+
+        if raw_images is None and storage_backend is not None and documents:
+            raw_images = []
+            for doc in documents:
+                fn = (doc.get("file_name") or "").lower()
+                mt = (doc.get("mime_type") or "").lower()
+                doc_id = str(doc.get("document_id", "unknown"))
+                is_jpeg = fn.endswith((".jpg", ".jpeg")) or "jpeg" in mt
+
+                if is_jpeg:
+                    supported_images_found = True
+                    key = self._resolve_document_image_key(doc, case_id, storage_backend)
+                    if not key:
+                        logger.warning(
+                            "Cannot resolve storage key for image forensics: case_id=%s, doc_id=%s",
+                            case_id,
+                            doc_id,
+                        )
+                        retrieval_failed_count += 1
+                        continue
+
+                    if not storage_backend.exists(key):
+                        logger.warning(
+                            "Raw image not found in storage for ELA forensics: case_id=%s, doc_id=%s, object_key=%s",
+                            case_id,
+                            doc_id,
+                            key,
+                        )
+                        retrieval_failed_count += 1
+                        continue
+
+                    try:
+                        img_bytes = storage_backend.get_bytes(key)
+                        raw_images.append(img_bytes)
+                        raw_image_doc_ids.append(doc_id)
+                        images_analyzed_count += 1
+                        logger.info(
+                            "Retrieved raw image for ELA forensics: case_id=%s, doc_id=%s, object_key=%s, size_bytes=%d",
+                            case_id,
+                            doc_id,
+                            key,
+                            len(img_bytes),
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        retrieval_failed_count += 1
+                        logger.error(
+                            "Failed to retrieve image bytes from storage for ELA forensics: case_id=%s, doc_id=%s, object_key=%s, error_type=%s",
+                            case_id,
+                            doc_id,
+                            key,
+                            type(exc).__name__,
+                        )
+        elif raw_images is not None:
+            supported_images_found = bool(raw_images)
+            images_analyzed_count = len(raw_images)
+
+        tamper_signals, tamper_score = self._assess_tampering(
+            all_spans_with_doc,
+            raw_images=raw_images,
+            raw_image_doc_ids=raw_image_doc_ids,
+        )
+        for sig in tamper_signals:
+            if sig.document_id and not sig.document_name:
+                sig.document_name = document_names.get(sig.document_id)
         tamper_detected = tamper_score >= 0.30
 
         # 4. Perform database checks against Member repository
@@ -339,6 +435,30 @@ class KYCAgent:
         dob_matched = False
         policy_active = False
         flags: list[str] = []
+        if tamper_detected:
+            flags.append("FLAG_IMAGE_TAMPER_SUSPECTED")
+
+        if retrieval_failed_count > 0:
+            flags.append("FLAG_FORENSICS_RETRIEVAL_FAILED")
+            tamper_signals.append(
+                TamperSignal(
+                    signal_type="FORENSIC_RETRIEVAL_FAILED",
+                    severity="LOW",
+                    description=f"Forensics incomplete: {retrieval_failed_count} document image(s) could not be retrieved from storage.",
+                    confidence=0.50,
+                )
+            )
+
+        # Explicit distinction between forensic outcomes (Requirement 6)
+        forensic_status: str
+        if tamper_detected or any(s.signal_type == "ELA_ANOMALY" for s in tamper_signals):
+            forensic_status = "ANOMALY_DETECTED"
+        elif retrieval_failed_count > 0:
+            forensic_status = "IMAGE_RETRIEVAL_FAILED"
+        elif supported_images_found and images_analyzed_count > 0:
+            forensic_status = "FORENSICS_COMPLETED"
+        else:
+            forensic_status = "NO_SUPPORTED_IMAGE_AVAILABLE"
 
         if member_id_pv is not None and member_id_pv.value:
             matched_member = self.member_repo.find_member(str(member_id_pv.value))
@@ -406,6 +526,7 @@ class KYCAgent:
             id_expired=id_expired,
             tamper_score=tamper_score,
             flags=flags,
+            tamper_signals=tamper_signals,
         )
 
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
@@ -427,9 +548,61 @@ class KYCAgent:
             tamper_detected=tamper_detected,
             tamper_score=round(tamper_score, 2),
             tamper_signals=tamper_signals,
+            forensic_status=forensic_status,
             flags=flags,
             latency_ms=elapsed_ms,
         )
+
+    def _resolve_document_image_key(
+        self,
+        doc: dict[str, Any],
+        case_id: str,
+        storage_backend: Any | None = None,
+    ) -> str | None:
+        """
+        Resolves storage object key for a document image using strict precedence:
+        1. Canonical `object_key` from document metadata.
+        2. Legacy `storage_key` for backward compatibility.
+        3. Canonical constructed path: cases/{case_id}/raw/{document_id}_{sanitized_file_name}
+        4. Storage fallback paths if valid in backend.
+        """
+        # 1. Canonical object_key from document metadata
+        obj_key = doc.get("object_key")
+        if obj_key and isinstance(obj_key, str) and obj_key.strip():
+            return obj_key.strip()
+
+        # 2. Legacy storage_key for backward compatibility
+        legacy_key = doc.get("storage_key")
+        if legacy_key and isinstance(legacy_key, str) and legacy_key.strip():
+            return legacy_key.strip()
+
+        # 3. Canonical constructed path using naming contract (generate_raw_object_key)
+        doc_id = str(doc.get("document_id", "")).strip()
+        file_name = str(doc.get("file_name", "")).strip()
+        if case_id and doc_id and file_name:
+            from medishield.intake.storage import generate_raw_object_key
+            canonical_key = generate_raw_object_key(case_id, doc_id, file_name)
+            if storage_backend is None or storage_backend.exists(canonical_key):
+                return canonical_key
+
+        # 4. Fallback legacy patterns (only if verified to exist in backend)
+        if storage_backend is not None and case_id and doc_id:
+            candidate_fallbacks = [
+                f"cases/{case_id}/raw/{doc_id}.jpg",
+                f"raw/{case_id}/{doc_id}.jpg",
+            ]
+            for cand in candidate_fallbacks:
+                if storage_backend.exists(cand):
+                    return cand
+
+        # Default fallback to canonical key if metadata available
+        if case_id and doc_id:
+            if file_name:
+                from medishield.intake.storage import generate_raw_object_key
+                return generate_raw_object_key(case_id, doc_id, file_name)
+            return f"cases/{case_id}/raw/{doc_id}.jpg"
+
+        return None
 
     # ── Field Extraction Helpers with Span Grounding ─────────────────────────
 
@@ -682,12 +855,39 @@ class KYCAgent:
     def _assess_tampering(
         self,
         spans: list[tuple[OCRDocumentPayload, int, OCRTextSpan]],
+        raw_images: list[bytes] | None = None,
+        raw_image_doc_ids: list[str | None] | None = None,
     ) -> tuple[list[TamperSignal], float]:
-        """Inspects document signals for physical alteration or digital spoofing."""
+        """Inspects document signals for physical alteration or digital spoofing via OCR text and ELA forensics."""
         signals: list[TamperSignal] = []
         score = 0.0
 
-        for _, _, span in spans:
+        # 1. Error Level Analysis (ELA) on JPEG images (ADR-017 § Feature 3)
+        if raw_images:
+            for img_idx, img_bytes in enumerate(raw_images):
+                img_doc_id = (
+                    raw_image_doc_ids[img_idx]
+                    if raw_image_doc_ids and img_idx < len(raw_image_doc_ids)
+                    else None
+                )
+                try:
+                    ela_res = default_ela_engine.analyze_jpeg(img_bytes)
+                    if ela_res.status == ELAVerdict.ANOMALY_DETECTED:
+                        signals.append(
+                            TamperSignal(
+                                signal_type="ELA_ANOMALY",
+                                severity="HIGH",
+                                description=f"Error Level Analysis discovered localized JPEG compression anomalies ({ela_res.suspicious_region_count} regions, anomaly score: {ela_res.anomaly_score:.2f}).",
+                                confidence=ela_res.anomaly_score,
+                                document_id=img_doc_id,
+                            )
+                        )
+                        score = max(score, ela_res.anomaly_score)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Error during image ELA assessment: %s", exc)
+
+        # 2. Text-based semantic tampering markers
+        for span_doc, _, span in spans:
             text = span.text.lower()
             if "ela_anomaly" in text or "spliced" in text:
                 signals.append(
@@ -696,6 +896,7 @@ class KYCAgent:
                         severity="HIGH",
                         description="Error level analysis detected non-uniform compression boundary around text.",
                         confidence=0.90,
+                        document_id=span_doc.document_id,
                     )
                 )
                 score = max(score, 0.85)
@@ -707,6 +908,7 @@ class KYCAgent:
                         severity="MEDIUM",
                         description="Character baseline and font metrics mismatch adjacent layout text.",
                         confidence=0.80,
+                        document_id=span_doc.document_id,
                     )
                 )
                 score = max(score, 0.60)
@@ -718,6 +920,7 @@ class KYCAgent:
                         severity="HIGH",
                         description="Repetitive pixel patterns detected indicating digital clone tool erasure.",
                         confidence=0.88,
+                        document_id=span_doc.document_id,
                     )
                 )
                 score = max(score, 0.85)
@@ -735,14 +938,25 @@ class KYCAgent:
         id_expired: bool,
         tamper_score: float,
         flags: list[str],
+        tamper_signals: list[TamperSignal] | None = None,
     ) -> tuple[AgentVerdict, float]:
         """Adjudicates KYC verdict and confidence according to canonical rules."""
         # 1. Severe failure cases (Rule 14 & ADR-002: hard rejections)
         if "MEMBER_NOT_FOUND_IN_DB" in flags or "DEMOGRAPHIC_DOB_MISMATCH" in flags:
             return AgentVerdict.FAIL, 0.95
 
-        if id_expired or tamper_score >= 0.80:
+        if id_expired:
             return AgentVerdict.FAIL, 0.90
+
+        # Confirmed digital forgery (e.g. clone stamp or explicit forgery text) with high confidence
+        signals = tamper_signals or []
+        has_confirmed_forgery = any(s.signal_type in ("CLONE_STAMP", "EXPLICIT_FORGERY") for s in signals)
+        if tamper_score >= 0.80 and has_confirmed_forgery:
+            return AgentVerdict.FAIL, 0.90
+
+        # ELA anomalies or suspected tamper -> CONFLICT (routes to human review / ESCALATE via Decision Engine Rule P3)
+        if "FLAG_IMAGE_TAMPER_SUSPECTED" in flags or tamper_score >= 0.30:
+            return AgentVerdict.CONFLICT, max(0.60, min(0.85, tamper_score))
 
         # 2. Indeterminate cases (missing required identity elements or ungrounded facts)
         if member_id_pv is None or member_id_pv.provenance is None:

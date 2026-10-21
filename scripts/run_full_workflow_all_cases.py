@@ -53,6 +53,10 @@ from medishield.db.models import (
 )
 from medishield.db.seeder import seed_benchmark_dataset
 from medishield.db.session import sync_engine
+from medishield.eval.decision_labels import (
+    compute_decision_label_metrics,
+    resolve_adjudication_label,
+)
 from medishield.intake.storage import LocalFilesystemStorageBackend
 from medishield.worker.tasks import process_case_workflow_task
 
@@ -119,10 +123,6 @@ def main() -> None:
     confidence_wrong: list[float] = []
 
     approved_count = 0
-    expected_approve_count = 0
-    approved_of_expected_approve = 0
-    false_approve_count = 0
-    false_deny_count = 0
 
     total_start = time.perf_counter()
 
@@ -131,10 +131,7 @@ def main() -> None:
         pt_id = next((d.get("patient_id") for d in docs if d.get("patient_id")), "UNKNOWN")
         policy_num = next((d.get("policy_number") for d in docs if d.get("policy_number")), "UNKNOWN")
         is_fraud = any(d.get("fraud_label", False) for d in docs)
-        expected_decision = "ESCALATE" if is_fraud else "APPROVE"
-
-        if not is_fraud:
-            expected_approve_count += 1
+        adjudication_label = resolve_adjudication_label(docs)
 
         case_id = f"CASE-{cid.replace('_', '')}-{pt_id}"
         case_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, f"case_{case_id}")
@@ -242,18 +239,11 @@ def main() -> None:
         is_approved = (final_decision == "APPROVE")
         if is_approved:
             approved_count += 1
-            if not is_fraud:
-                approved_of_expected_approve += 1
+        if adjudication_label is not None:
+            if final_decision == adjudication_label:
                 confidence_correct.append(conf)
             else:
-                false_approve_count += 1
                 confidence_wrong.append(conf)
-        else:
-            if not is_fraud:
-                false_deny_count += 1
-                confidence_wrong.append(conf)
-            else:
-                confidence_correct.append(conf)
 
         print(
             f"[{idx:02d}/30] {cid} ({case_id}) -> {final_decision:<8} via {rule_id:<25} "
@@ -281,8 +271,8 @@ def main() -> None:
             "fraud_verdict": fraud_v,
             "clinical_verdict": clin_v,
             "clinical_confidence": clin_c,
-            "expected_decision": expected_decision,
-            "is_fraud_ground_truth": is_fraud,
+            "reviewed_adjudication_label": adjudication_label,
+            "fraud_metadata_label": is_fraud,
             "justification": justification,
             "explanation": explanation,
             "consistency": consistency_snap,
@@ -290,16 +280,18 @@ def main() -> None:
 
     total_duration = time.perf_counter() - total_start
     total_cases = len(eval_results)
+    decision_metrics = compute_decision_label_metrics(eval_results)
 
     print("\n" + "=" * 80)
     print("EMPIRICAL BENCHMARK METRICS SUMMARY (FULL MULTI-AGENT WORKFLOW)")
     print("=" * 80)
     print(f"Total Cases Adjudicated               : {total_cases}")
     print(f"Total Approved (P6 STP)               : {approved_count} / {total_cases} ({approved_count/total_cases*100:.1f}%)")
-    print(f"Ground Truth Expected Approvals       : {expected_approve_count}")
-    print(f"Approved among Ground Truth Approvals : {approved_of_expected_approve} / {expected_approve_count} ({approved_of_expected_approve/max(expected_approve_count,1)*100:.1f}%)")
-    print(f"False-Approve Rate                    : {false_approve_count} / {total_cases} ({false_approve_count/total_cases*100:.1f}%)")
-    print(f"False-Recommend-Deny (Reject) Rate    : {false_deny_count} / {expected_approve_count} ({false_deny_count/max(expected_approve_count,1)*100:.1f}%)")
+    print(f"Independently Labelled Cases          : {decision_metrics['labelled_case_count']} / {total_cases}")
+    print(f"Unlabelled Cases                      : {decision_metrics['unlabelled_case_count']}")
+    print(f"Decision Accuracy                     : {decision_metrics['decision_accuracy'] if decision_metrics['decision_accuracy'] is not None else 'N/A'}")
+    print(f"False-Approve Rate (labelled only)    : {decision_metrics['false_approve_rate'] if decision_metrics['false_approve_rate'] is not None else 'N/A'}")
+    print(f"False-Deny Rate (labelled approvals)  : {decision_metrics['false_deny_rate'] if decision_metrics['false_deny_rate'] is not None else 'N/A'}")
     print(f"Total Execution Time                  : {total_duration:.2f}s (avg: {total_duration/total_cases:.2f}s/case)")
 
     print("\n--- Distribution of Matched Rules ---")
@@ -310,10 +302,7 @@ def main() -> None:
     diag_summary = {
         "total_cases": total_cases,
         "approved_count": approved_count,
-        "expected_approve_count": expected_approve_count,
-        "approved_of_expected_approve": approved_of_expected_approve,
-        "false_approve_count": false_approve_count,
-        "false_deny_count": false_deny_count,
+        "decision_metrics": decision_metrics,
         "first_failing_rules": dict(first_failing_rules),
         "all_failing_rules": dict(all_failing_rules),
         "blocker_cooccurrence": {f"{k[0]}___{k[1]}": v for k, v in blocker_cooccurrence.items()},
@@ -334,13 +323,7 @@ def main() -> None:
             "total_cases": total_cases,
             "approved_count": approved_count,
             "approval_rate": round(approved_count / total_cases * 100.0, 1),
-            "expected_approvals": expected_approve_count,
-            "approved_of_expected": approved_of_expected_approve,
-            "percent_approved_of_expected": round(approved_of_expected_approve / max(expected_approve_count, 1) * 100.0, 1),
-            "false_approve_count": false_approve_count,
-            "false_approve_rate": round(false_approve_count / total_cases * 100.0, 1),
-            "false_deny_count": false_deny_count,
-            "false_deny_rate": round(false_deny_count / max(expected_approve_count, 1) * 100.0, 1),
+            **decision_metrics,
         },
         "first_failing_rules": dict(first_failing_rules),
         "all_failing_rules": dict(all_failing_rules),

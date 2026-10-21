@@ -118,6 +118,8 @@ Every synthetic case is accompanied by a canonical JSON manifest:
 }
 ```
 
+For real-world benchmark cohorts, a fraud label is not an expected business decision. Decision accuracy, false-approval, and false-denial metrics must use an independently reviewed case-level `adjudication_label` with value `APPROVE`, `REJECT`, or `ESCALATE`. If no reviewed label exists, the case is unlabelled and excluded from decision-quality denominators; report its count separately. Document-level `fraud_label` remains available only for fraud-model evaluation and must never be promoted to an adjudication outcome by the evaluator.
+
 ---
 
 ## 5. Evaluation Metrics & Scoring Rubric

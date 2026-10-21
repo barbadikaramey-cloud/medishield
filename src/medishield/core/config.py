@@ -51,6 +51,12 @@ class Settings(BaseSettings):
 
     # Vector Storage
     QDRANT_URL: str = "http://localhost:6333"
+    QDRANT_CLOUD_URL: str | None = None
+    QDRANT_CLOUD_API_KEY: str | None = None
+    QDRANT_COLLECTION_NAME: str = "authoritative_policy_chunks"
+    QDRANT_VECTOR_NAME: str | None = None
+    EMBEDDING_MODEL: str = "gemini-embedding-001"
+    EMBEDDING_DIMENSIONS: int = Field(default=512, ge=128, le=3072)
     QDRANT_PATH: str = "data/qdrant"
     STRICT_EVALUATION_MODE: bool = False
     EVALUATION_DATABASE_URL: str | None = None
@@ -97,6 +103,33 @@ class Settings(BaseSettings):
             "Disabled by default so traces rely solely on ephemeral root run UUIDs."
         ),
     )
+    LANGSMITH_AGENTS_ONLY: bool = Field(
+        default=False,
+        description=(
+            "When True, LangSmith distributed tracing is strictly restricted to agent and workflow nodes, "
+            "filtering out low-level storage I/O, OCR preprocessor tools, and repository micro-spans."
+        ),
+    )
+    FORCE_VLM_EXTRACTION: bool = Field(
+        default=False,
+        description="Force VLM extraction even on clean documents (primarily for testing and evaluation).",
+    )
+    CLINICAL_SUPPORT_APPROVAL_MIN_RATIO: float | None = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Fully supported billed-line ratio above which a clinical-only INDETERMINATE alignment no longer "
+            "escalates. Unset to disable."
+        ),
+    )
+    CLINICAL_UNCERTAINTY_APPROVAL_ENABLED: bool = Field(
+        default=True,
+        description=(
+            "Allow P6 approval when clinical findings are indeterminate without verified contradiction, "
+            "with discrepancy details preserved in the approval rationale."
+        ),
+    )
 
     # LLM Gateway (Groq)
     GROQ_API_KEY: str | None = Field(
@@ -119,17 +152,55 @@ class Settings(BaseSettings):
         ],
         description="Ordered list of Groq fallback models when primary model (e.g. gpt-oss-120b) hits rate limits or errors",
     )
+    GROQ_FALLBACK_API_KEYS: list[str] | str = Field(
+        default_factory=list,
+        description="Ordered list of fallback Groq API keys from different accounts for rate-limit failover",
+    )
     GROQ_BASE_URL: str = Field(
         default="https://api.groq.com/openai/v1",
         description="Base URL for OpenAI-compatible Groq API endpoints",
     )
     GROQ_TIMEOUT_SECONDS: float = Field(
-        default=30.0,
+        default=10.0,
         description="HTTP client timeout in seconds for Groq API requests",
     )
     GROQ_MAX_RETRIES: int = Field(
-        default=2,
+        default=1,
         description="Maximum transient retry attempts for rate limits or network issues",
+    )
+
+    # LLM Fallback: Cerebras
+    CEREBRAS_API_KEY: str | None = Field(
+        default=None,
+        description="Cerebras API key for ultra-fast Llama inference fallback",
+    )
+    CEREBRAS_MODEL: str = Field(
+        default="llama3.1-8b",
+        description="Primary Cerebras model identifier (e.g. llama3.1-8b, llama-3.3-70b)",
+    )
+    CEREBRAS_FALLBACK_MODELS: list[str] | str = Field(
+        default_factory=lambda: [
+            "llama-3.3-70b",
+            "llama3.1-70b",
+        ],
+        description="Ordered list of Cerebras fallback models",
+    )
+    CEREBRAS_BASE_URL: str = Field(
+        default="https://api.cerebras.ai/v1",
+        description="Base URL for OpenAI-compatible Cerebras API endpoints",
+    )
+
+    # LLM Fallback: Gemini (Text & JSON)
+    GEMINI_LLM_MODEL: str = Field(
+        default="gemini-3.5-flash",
+        description="Gemini model identifier for structured text/JSON LLM generation fallback",
+    )
+    GEMINI_LLM_FALLBACK_MODELS: list[str] | str = Field(
+        default_factory=lambda: [
+            "gemini-3.5-flash-lite",
+            "gemini-3.8-flash",
+        ],
+        description="Ordered list of Gemini LLM fallback models",
     )
 
     # VLM Extraction
@@ -171,6 +242,9 @@ class Settings(BaseSettings):
 
     @field_validator(
         "GROQ_FALLBACK_MODELS",
+        "GROQ_FALLBACK_API_KEYS",
+        "CEREBRAS_FALLBACK_MODELS",
+        "GEMINI_LLM_FALLBACK_MODELS",
         "GEMINI_FALLBACK_MODELS",
         "HF_VLM_FALLBACK_MODELS",
         mode="after",

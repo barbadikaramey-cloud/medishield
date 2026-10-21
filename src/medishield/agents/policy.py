@@ -1,10 +1,13 @@
 """Two-Stage Policy Evaluation Agent, Claim-Ready Synchronization, and RAG Grounding (Spec 09, ADR-003, ADR-006)."""
 
+import logging
 import re
 import time
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
 
 from medishield.core.llm import (
     GroqLLMClient,
@@ -14,7 +17,7 @@ from medishield.core.llm import (
 )
 from medishield.core.tracing import trace_span
 from medishield.db.catalog import CodeCatalogRepository
-from medishield.db.enums import AgentVerdict, CodingSystem
+from medishield.db.enums import AgentVerdict, CodingSystem, IndeterminateReason
 from medishield.domain.contracts import (
     CandidatePolicy,
     PolicyClauseCitation,
@@ -22,155 +25,44 @@ from medishield.domain.contracts import (
     PolicyCoverageOutput,
 )
 
-# ── Clinical Code Expansion Dictionary (Spec 09 § 3.2) ───────────────────────
+# ── Clinical Code Expansion Dictionary (Spec 09 § 3.2, ADR-012, ADR-016) ─────────────
 
-CPT_EXPANSION_DICTIONARY: dict[str, dict[str, str]] = {
-    "99213": {
-        "title": "Office/Outpatient Visit Low Complexity",
-        "description": "Office or other outpatient visit for evaluation and management of established patient 20-29 minutes low complexity medical decision making",
-        "category": "OUTPATIENT_EVALUATION",
-    },
-    "99214": {
-        "title": "Office/Outpatient Visit Moderate Complexity",
-        "description": "Office or outpatient evaluation and management established patient 30-39 minutes moderate complexity",
-        "category": "OUTPATIENT_EVALUATION",
-    },
-    "99215": {
-        "title": "Office/Outpatient Visit High Complexity",
-        "description": "Office or outpatient evaluation and management established patient 40-54 minutes high complexity",
-        "category": "OUTPATIENT_EVALUATION",
-    },
-    "99203": {
-        "title": "Office/Outpatient Visit New Patient Low",
-        "description": "Office or other outpatient visit new patient 30-44 minutes low complexity",
-        "category": "OUTPATIENT_EVALUATION",
-    },
-    "99204": {
-        "title": "Office/Outpatient Visit New Patient Moderate",
-        "description": "Office or other outpatient visit new patient 45-59 minutes moderate complexity",
-        "category": "OUTPATIENT_EVALUATION",
-    },
-    "99205": {
-        "title": "Office/Outpatient Visit New Patient High",
-        "description": "Office or other outpatient visit new patient 60-74 minutes high complexity",
-        "category": "OUTPATIENT_EVALUATION",
-    },
-    "99283": {
-        "title": "Emergency Department Visit Moderate",
-        "description": "Emergency department visit for evaluation and management of patient moderate severity",
-        "category": "EMERGENCY",
-    },
-    "93000": {
-        "title": "Electrocardiogram Routine ECG",
-        "description": "Electrocardiogram routine ECG with at least 12 leads with interpretation and report diagnostic radiology and cardiology",
-        "category": "CARDIOLOGY_DIAGNOSTIC",
-    },
-    "71045": {
-        "title": "Chest X-Ray Single View",
-        "description": "Radiologic examination chest single view diagnostic radiology imaging",
-        "category": "RADIOLOGY",
-    },
-    "71250": {
-        "title": "Computed Tomography Thorax",
-        "description": "Computed tomography thorax diagnostic imaging radiology scan",
-        "category": "RADIOLOGY",
-    },
-    "80053": {
-        "title": "Comprehensive Metabolic Panel",
-        "description": "Comprehensive metabolic panel diagnostic laboratory clinical pathology test",
-        "category": "LABORATORY",
-    },
-    "85025": {
-        "title": "Complete Blood Count Differential",
-        "description": "Complete blood count automated with automated differential WBC diagnostic lab hematology",
-        "category": "LABORATORY",
-    },
-    "36415": {
-        "title": "Routine Venipuncture Collection",
-        "description": "Routine venipuncture capillary or venous blood specimen collection",
-        "category": "LABORATORY",
-    },
-    "90837": {
-        "title": "Psychotherapy 60 Minutes",
-        "description": "Psychotherapy 60 minutes with patient outpatient behavioral health mental health",
-        "category": "BEHAVIORAL_HEALTH",
-    },
-    "47562": {
-        "title": "Laparoscopic Cholecystectomy",
-        "description": "Laparoscopy surgical cholecystectomy surgical excision removal of gallbladder inpatient surgical coverage",
-        "category": "SURGICAL_INPATIENT",
-    },
-    "44970": {
-        "title": "Laparoscopic Appendectomy",
-        "description": "Laparoscopy surgical appendectomy removal of appendix inpatient surgical coverage",
-        "category": "SURGICAL_INPATIENT",
-    },
-    "00790": {
-        "title": "Anesthesia Intraperitoneal Procedures",
-        "description": "Anesthesia for intraperitoneal procedures upper abdomen surgical anesthesia",
-        "category": "ANESTHESIA",
-    },
-    "27447": {
-        "title": "Total Knee Arthroplasty",
-        "description": "Arthroplasty knee condyle and plateau total knee replacement major surgical procedure",
-        "category": "SURGICAL_INPATIENT",
-    },
-    "43239": {
-        "title": "Esophagogastroduodenoscopy Biopsy",
-        "description": "Esophagogastroduodenoscopy flexible transoral with directed biopsy endoscopic evaluation",
-        "category": "ENDOSCOPY",
-    },
-    "15780": {
-        "title": "Dermabrasion Total Face Cosmetic",
-        "description": "Dermabrasion total face elective cosmetic skin resurfacing aesthetic procedure non-reconstructive",
-        "category": "COSMETIC_EXCLUSION",
-    },
-    "17000": {
-        "title": "Destruction Premalignant Lesion",
-        "description": "Destruction premalignant lesion first lesion elective cosmetic dermatologic exclusion",
-        "category": "COSMETIC_EXCLUSION",
-    },
-    "71046": {
-        "title": "Chest X-Ray 2 Views",
-        "description": "Radiologic examination chest 2 views diagnostic radiology imaging",
-        "category": "RADIOLOGY",
-    },
-    "70553": {
-        "title": "MRI Brain With Contrast",
-        "description": "Magnetic resonance imaging brain with contrast material diagnostic radiology imaging",
-        "category": "RADIOLOGY",
-    },
-    "72148": {
-        "title": "MRI Lumbar Spine Without Contrast",
-        "description": "Magnetic resonance imaging lumbar spine without contrast material diagnostic radiology imaging",
-        "category": "RADIOLOGY",
-    },
-    "99284": {
-        "title": "Emergency Department Visit High Severity",
-        "description": "Emergency department visit for evaluation and management high severity problem",
-        "category": "EMERGENCY",
-    },
-    "93306": {
-        "title": "Echocardiography Transthoracic Complete",
-        "description": "Echocardiography transthoracic complete with spectral and color Doppler cardiology diagnostic",
-        "category": "CARDIOLOGY_DIAGNOSTIC",
-    },
-    "33533": {
-        "title": "CABG Arterial Single Vessel",
-        "description": "Coronary artery bypass using arterial graft single vessel cardiovascular surgical inpatient",
-        "category": "SURGICAL_INPATIENT",
-    },
-    "29827": {
-        "title": "Shoulder Arthroscopy Rotator Cuff",
-        "description": "Arthroscopy shoulder surgical with rotator cuff repair musculoskeletal surgical inpatient",
-        "category": "SURGICAL_INPATIENT",
-    },
-    "99291": {
-        "title": "Critical Care Evaluation First 30-74 Minutes",
-        "description": "Critical care evaluation and management of the critically ill or injured patient first 30-74 minutes ICU emergency intensive care",
-        "category": "EMERGENCY_CRITICAL",
-    },
-}
+
+class _CptExpansionDictionaryProxy(dict[str, Any]):
+    """Dynamic CPT expansion dictionary proxy querying relational medical catalog (ADR-012, ADR-016)."""
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        try:
+            from medishield.db.catalog import SqlCodeCatalogRepository
+            from medishield.db.enums import CodingSystem
+            from medishield.db.session import sync_engine
+
+            repo = SqlCodeCatalogRepository(sync_engine)
+            details = repo.get_code_details(str(key), CodingSystem.CPT)
+            if details:
+                return {
+                    "title": details.short_description,
+                    "description": details.long_description or details.short_description,
+                    "category": details.category or "General",
+                }
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("CPT dictionary proxy lookup failed for %s: %s", key, exc)
+        return default
+
+    def __getitem__(self, key: Any) -> Any:
+        res = self.get(key)
+        if res is None:
+            raise KeyError(key)
+        return res
+
+    def __contains__(self, key: Any) -> bool:
+        return self.get(key) is not None
+
+    def __bool__(self) -> bool:
+        return True
+
+
+CPT_EXPANSION_DICTIONARY: dict[str, dict[str, str]] = _CptExpansionDictionaryProxy()
 
 POLICY_STOP_WORDS: set[str] = {
     "a", "an", "the", "and", "or", "for", "of", "to", "in", "at", "on",
@@ -439,6 +331,8 @@ class PolicyEnrollmentRecord:
     effective_end_date: date | None = None
     status: str = "ACTIVE"
     active_riders: list[str] = field(default_factory=list)
+    payer_product: str | None = None
+    jurisdiction: str | None = None
 
 
 class PolicyEnrollmentLookupProtocol(Protocol):
@@ -482,6 +376,14 @@ def _get_default_policy_enrollments() -> list[PolicyEnrollmentRecord]:
             version_tag="v1.0",
             plan_name="MediShield Gold Plan",
             effective_start_date=date(2025, 1, 1),
+            effective_end_date=date(2026, 12, 31),
+        ),
+        PolicyEnrollmentRecord(
+            member_id="MSH-EN-004",
+            policy_id="POL-CORP-2026",
+            version_tag="v2.0",
+            plan_name="Comprehensive Gold PPO",
+            effective_start_date=date(2026, 1, 1),
             effective_end_date=date(2026, 12, 31),
         ),
     ]
@@ -612,6 +514,8 @@ class SqlPolicyEnrollmentRepository:
                             effective_start_date=enr.coverage_start_date,
                             effective_end_date=enr.coverage_end_date,
                             status=enr.status,
+                            payer_product=pol.payer_product,
+                            jurisdiction=pol.jurisdiction,
                         )
                     )
                 span.set_summary(
@@ -673,6 +577,8 @@ class PolicyContextAgent:
                     effective_end_date=r.effective_end_date,
                     plan_name=r.plan_name,
                     active_riders=r.active_riders,
+                    payer_product=r.payer_product,
+                    jurisdiction=r.jurisdiction,
                 )
             )
 
@@ -720,7 +626,17 @@ class PolicyCoverageAgent:
     ) -> None:
         self.corpus_repo = corpus_repo or PolicyCorpusRepository()
         self.llm_client = llm_client if llm_client is not None else default_groq_client
-        self.code_catalog = code_catalog
+        self.code_catalog: CodeCatalogRepository | None = None
+        if code_catalog is not None:
+            self.code_catalog = code_catalog
+        else:
+            try:
+                from medishield.db.catalog import SqlCodeCatalogRepository
+                from medishield.db.session import sync_engine
+
+                self.code_catalog = SqlCodeCatalogRepository(sync_engine)
+            except Exception:  # noqa: BLE001
+                self.code_catalog = None
 
     def execute(
         self,
@@ -749,6 +665,7 @@ class PolicyCoverageAgent:
                 coverage_percentage=0.0,
                 effective_on_service_date=True,
                 reasoning_summary="No procedure (CPT) or revenue billing codes provided for coverage evaluation.",
+                reason_codes=[IndeterminateReason.MISSING_INPUT],
                 latency_ms=elapsed_ms,
             )
 
@@ -797,6 +714,7 @@ class PolicyCoverageAgent:
                 coverage_percentage=0.0,
                 effective_on_service_date=True,
                 reasoning_summary=f"No matching policy clauses found in corpus for policy {policy_id} {policy_version}.",
+                reason_codes=[IndeterminateReason.NO_POLICY_CLAUSE],
                 latency_ms=elapsed_ms,
             )
 
@@ -868,10 +786,11 @@ class PolicyCoverageAgent:
             copay_pct = max(c.copay_percentage for c in matching_covered_chunks)
         else:
             lowest_coverage_pct = 0.0
-            deductible_limit = 500.0
-            copay_pct = 20.0
+            deductible_limit = None
+            copay_pct = None
 
         # 4. Adjudicate Verdict & Reason Summary (Rule 14 & Spec 09 § 4.1)
+        reason_codes: list[IndeterminateReason] = []
         if identified_exclusions:
             # Verified hard exclusion -> FAIL
             verdict = AgentVerdict.FAIL
@@ -879,22 +798,10 @@ class PolicyCoverageAgent:
             covered = False
             coverage_percentage = 0.0
             reasoning = f"Policy Exclusion: Claim contains excluded procedures ({'; '.join(identified_exclusions)})."
-        elif prior_authorization_required and not prior_authorization_present:
-            # Missing mandatory prior auth -> INDETERMINATE (escalates to info/review)
-            verdict = AgentVerdict.INDETERMINATE
-            confidence = 0.80
-            covered = True
-            coverage_percentage = lowest_coverage_pct
-            reasoning = "Prior authorization required for billed procedure but not provided in intake."
-        elif not all(c.verified_in_corpus for c in cited_clauses):
-            # Ungrounded citation -> INDETERMINATE
-            verdict = AgentVerdict.INDETERMINATE
-            confidence = 0.40
-            coverage_percentage = lowest_coverage_pct
-            reasoning = "One or more cited policy clauses could not be verified in the authoritative corpus."
         elif not matching_covered_chunks:
             # Positive scope not satisfied: retrieved clauses do not match billed codes
             verdict = AgentVerdict.INDETERMINATE
+            reason_codes = [IndeterminateReason.NO_POLICY_CLAUSE]
             confidence = 0.50
             covered = False
             coverage_percentage = 0.0
@@ -902,6 +809,21 @@ class PolicyCoverageAgent:
                 f"No applicable covered benefit clauses found in policy {policy_id} {policy_version} "
                 f"for billed codes ({', '.join(sorted(cpt_codes + (rev_codes or [])))})."
             )
+        elif not all(c.verified_in_corpus for c in cited_clauses):
+            # Ungrounded citation -> INDETERMINATE
+            verdict = AgentVerdict.INDETERMINATE
+            reason_codes = [IndeterminateReason.UNVERIFIED_POLICY_CITATION]
+            confidence = 0.40
+            coverage_percentage = lowest_coverage_pct
+            reasoning = "One or more cited policy clauses could not be verified in the authoritative corpus."
+        elif prior_authorization_required and not prior_authorization_present:
+            # Missing mandatory prior auth -> INDETERMINATE (escalates to info/review)
+            verdict = AgentVerdict.INDETERMINATE
+            reason_codes = [IndeterminateReason.PRIOR_AUTH_MISSING]
+            confidence = 0.80
+            covered = True
+            coverage_percentage = lowest_coverage_pct
+            reasoning = "Prior authorization required for billed procedure but not provided in intake."
         else:
             verdict = AgentVerdict.PASS
             confidence = 0.95
@@ -940,6 +862,7 @@ class PolicyCoverageAgent:
             applicable_service_codes=sorted(set(applicable_service_codes)),
             prior_authorization_required=prior_authorization_required,
             prior_authorization_present=prior_authorization_present,
+            reason_codes=reason_codes,
             reasoning_summary=reasoning,
             latency_ms=elapsed_ms,
         )

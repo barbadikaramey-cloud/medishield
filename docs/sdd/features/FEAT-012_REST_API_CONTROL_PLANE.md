@@ -76,4 +76,3 @@ Provides the authoritative HTTP control plane mediating client operations (intak
 - [ ] RBAC guard rejects unauthorized roles with `403 Forbidden` (e.g., non-admin calling policy publish).
 - [ ] `GET /api/v1/audit/cases/{case_id}` verifies cryptographic HMAC chain and returns `chain_intact: true`.
 - [ ] All unit and integration tests pass (`pytest tests/`) and lint checks pass (`ruff check`).
-

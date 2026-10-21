@@ -18,11 +18,13 @@ from medishield.agents.policy import (
     PolicyCoverageAgent,
     resolve_claim_ready_policy,
 )
-from medishield.core.tracing import trace_span
+from medishield.core.config import settings
+from medishield.core.tracing import scrub_phi_text, trace_span
 from medishield.db.audit import GENESIS_HASH, compute_audit_hash
 from medishield.db.enums import (
     AgentVerdict,
     BusinessDecision,
+    CodingSystem,
     DocumentType,
     EscalationSubReason,
     WorkflowState,
@@ -31,6 +33,12 @@ from medishield.domain.clinical_align import (
     DeterministicClinicalAlignmentEngine,
     DischargeSummaryAnalysis,
 )
+from medishield.domain.clinical_determination import (
+    ClinicalDeterminationEngine,
+    ClinicalDeterminationLine,
+    ValidatedDetermination,
+)
+from medishield.domain.clinical_interpreter import ClinicalRelationshipInterpreter
 from medishield.domain.contracts import (
     BedDayBillingRuleContract,
     BedDayReconciliation,
@@ -43,6 +51,7 @@ from medishield.domain.contracts import (
     FraudAgentOutput,
     KYCAgentOutput,
     LineClinicalEvidence,
+    MedicalNecessityStatus,
     PerformanceEvidenceStatus,
     PolicyCoverageOutput,
     PriorAuthRequirementStatus,
@@ -55,9 +64,19 @@ from medishield.domain.decision import (
     DeterministicDecisionEngine,
     build_decision_diagnostics,
 )
-from medishield.domain.faithfulness import evaluate_case_consistency, parse_medical_date
+from medishield.domain.faithfulness import (
+    evaluate_case_consistency,
+    parse_medical_date,
+    verify_clinical_evidence_reference,
+)
 from medishield.domain.fraud import DeterministicFraudEngine, FraudEvaluationContext
-from medishield.domain.provenance import FieldProvenance
+from medishield.domain.provenance import (
+    ClinicalAssertionStatus,
+    EvidenceSource,
+    EvidenceVerificationStatus,
+    FieldProvenance,
+    ProvenanceType,
+)
 from medishield.domain.state_machine import resolve_decision_workflow_state
 from medishield.intake.completeness import (
     ClassifiedDocumentItem,
@@ -66,6 +85,160 @@ from medishield.intake.completeness import (
 from medishield.intake.storage import StorageBackend
 from medishield.ocr.preprocessor import OCRPreprocessorEngine, retrieve_ocr_payload
 from medishield.workflows.state import CaseState
+
+
+def _claim_value_and_verified_span(
+    raw_value: Any,
+    claim_ocr_payloads: dict[str, Any] | None = None,
+) -> tuple[str, FieldProvenance | None]:
+    if isinstance(raw_value, dict):
+        value = raw_value.get("value", "")
+        raw_provenance = raw_value.get("provenance")
+    else:
+        value = getattr(raw_value, "value", raw_value)
+        raw_provenance = getattr(raw_value, "provenance", None)
+    try:
+        provenance = (
+            raw_provenance
+            if isinstance(raw_provenance, FieldProvenance)
+            else FieldProvenance.model_validate(raw_provenance)
+            if raw_provenance
+            else None
+        )
+    except ValueError:
+        provenance = None
+    if provenance is not None and provenance.evidence_source == EvidenceSource.OCR and provenance.verification_status == EvidenceVerificationStatus.VERIFIED:
+        return str(value or "").strip(), provenance
+    payload = (claim_ocr_payloads or {}).get(provenance.document_id) if provenance else None
+    if provenance and payload:
+        _, provenance = verify_clinical_evidence_reference(provenance, payload)
+        if (
+            provenance.evidence_source == EvidenceSource.OCR
+            and provenance.verification_status == EvidenceVerificationStatus.VERIFIED
+            and _clinical_code_matches_text(str(value or ""), provenance.text_content)
+        ):
+            return str(value or "").strip(), provenance
+    provenance = None
+    return str(value or "").strip(), provenance
+
+
+def _clinical_code_matches_text(code: str, text: str) -> bool:
+    normalize = lambda value: re.sub(r"[^A-Z0-9]", "", value.upper())
+    normalized_code = normalize(code)
+    normalized_text = normalize(text)
+    if not normalized_code:
+        return False
+    variants = {normalized_code}
+    if normalized_code[0] == "I":
+        variants.add("1" + normalized_code[1:])
+    return any(variant in normalized_text for variant in variants)
+
+
+def _clinical_relationship_candidates(
+    service_lines: list[dict[str, Any]],
+    diagnosis_codes: list[str],
+    claims_summary: dict[str, Any],
+    clinical_spans: list[FieldProvenance],
+    guideline_repo: Any,
+    claim_ocr_payloads: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]]]:
+    code_details = getattr(guideline_repo, "get_active_code_details", None)
+    if not code_details:
+        return [], {}
+    code_cache: dict[tuple[str, CodingSystem, date | None], dict[str, str] | None] = {}
+
+    def get_details(code: str, coding_system: CodingSystem, service_date: date | None) -> dict[str, str] | None:
+        key = (code.upper(), coding_system, service_date)
+        if key not in code_cache:
+            code_cache[key] = code_details(code, coding_system, service_date)
+        return code_cache[key]
+
+    raw_diagnoses: dict[str, list[FieldProvenance]] = {}
+    for item in claims_summary.get("icd10_codes") or []:
+        code, provenance = _claim_value_and_verified_span(item, claim_ocr_payloads)
+        if code and provenance:
+            raw_diagnoses.setdefault(code.upper(), []).append(provenance)
+
+    candidates: list[dict[str, Any]] = []
+    contexts: dict[int, dict[str, Any]] = {}
+    for index, line in enumerate(service_lines, start=1):
+        hcpcs, hcpcs_span = _claim_value_and_verified_span(line.get("hcpcs"), claim_ocr_payloads)
+        revenue_code, revenue_span = _claim_value_and_verified_span(line.get("rev_code"), claim_ocr_payloads)
+        line_number = int(line.get("line_number", index))
+        service_date_raw, _ = _claim_value_and_verified_span(line.get("service_date"), claim_ocr_payloads)
+        service_date = parse_medical_date(service_date_raw) if service_date_raw else None
+        details = None
+        service_code = ""
+        service_span = None
+        service_systems = (CodingSystem.CPT, CodingSystem.HCPCS)
+        if hcpcs and hcpcs_span:
+            for coding_system in service_systems:
+                details = get_details(hcpcs, coding_system, service_date)
+                if details:
+                    service_code = hcpcs
+                    service_span = hcpcs_span
+                    break
+        if details is None and revenue_code and revenue_span:
+            details = get_details(revenue_code, CodingSystem.REV_CODE, service_date)
+            if details:
+                service_code = revenue_code
+                service_span = revenue_span
+                service_systems = (CodingSystem.REV_CODE,)
+        if details is None or service_span is None:
+            continue
+
+        diagnosis_candidates: list[dict[str, Any]] = []
+        line_context: dict[str, Any] = {
+            "service_code": service_code,
+            "service_description": details["description"],
+            "service_evidence_id": service_span.span_id,
+            "diagnosis_evidence_by_code": {},
+            "diagnosis_description_by_code": {},
+            "clinical_evidence_by_code": {},
+        }
+        for diagnosis_code in diagnosis_codes:
+            diagnosis_details = get_details(diagnosis_code, CodingSystem.ICD10_CM, service_date)
+            if not diagnosis_details:
+                continue
+            clinical_evidence = [
+                span for span in clinical_spans
+                if span.evidence_source == EvidenceSource.OCR
+                and span.verification_status == EvidenceVerificationStatus.VERIFIED
+                and span.span_id
+                and _clinical_code_matches_text(diagnosis_code, span.text_content)
+            ]
+            if not clinical_evidence:
+                continue
+            diagnosis_spans = raw_diagnoses.get(diagnosis_code.upper(), [])
+            diagnosis_span = diagnosis_spans[0] if diagnosis_spans else clinical_evidence[0]
+            diagnosis_candidates.append({
+                "diagnosis_code": diagnosis_code,
+                "diagnosis_description": diagnosis_details["description"],
+                "diagnosis_evidence_ids": [diagnosis_span.span_id],
+                "clinical_evidence_ids": [span.span_id for span in clinical_evidence[:5]],
+                "clinical_evidence": [
+                    {"id": span.span_id, "text": scrub_phi_text(span.text_content[:500])}
+                    for span in clinical_evidence[:5]
+                ],
+            })
+            line_context["diagnosis_evidence_by_code"][diagnosis_code] = diagnosis_span
+            line_context["diagnosis_description_by_code"][diagnosis_code] = diagnosis_details["description"]
+            line_context["clinical_evidence_by_code"][diagnosis_code] = clinical_evidence[:5]
+
+        if not diagnosis_candidates:
+            continue
+        candidates.append({
+            "line_number": line_number,
+            "service_code": service_code,
+            "service_coding_system": details["coding_system"],
+            "service_description": details["description"],
+            "service_evidence_ids": [service_span.span_id],
+            "service_evidence": [{"id": service_span.span_id, "text": scrub_phi_text(service_span.text_content[:300])}],
+            "diagnosis_candidates": diagnosis_candidates,
+        })
+        contexts[line_number] = line_context
+
+    return candidates, contexts
 
 # ── Intake Nodes (Nodes 1 - 4) ────────────────────────────────────────────────
 
@@ -315,6 +488,8 @@ def kyc_agent_node(
             case_id=case_id,
             document_payloads=payloads,
             service_date=service_dt,
+            storage_backend=storage,
+            documents=state.get("documents", []),
         )
 
         state["kyc_execution_id"] = f"kyc-{uuid.uuid4().hex[:8]}"
@@ -332,10 +507,10 @@ def kyc_agent_node(
             kyc_reason = "INDETERMINATE"
         elif raw_verdict.upper() == "CONFLICT":
             kyc_reason = "CONFLICT"
-        elif getattr(result, "id_expired", False):
-            kyc_reason = "ID_EXPIRED"
         elif result.tamper_detected or (getattr(result, "tamper_score", 0.0) > 0.0):
             kyc_reason = "TAMPER_DETECTED"
+        elif bool(getattr(result, "id_expired", False)):
+            kyc_reason = "ID_EXPIRED"
         elif not result.member_db_matched:
             kyc_reason = "MEMBER_UNMATCHED"
         elif raw_verdict.upper() == "FAIL":
@@ -467,7 +642,16 @@ def claims_extraction_node(
                     break
 
                 # 3. Exact matching date AND amount on multiple claim documents
-                if dates_match and amounts_match and meta_a["amounts"]:
+                # Exclude companion documents: a claim form and an itemized bill naturally share the same date and total charge (ADR-022)
+                fn_a = str(doc_a.get("file_name", "")).lower()
+                fn_b = str(doc_b.get("file_name", "")).lower()
+                is_itemized_a = "itemized" in fn_a or "bill" in fn_a
+                is_itemized_b = "itemized" in fn_b or "bill" in fn_b
+                is_claim_a = ("claim" in fn_a or "form" in fn_a) and not is_itemized_a
+                is_claim_b = ("claim" in fn_b or "form" in fn_b) and not is_itemized_b
+                is_companion = (is_claim_a and is_itemized_b) or (is_itemized_a and is_claim_b)
+
+                if dates_match and amounts_match and meta_a["amounts"] and not is_companion:
                     duplicate_match_id = (
                         min(meta_a["claim_numbers"])
                         if meta_a["claim_numbers"]
@@ -608,6 +792,8 @@ def join_claim_ready_barrier(state: CaseState) -> CaseState:
         state["policy_id"] = None
         state["policy_version"] = None
         state["policy_effective_date_valid"] = None
+        state["policy_payer_product"] = None
+        state["policy_jurisdiction"] = None
         state["policy_context_verdict"] = AgentVerdict.INDETERMINATE.value
         state.setdefault("completed_nodes", []).append("join_claim_ready_barrier")
         return state
@@ -632,11 +818,15 @@ def join_claim_ready_barrier(state: CaseState) -> CaseState:
             state["policy_id"] = matched.policy_id
             state["policy_version"] = matched.policy_version
             state["policy_effective_date_valid"] = True
+            state["policy_payer_product"] = matched.payer_product
+            state["policy_jurisdiction"] = matched.jurisdiction
             state["policy_context_verdict"] = AgentVerdict.PASS.value
         else:
             state["policy_id"] = None
             state["policy_version"] = None
             state["policy_effective_date_valid"] = False
+            state["policy_payer_product"] = None
+            state["policy_jurisdiction"] = None
             state["policy_context_verdict"] = AgentVerdict.FAIL.value
 
     state.setdefault("completed_nodes", []).append("join_claim_ready_barrier")
@@ -746,6 +936,8 @@ def policy_coverage_rag_node(
         state["policy_coverage_execution_id"] = f"polcov-{uuid.uuid4().hex[:8]}"
         state["policy_coverage_verdict"] = result.verdict.value
         state["policy_coverage_summary"] = result.model_dump()
+        state["policy_coverage_summary"]["payer_product"] = state.get("policy_payer_product")
+        state["policy_coverage_summary"]["jurisdiction"] = state.get("policy_jurisdiction")
         state.setdefault("completed_nodes", []).append("policy_coverage_rag_node")
 
         covered = bool(getattr(result, "covered", False))
@@ -937,6 +1129,7 @@ def fraud_agent_node(
         state["fraud_execution_id"] = f"fraud-{uuid.uuid4().hex[:8]}"
         state["fraud_verdict"] = result.verdict.value
         state["fraud_score"] = result.fraud_score
+        state["fraud_review_required"] = result.fraud_review_required
         state["fraud_risk_level"] = result.risk_level.value
         state["fraud_summary"] = result.model_dump()
         state["duplicate_claim_detected"] = result.duplicate_claim_detected
@@ -966,12 +1159,43 @@ def fraud_agent_node(
         return state
 
 
+def _service_code_for_line(line: dict[str, Any]) -> str:
+    hcpcs_val = str(line.get("hcpcs", {}).get("value") if isinstance(line.get("hcpcs"), dict) else getattr(line.get("hcpcs"), "value", "") or "").strip()
+    svc_code_val = str(line.get("service_code") or "").strip()
+    rev_val = str(line.get("rev_code", {}).get("value") if isinstance(line.get("rev_code"), dict) else getattr(line.get("rev_code"), "value", "") or "").strip()
+    return hcpcs_val if hcpcs_val and hcpcs_val not in ("UNKNOWN", "None", "null") else (
+        svc_code_val if svc_code_val and svc_code_val not in ("UNKNOWN", "None", "null") else (
+            rev_val if rev_val and rev_val not in ("UNKNOWN", "None", "null") else ""
+        )
+    )
+
+
+def _service_date_for_line(line: dict[str, Any]) -> date | None:
+    svc_date_val = line.get("service_date", {}).get("value") if isinstance(line.get("service_date"), dict) else getattr(line.get("service_date"), "value", None)
+    return parse_medical_date(svc_date_val) if svc_date_val else None
+
+
+def _determination_line_for(line: dict[str, Any], idx: int) -> ClinicalDeterminationLine:
+    desc = line.get("description")
+    desc_val = str((desc.get("value") if isinstance(desc, dict) else getattr(desc, "value", "")) or "").strip()
+    code = _service_code_for_line(line)
+    svc_date = _service_date_for_line(line)
+    return ClinicalDeterminationLine(
+        line_number=int(line.get("line_number", idx + 1)),
+        service_description=desc_val or code or "Uncatalogued service",
+        codes=[code] if code else [],
+        service_date=svc_date.isoformat() if svc_date else None,
+    )
+
+
 def clinical_alignment_node(
     state: CaseState,
     storage: StorageBackend | None = None,
     engine: type[DeterministicClinicalAlignmentEngine] | None = None,
+    relationship_interpreter: ClinicalRelationshipInterpreter | None = None,
+    determination_engine: ClinicalDeterminationEngine | None = None,
 ) -> CaseState:
-    """Node 6C: Deterministic Clinical Alignment Specialist (ADR-015, Spec 01 § 4, Spec 04 § 3, Spec 05 § 7B).
+    """Node 6C: Clinical Alignment Specialist (ADR-015, ADR-025, Spec 01 § 4, Spec 04 § 3, Spec 05 § 7B).
 
     Cross-verifies extracted claim service lines against medical record documentation,
     verifying performance evidence, clinical indication, medical necessity against standard
@@ -1045,12 +1269,15 @@ def clinical_alignment_node(
         # 4. Extract text and provenance spans from clinical documents
         clinical_texts: list[str] = []
         clinical_spans: list[FieldProvenance] = []
+        clinical_ocr_payloads: dict[str, Any] = {}
+        clinical_doc_types: dict[str, str] = {}
         clinical_doc_ids: list[str] = []
         disch_analyses: list[DischargeSummaryAnalysis] = []
 
         for d in clinical_docs:
             doc_id = str(d.get("document_id") or "UNKNOWN")
             clinical_doc_ids.append(doc_id)
+            clinical_doc_types[doc_id] = str(d.get("doc_type", "")).upper()
             doc_text = ""
             extracted = False
 
@@ -1059,19 +1286,25 @@ def clinical_alignment_node(
                 if storage.exists(payload_key):
                     try:
                         payload = retrieve_ocr_payload(case_id, doc_id, storage)
+                        clinical_ocr_payloads[doc_id] = payload
                         p_texts = []
                         for page in getattr(payload, "pages", []):
                             for s in getattr(page, "spans", []):
                                 p_texts.append(s.text)
-                                clinical_spans.append(
-                                    FieldProvenance(
-                                        document_id=doc_id,
-                                        page_number=page.page_number,
-                                        text_content=s.text,
-                                        evidence_quality_score=getattr(s, "confidence", 0.95) or 0.95,
-                                        model_confidence=0.90,
-                                    )
+                                candidate = FieldProvenance(
+                                    document_id=doc_id,
+                                    page_number=page.page_number,
+                                    span_id=s.span_id,
+                                    text_content=s.text,
+                                    bbox=s.bbox,
+                                    bounding_box=s.bbox.to_list(),
+                                    provenance_type=ProvenanceType.SPAN,
+                                    evidence_quality_score=s.confidence,
+                                    model_confidence=s.confidence,
+                                    evidence_source=EvidenceSource.OCR,
                                 )
+                                _, verified = verify_clinical_evidence_reference(candidate, payload)
+                                clinical_spans.append(verified)
                         if p_texts:
                             doc_text = "\n".join(p_texts)
                             clinical_texts.append(doc_text)
@@ -1093,6 +1326,7 @@ def clinical_alignment_node(
                                     text_content=raw[:300],
                                     evidence_quality_score=0.95,
                                     model_confidence=0.90,
+                                    evidence_source=EvidenceSource.UNKNOWN,
                                 )
                             )
                             extracted = True
@@ -1110,6 +1344,7 @@ def clinical_alignment_node(
                         text_content=raw[:300],
                         evidence_quality_score=0.95,
                         model_confidence=0.90,
+                        evidence_source=EvidenceSource.UNKNOWN,
                     )
                 )
 
@@ -1125,8 +1360,6 @@ def clinical_alignment_node(
                 disch_analyses.append(analysis)
 
         combined_text = "\n".join(clinical_texts)
-        text_lower = combined_text.lower()
-
         primary_icd_codes = [c for da in disch_analyses for c in da.primary_icd_codes]
         secondary_icd_codes = [c for da in disch_analyses for c in da.secondary_icd_codes]
         all_disch_icd = [c for da in disch_analyses for c in da.all_icd_codes]
@@ -1134,9 +1367,6 @@ def clinical_alignment_node(
         procedures_performed_texts = [da.procedures_performed_text for da in disch_analyses if da.procedures_performed_text]
         primary_diag_texts = [da.primary_diagnosis_text for da in disch_analyses if da.primary_diagnosis_text]
         secondary_diag_texts = [da.secondary_diagnosis_text for da in disch_analyses if da.secondary_diagnosis_text]
-        has_lab = any(da.has_lab_evaluation for da in disch_analyses)
-        has_img = any(da.has_imaging_studies for da in disch_analyses)
-        has_stay = any(da.has_inpatient_stay for da in disch_analyses)
         admit_date = next((da.admission_date for da in disch_analyses if da.admission_date), None)
         discharge_date = next((da.discharge_date for da in disch_analyses if da.discharge_date), None)
 
@@ -1148,87 +1378,179 @@ def clinical_alignment_node(
 
         # 5. Evaluate each claim service line against clinical documentation
         line_assessments: list[LineClinicalEvidence] = []
-        cpt_term_map = {
-            "99213": ("99213", "office visit", "outpatient visit", "exam", "evaluation", "established patient", "follow-up", "primary care"),
-            "99214": ("99214", "office visit", "moderate complexity", "established patient", "outpatient"),
-            "99215": ("99215", "office visit", "high complexity", "established patient", "outpatient"),
-            "99284": ("99284", "emergency", "ed visit", "emergency department"),
-            "99291": ("99291", "critical care", "intensive care", "icu"),
-            "93000": ("93000", "ecg", "ekg", "electrocardiogram", "rhythm", "sinus", "cardiac"),
-            "93306": ("93306", "echo", "echocardiogram", "echocardiography", "cardiac ultrasound"),
-            "44970": ("44970", "appendectomy", "appendix", "appendicitis"),
-            "80053": ("80053", "metabolic panel", "cmp", "electrolytes", "renal", "hepatic", "laboratory evaluation", "lab workup", "diagnostic workup"),
-            "36415": ("36415", "venipuncture", "blood draw", "phlebotomy", "venous blood", "laboratory evaluation", "lab workup", "diagnostic workup"),
-            "70553": ("70553", "mri", "brain", "resonance", "neuro", "imaging studies"),
-            "71045": ("71045", "chest x-ray", "chest radiograph", "cxr", "radiography single view", "imaging studies"),
-            "71046": ("71046", "chest x-ray", "chest radiograph", "cxr", "radiography 2 views", "imaging studies"),
-            "71250": ("71250", "ct thorax", "ct chest", "computed tomography", "imaging studies"),
-            "27447": ("27447", "knee arthroplasty", "tka", "knee replacement", "osteoarthritis", "condyle"),
-            "47562": ("47562", "cholecystectomy", "laparoscopic", "gallbladder", "cholecystitis"),
-            "43239": ("43239", "esophagogastroduodenoscopy", "egd", "endoscopy", "biopsy", "upper gi"),
-            "33533": ("33533", "cabg", "coronary artery bypass", "bypass graft", "coronary artery"),
-            "49000": ("49000", "laparotomy", "exploratory laparotomy", "acute abdomen"),
-            "90837": ("90837", "psychotherapy", "therapy session", "psychotherapy session", "mental health", "behavioral"),
-            "0120": ("0120", "room and board", "semi-private", "inpatient", "admission"),
-        }
-
         room_and_board_lines = []
 
         raw_icd = claims_summary.get("icd10_codes") or []
-        icd_codes = [
+        diagnosis_candidates = [
             str(c.get("value") if isinstance(c, dict) else getattr(c, "value", c))
             for c in raw_icd
             if c
-        ]
-        for c in all_disch_icd:
-            if c not in icd_codes:
-                icd_codes.append(c)
+        ] + all_disch_icd
+        guideline_repo = align_engine._get_default_repo()
+        claim_ocr_payloads: dict[str, Any] = {}
+        if storage:
+            for document in state.get("documents", []):
+                doc_type = str(document.get("doc_type", "")).upper()
+                file_name = str(document.get("file_name", "")).lower()
+                if doc_type not in (DocumentType.CLAIM_FORM.value, "CLAIM_FORM") and "claim" not in file_name:
+                    continue
+                document_id = str(document.get("document_id") or "UNKNOWN")
+                payload_key = document.get("ocr_payload_uri") or f"ocr/{case_id}/{document_id}.json"
+                if storage.exists(payload_key):
+                    try:
+                        claim_ocr_payloads[document_id] = retrieve_ocr_payload(case_id, document_id, storage)
+                    except (ValueError, TypeError, KeyError):
+                        logger.warning("Unable to validate claim-code provenance for %s", document_id)
+        relationship_candidates, relationship_contexts = _clinical_relationship_candidates(
+            raw_service_lines,
+            list(dict.fromkeys(diagnosis_candidates)),
+            claims_summary,
+            clinical_spans,
+            guideline_repo,
+            claim_ocr_payloads,
+        )
+        relationship_proposals = (
+            (relationship_interpreter or ClinicalRelationshipInterpreter()).assess(relationship_candidates)
+            if relationship_candidates
+            else {}
+        )
 
+        determination_lines = [
+            _determination_line_for(l, idx) for idx, l in enumerate(raw_service_lines)
+        ]
+        determinations: dict[int, ValidatedDetermination] = (
+            (determination_engine or ClinicalDeterminationEngine()).determine(determination_lines, clinical_spans)
+            if determination_lines
+            else {}
+        )
         for idx, l in enumerate(raw_service_lines):
             line_no = int(l.get("line_number", idx + 1))
-            code = str(l.get("hcpcs", {}).get("value") or l.get("service_code") or "").strip()
-            amt = float(l.get("amount", {}).get("value") or l.get("billed_amount") or 0.0)
-            units = float(l.get("units", {}).get("value") or l.get("billed_units") or 1.0)
-            svc_date_val = l.get("service_date", {}).get("value")
-            svc_date: date | None = None
-            if svc_date_val:
-                svc_date = parse_medical_date(svc_date_val)
+            code = _service_code_for_line(l)
+            desc_val = str(l.get("description", {}).get("value") if isinstance(l.get("description"), dict) else getattr(l.get("description"), "value", "") or "").strip()
+
+            amt = float(l.get("amount", {}).get("value") if isinstance(l.get("amount"), dict) else getattr(l.get("amount"), "value", l.get("billed_amount", 0.0)) or 0.0)
+            units = float(l.get("units", {}).get("value") if isinstance(l.get("units"), dict) else getattr(l.get("units"), "value", l.get("billed_units", 1.0)) or 1.0)
+            svc_date = _service_date_for_line(l)
 
             modality = align_engine.classify_modality(code)
+            # If code was unclassified or empty, check description for institutional services
+            if modality == ServiceModality.OTHER_SERVICE and desc_val:
+                desc_lower = desc_val.lower()
+                if any(w in desc_lower for w in ("room and board", "semi-private", "private room", "icu", "ccu", "bed charges", "ward", "accommodation")):
+                    modality = ServiceModality.ROOM_AND_BOARD
+                elif any(w in desc_lower for w in ("pharmacy", "medicine", "medication", "drugs", "iv fluid", "oral dose")):
+                    modality = ServiceModality.PHARMACEUTICAL
+                elif any(w in desc_lower for w in ("diagnostics", "diagnostic", "investigation", "pathology", "lab")):
+                    modality = ServiceModality.LABORATORY_TEST
+
             if modality == ServiceModality.ROOM_AND_BOARD:
-                room_and_board_lines.append((line_no, code, units, amt))
+                room_and_board_lines.append((line_no, code or "0120", units, amt))
 
-            terms = cpt_term_map.get(code.replace("REV_", ""), (code,))
-            in_terms = any(t in text_lower for t in terms) or (code and code.lower() in text_lower)
-            in_procs = any(code.lower() in p.lower() or any(t in p.lower() for t in terms) for p in procedures_performed_texts)
-            in_course = any(code.lower() in hc.lower() or any(t in hc.lower() for t in terms) for hc in hospital_course_texts)
-            modality_substantiated = (
-                (modality == ServiceModality.LABORATORY_TEST and has_lab)
-                or (modality == ServiceModality.DIAGNOSTIC_IMAGING and has_img)
-                or (modality in (ServiceModality.MEDICAL_VISIT_OR_EVAL, ServiceModality.ROOM_AND_BOARD) and has_stay)
+            procedure_text = "\n".join(procedures_performed_texts).casefold()
+            indication_rule = guideline_repo.get_indication(code) if code else None
+            assertion_patterns = (indication_rule or {}).get("assertion_patterns") or {}
+            performance_spans = [
+                item for item in clinical_spans
+                if item.verification_status == EvidenceVerificationStatus.VERIFIED
+                and item.evidence_source == EvidenceSource.OCR
+                and code
+                and code.casefold() in item.text_content.casefold()
+                and code.casefold() in procedure_text
+            ]
+            negated_performance = any(
+                re.search(pattern, " ".join(item.text_content for item in performance_spans), re.IGNORECASE)
+                for pattern in assertion_patterns.get("negated_performance_patterns", [])
             )
-
-            found = in_terms or in_procs or in_course or modality_substantiated
-
-            if found:
-                perf_status = PerformanceEvidenceStatus.DIRECTLY_DOCUMENTED_PERFORMANCE
-                ind_status = ClinicalIndicationStatus.EXPLICITLY_INDICATED
-                matching_spans = [
-                    s for s in clinical_spans
-                    if any(t in s.text_content.lower() for t in terms)
-                    or code.lower() in s.text_content.lower()
-                    or any(k in s.text_content.lower() for k in ("hospital course", "discharge summary", "final diagnoses", "primary", "secondary"))
-                ]
-                if not matching_spans and clinical_spans:
-                    matching_spans = [clinical_spans[0]]
-            else:
+            uncertain_performance = any(
+                re.search(pattern, " ".join(item.text_content for item in performance_spans), re.IGNORECASE)
+                for pattern in assertion_patterns.get("uncertain_performance_patterns", [])
+            )
+            affirmed_performance = bool(performance_spans) and any(
+                re.search(pattern, " ".join(item.text_content for item in performance_spans), re.IGNORECASE)
+                for pattern in assertion_patterns.get("affirmed_performance_patterns", [])
+            )
+            if negated_performance:
+                perf_status = PerformanceEvidenceStatus.EXPLICITLY_CONTRADICTED
+            elif uncertain_performance or not affirmed_performance:
                 perf_status = PerformanceEvidenceStatus.NOT_DOCUMENTED
-                ind_status = ClinicalIndicationStatus.NO_DOCUMENTED_INDICATION
-                matching_spans = []
+            else:
+                perf_status = PerformanceEvidenceStatus.DIRECTLY_DOCUMENTED_PERFORMANCE
+            if perf_status == PerformanceEvidenceStatus.DIRECTLY_DOCUMENTED_PERFORMANCE:
+                performance_spans = [
+                    item.model_copy(update={
+                        "normalized_interpretation": code,
+                        "assertion_status": ClinicalAssertionStatus.AFFIRMED,
+                        "evidence_relevance_verified": True,
+                    })
+                    for item in performance_spans
+                ]
+
+            diagnosis_evidence: list[FieldProvenance] = []
+            affirmed_diagnosis_codes: list[str] = []
+            indication_conflict = False
+            line_context = relationship_contexts.get(line_no) or {}
+            documented_diagnosis_codes = list(line_context.get("diagnosis_description_by_code", {}))
+            diagnosis_context = "; ".join(
+                f"{line_context['diagnosis_description_by_code'][diagnosis_code]} ({diagnosis_code})"
+                for diagnosis_code in documented_diagnosis_codes
+            ) or "no verified diagnosis"
+            procedure_context = f"{line_context.get('service_description', 'Uncatalogued service')} ({code or 'UNKNOWN'})"
+            indication_override = ClinicalIndicationStatus.POTENTIALLY_RELATED
+            indication_note = (
+                f"Diagnosis vs procedure: {diagnosis_context} vs {procedure_context}. "
+                "The relationship could not be assessed from verified record evidence."
+            )
+            pair_proposals = []
+            for diagnosis_code, clinical_spans_for_code in line_context.get("clinical_evidence_by_code", {}).items():
+                pair = relationship_proposals.get((line_no, code, diagnosis_code))
+                if pair is None:
+                    continue
+                cited = next((span for span in clinical_spans_for_code if span.span_id == pair.clinical_evidence_id), None)
+                if cited is not None:
+                    pair_proposals.append((pair, cited))
+
+            supported_pairs = [(pair, cited) for pair, cited in pair_proposals if pair.relationship == "SUPPORTED"]
+            expected_pair_count = len(line_context.get("clinical_evidence_by_code", {}))
+            if supported_pairs:
+                indication_override = ClinicalIndicationStatus.EXPLICITLY_INDICATED
+                supported_codes = [pair.diagnosis_code for pair, _ in supported_pairs]
+                affirmed_diagnosis_codes.extend(supported_codes)
+                for pair, cited in supported_pairs:
+                    diagnosis_evidence.append(cited.model_copy(update={
+                        "normalized_interpretation": pair.diagnosis_code,
+                        "assertion_status": ClinicalAssertionStatus.AFFIRMED,
+                        "evidence_relevance_verified": True,
+                    }))
+                indication_note = None
+            elif expected_pair_count and len(pair_proposals) == expected_pair_count and all(
+                pair.relationship == "NOT_ESTABLISHED" for pair, _ in pair_proposals
+            ):
+                indication_override = ClinicalIndicationStatus.NO_DOCUMENTED_INDICATION
+                diagnosis_descriptions = "; ".join(
+                    f"{line_context['diagnosis_description_by_code'].get(pair.diagnosis_code, pair.diagnosis_code)} "
+                    f"({pair.diagnosis_code})"
+                    for pair, _ in pair_proposals
+                )
+                indication_note = (
+                    f"Diagnosis vs procedure: {diagnosis_descriptions} vs {procedure_context}. "
+                    "The cited record did not establish a clinical relationship."
+                )
+
+            determination = determinations.get(line_no)
+            necessity_status = (
+                MedicalNecessityStatus.MET
+                if determination is not None and determination.outcome == "SUPPORTED"
+                else MedicalNecessityStatus.CRITERIA_INCOMPLETE
+            )
+            necessity_spans = (
+                [span for span in clinical_spans if span.span_id in determination.evidence_ids]
+                if determination is not None and determination.outcome == "SUPPORTED"
+                else []
+            )
 
             pa_req = None
             pa_ver = None
-            template = align_engine.STANDARD_GUIDELINE_CATALOG.get(code.replace("REV_", ""))
+            template = guideline_repo.get_guideline(code.replace("REV_", ""), service_date=svc_date)
             if template and template.get("requires_prior_auth"):
                 pa_req = PriorAuthRequirementStatus.REQUIRED
                 pa_ver = (
@@ -1244,19 +1566,58 @@ def clinical_alignment_node(
                 billed_amount=amt,
                 service_date=svc_date,
                 modality=modality,
+                payer_product=pol_cov.get("payer_product"),
+                jurisdiction=pol_cov.get("jurisdiction"),
                 performance_status=perf_status,
-                indication_status=ind_status,
+                indication_status=indication_override,
+                discrepancy_description=indication_note,
                 prior_auth_requirement=pa_req,
                 prior_auth_verification=pa_ver,
-                supporting_spans=matching_spans,
+                supporting_spans=performance_spans + diagnosis_evidence + necessity_spans,
+                performance_evidence=performance_spans,
+                indication_evidence=diagnosis_evidence,
+                necessity_status=necessity_status,
+                indication_conflict=indication_conflict,
                 clinical_notes_text=combined_text,
-                diagnosis_codes=icd_codes,
-                primary_icd10_codes=primary_icd_codes,
-                secondary_icd10_codes=secondary_icd_codes,
+                diagnosis_codes=affirmed_diagnosis_codes,
+                primary_icd10_codes=[c for c in primary_icd_codes if c in documented_diagnosis_codes],
+                secondary_icd10_codes=[c for c in secondary_icd_codes if c in documented_diagnosis_codes],
                 primary_diagnosis_text=" ".join(primary_diag_texts),
                 secondary_diagnosis_text=" ".join(secondary_diag_texts),
                 hospital_course_text=" ".join(hospital_course_texts),
             )
+            if indication_override == ClinicalIndicationStatus.EXPLICITLY_INDICATED:
+                supported_diagnoses = "; ".join(
+                    f"{line_context['diagnosis_description_by_code'].get(diagnosis_code, diagnosis_code)} "
+                    f"({diagnosis_code})"
+                    for diagnosis_code in affirmed_diagnosis_codes
+                )
+                finding = (
+                    f"Diagnosis vs procedure: {supported_diagnoses} vs {procedure_context}. "
+                    "The cited record supports the relationship."
+                )
+                if line_ev.line_verdict != AgentVerdict.PASS:
+                    additional_review = []
+                    if line_ev.performance_status in (
+                        PerformanceEvidenceStatus.NOT_DOCUMENTED,
+                        PerformanceEvidenceStatus.ORDERED_ONLY,
+                    ):
+                        additional_review.append("documentation that the service was performed")
+                    if line_ev.necessity_status == MedicalNecessityStatus.GUIDELINE_UNAVAILABLE:
+                        additional_review.append("an applicable clinical guideline")
+                    elif line_ev.necessity_status == MedicalNecessityStatus.CRITERIA_INCOMPLETE:
+                        additional_review.append("required clinical guideline evidence")
+                    if line_ev.prior_auth_verification in (
+                        PriorAuthVerificationStatus.MISSING_OR_UNVERIFIED,
+                        PriorAuthVerificationStatus.AUTH_SERVICE_UNAVAILABLE,
+                    ):
+                        additional_review.append("verified prior authorization")
+                    if additional_review:
+                        finding += f" Additional review needed for {', '.join(additional_review)}."
+            else:
+                finding = indication_note
+            if finding:
+                line_ev = line_ev.model_copy(update={"clinical_finding_summary": finding})
             line_assessments.append(line_ev)
 
         # 6. Reconcile bed days if room and board lines present
@@ -1482,6 +1843,8 @@ def decision_engine_node(
             policy_output=pol_obj,
             fraud_output=fraud_obj,
             clinical_output=clin_obj,
+            clinical_support_approval_min_ratio=settings.CLINICAL_SUPPORT_APPROVAL_MIN_RATIO,
+            clinical_uncertainty_approval_enabled=settings.CLINICAL_UNCERTAINTY_APPROVAL_ENABLED,
             consistency_report=consistency_obj,
             present_document_types=doc_types,
             missing_required_documents=not state.get("is_complete", True),

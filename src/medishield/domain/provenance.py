@@ -82,6 +82,32 @@ class ProvenanceType(str, Enum):
     INFERRED = "INFERRED"  # Interpreted by LLM reasoning without direct span (Quality: 0.0)
 
 
+class EvidenceSource(str, Enum):
+    """Origin of evidence retained for clinical review."""
+    UNKNOWN = "UNKNOWN"
+    OCR = "OCR"
+    VISUAL_CANDIDATE = "VISUAL_CANDIDATE"
+    LLM_PROPOSAL = "LLM_PROPOSAL"
+    DATABASE = "DATABASE"
+
+
+class EvidenceVerificationStatus(str, Enum):
+    """Independent verification state of a provenance reference."""
+    UNVERIFIED = "UNVERIFIED"
+    VERIFIED = "VERIFIED"
+    VISUAL_PENDING = "VISUAL_PENDING"
+    REJECTED = "REJECTED"
+
+
+class ClinicalAssertionStatus(str, Enum):
+    """Polarity retained when clinical text is normalized into a candidate fact."""
+    NOT_ASSESSED = "NOT_ASSESSED"
+    AFFIRMED = "AFFIRMED"
+    NEGATED = "NEGATED"
+    UNCERTAIN = "UNCERTAIN"
+    CONTRADICTORY = "CONTRADICTORY"
+
+
 class FieldProvenance(BaseModel):
     """Auditable physical provenance linking an extracted fact to document OCR spans."""
     document_id: str = Field(..., description="Referenced document identifier")
@@ -109,6 +135,12 @@ class FieldProvenance(BaseModel):
         le=1.0,
         description="Optional model extractor confidence score",
     )
+    evidence_source: EvidenceSource = EvidenceSource.UNKNOWN
+    verification_status: EvidenceVerificationStatus = EvidenceVerificationStatus.UNVERIFIED
+    normalized_interpretation: str | None = None
+    assertion_status: ClinicalAssertionStatus = ClinicalAssertionStatus.NOT_ASSESSED
+    temporal_context: str | None = None
+    evidence_relevance_verified: bool = False
 
     @model_validator(mode="before")
     @classmethod

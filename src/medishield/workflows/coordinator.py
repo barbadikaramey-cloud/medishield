@@ -1,4 +1,6 @@
 import logging
+import time
+import uuid
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -108,13 +110,75 @@ class CaseWorkflowCoordinator:
         self.decision_engine = decision_engine or DeterministicDecisionEngine()
         self.audit_ledger = audit_ledger if audit_ledger is not None else []
 
+    def _execute_step(
+        self,
+        case_id: str,
+        run_id: str,
+        node_name: str,
+        step_fn: Any,
+        state: CaseState,
+        *args: Any,
+        summary_fn: Any | None = None,
+        **kwargs: Any,
+    ) -> CaseState:
+        """Executes a workflow node with real-time lifecycle event broadcasting (ADR-017)."""
+        from medishield.api.events import broadcaster
+
+        has_active_listeners = broadcaster.has_subscribers(case_id)
+
+        broadcaster.emit(
+            case_id=case_id,
+            run_id=run_id,
+            agent_name=node_name,
+            event_type="STARTED",
+            status="RUNNING",
+            safe_summary=f"{node_name} execution started.",
+        )
+
+        # In interactive sessions with active WebSocket subscribers, pace the execution
+        # so the human operator can observe each specialist node transition live.
+        if has_active_listeners:
+            time.sleep(0.30)
+
+        t0 = time.perf_counter()
+        try:
+            state = step_fn(state, *args, **kwargs)
+            dur_ms = (time.perf_counter() - t0) * 1000
+            safe_text = summary_fn(state) if summary_fn else f"{node_name} completed successfully."
+            broadcaster.emit(
+                case_id=case_id,
+                run_id=run_id,
+                agent_name=node_name,
+                event_type="COMPLETED",
+                status="SUCCESS",
+                duration_ms=dur_ms,
+                safe_summary=safe_text,
+            )
+            if has_active_listeners:
+                time.sleep(0.10)
+            return state
+        except Exception as exc:
+            dur_ms = (time.perf_counter() - t0) * 1000
+            broadcaster.emit(
+                case_id=case_id,
+                run_id=run_id,
+                agent_name=node_name,
+                event_type="FAILED",
+                status="ERROR",
+                duration_ms=dur_ms,
+                safe_summary=f"{node_name} failed: {type(exc).__name__}",
+            )
+            raise
+
     def execute(self, state: CaseState) -> CaseState:
         """
         Executes the end-to-end directed workflow graph.
-        Respects synchronization barriers and early-halt branches.
+        Respects synchronization barriers, early-halt branches, and emits real-time events.
         """
         case_id = state.get("case_id", "UNKNOWN")
         doc_count = len(state.get("documents", []))
+        run_id: str = str(state.get("run_id") or uuid.uuid4())
+        state["run_id"] = run_id
 
         with trace_span(
             name="case_workflow_execute",
@@ -130,10 +194,42 @@ class CaseWorkflowCoordinator:
                 state["claim_history_repo"] = self.claim_history_repo
 
             # ── Phase 1: Intake Sequential Pipeline (Nodes 1 - 4) ─────────────────
-            state = ocr_preprocessor_node(state, self.storage, self.ocr_engine)
-            state = split_group_node(state)
-            state = classifier_node(state, self.storage, self.classifier_agent)
-            state = case_completeness_node(state)
+            state = self._execute_step(
+                case_id,
+                run_id,
+                "OCRPreprocessor",
+                ocr_preprocessor_node,
+                state,
+                self.storage,
+                self.ocr_engine,
+                summary_fn=lambda s: f"Preprocessed {len(s.get('documents', []))} documents with OCR",
+            )
+            state = self._execute_step(
+                case_id,
+                run_id,
+                "SplitGroup",
+                split_group_node,
+                state,
+                summary_fn=lambda s: "Identified document logical boundaries",
+            )
+            state = self._execute_step(
+                case_id,
+                run_id,
+                "ClassifierAgent",
+                classifier_node,
+                state,
+                self.storage,
+                self.classifier_agent,
+                summary_fn=lambda s: f"Classified {len(s.get('documents', []))} documents",
+            )
+            state = self._execute_step(
+                case_id,
+                run_id,
+                "CompletenessGate",
+                case_completeness_node,
+                state,
+                summary_fn=lambda s: "Intake documentation is complete" if s.get("is_complete") else "Intake documentation incomplete",
+            )
 
             logger.info(
                 "[%s] Phase 1 Intake: %d documents classified: %s",
@@ -160,13 +256,46 @@ class CaseWorkflowCoordinator:
                     decisive_factors="intake",
                     blocking_condition_count=1,
                 )
-                state = audit_persistence_node(state, self.audit_ledger)
+                state = self._execute_step(
+                    case_id,
+                    run_id,
+                    "AuditPersistence",
+                    audit_persistence_node,
+                    state,
+                    self.audit_ledger,
+                )
                 return state
 
             # ── Phase 2: Parallel Specialist Extractions (Nodes 5A, 5B, 5C) ───────
-            state = kyc_agent_node(state, self.storage, self.kyc_agent)
-            state = claims_extraction_node(state, self.storage, self.claims_agent)
-            state = policy_context_node(state, self.policy_context_agent)
+            state = self._execute_step(
+                case_id,
+                run_id,
+                "KYCAgent",
+                kyc_agent_node,
+                state,
+                self.storage,
+                self.kyc_agent,
+                summary_fn=lambda s: f"KYC identity verdict: {s.get('kyc_verdict')}",
+            )
+            state = self._execute_step(
+                case_id,
+                run_id,
+                "ClaimsAgent",
+                claims_extraction_node,
+                state,
+                self.storage,
+                self.claims_agent,
+                summary_fn=lambda s: f"Claims extraction verdict: {s.get('claims_verdict')}",
+            )
+            state = self._execute_step(
+                case_id,
+                run_id,
+                "PolicyContextAgent",
+                policy_context_node,
+                state,
+                self.policy_context_agent,
+                summary_fn=lambda s: "Policy context retrieved",
+            )
 
             kyc_s = state.get("kyc_summary") or {}
             cl_s = state.get("claims_summary") or {}
@@ -200,8 +329,22 @@ class CaseWorkflowCoordinator:
             )
 
             # ── Phase 3: JoinClaimReady Barrier & Coverage Evaluation ─────────────
-            state = join_claim_ready_barrier(state)
-            state = policy_coverage_rag_node(state, self.policy_coverage_agent)
+            state = self._execute_step(
+                case_id,
+                run_id,
+                "JoinClaimReadyBarrier",
+                join_claim_ready_barrier,
+                state,
+            )
+            state = self._execute_step(
+                case_id,
+                run_id,
+                "PolicyCoverageAgent",
+                policy_coverage_rag_node,
+                state,
+                self.policy_coverage_agent,
+                summary_fn=lambda s: f"Policy coverage verdict: {s.get('policy_coverage_verdict')}",
+            )
 
             pol_s = state.get("policy_coverage_summary") or {}
             logger.info(
@@ -213,19 +356,37 @@ class CaseWorkflowCoordinator:
             )
 
             # ── Phase 4: Independent Concurrent Fraud & Clinical Alignment Specialist Evaluation ───
-            state = fraud_agent_node(
+            state = self._execute_step(
+                case_id,
+                run_id,
+                "FraudEngine",
+                fraud_agent_node,
                 state,
                 self.fraud_engine,
                 claim_history_repo=self.claim_history_repo,
                 storage=self.storage,
+                summary_fn=lambda s: (
+                    "Fraud review required: "
+                    f"{'yes' if s.get('fraud_review_required') else 'no'} "
+                    f"({s.get('fraud_verdict', 'PASS')})"
+                ),
             )
-            state = clinical_alignment_node(state, self.storage, self.clinical_alignment_engine)
+            state = self._execute_step(
+                case_id,
+                run_id,
+                "ClinicalAlignmentEngine",
+                clinical_alignment_node,
+                state,
+                self.storage,
+                self.clinical_alignment_engine,
+                summary_fn=lambda s: f"Clinical alignment verdict: {s.get('clinical_alignment_verdict')}",
+            )
 
             logger.info(
-                "[%s] Phase 4 [Fraud Specialist]: Verdict=%s | FraudScore=%.2f | Risk=%s | Anomalies=%s",
+                "[%s] Phase 4 [Fraud Specialist]: Verdict=%s | ReviewRequired=%s | Risk=%s | Anomalies=%s",
                 case_id,
                 state.get("fraud_verdict", "PASS"),
-                state.get("fraud_score", 0.0),
+                state.get("fraud_review_required", False),
                 state.get("fraud_risk_level", "LOW"),
                 state.get("fraud_anomalies", []),
             )
@@ -242,11 +403,33 @@ class CaseWorkflowCoordinator:
             )
 
             # ── Phase 5: JoinAll Barrier & Downstream Gate ─────────────────────────
-            state = join_all_barrier(state)
-            state = faithfulness_gate_node(state, self.storage)
+            state = self._execute_step(
+                case_id,
+                run_id,
+                "JoinAllBarrier",
+                join_all_barrier,
+                state,
+            )
+            state = self._execute_step(
+                case_id,
+                run_id,
+                "FaithfulnessGate",
+                faithfulness_gate_node,
+                state,
+                self.storage,
+                summary_fn=lambda s: "Faithfulness verification passed",
+            )
 
             # ── Phase 6: Deterministic Decision Engine (Priority Rules P1 - P8) ───
-            state = decision_engine_node(state, self.decision_engine)
+            state = self._execute_step(
+                case_id,
+                run_id,
+                "DecisionEngine",
+                decision_engine_node,
+                state,
+                self.decision_engine,
+                summary_fn=lambda s: f"Decision rendered: {s.get('decision')} (Rule: {s.get('rule_id_matched')})",
+            )
 
             logger.info(
                 "[%s] Phase 6 Decision Engine: %s (sub_reason=%s, rule=%s, conf=%.2f) -> %s",
@@ -259,7 +442,14 @@ class CaseWorkflowCoordinator:
             )
 
             # ── Phase 7: Tamper-Evident Audit & State Persistence ─────────────────
-            state = audit_persistence_node(state, self.audit_ledger)
+            state = self._execute_step(
+                case_id,
+                run_id,
+                "AuditPersistence",
+                audit_persistence_node,
+                state,
+                self.audit_ledger,
+            )
             self._persist_claims_to_db(state)
 
             raw_decision = state.get("decision")

@@ -68,7 +68,7 @@ elif settings.ENVIRONMENT in ("staging", "production"):
 
 # Setup Engines
 if _use_sqlite:
-    sqlite_db_path = Path("data/medishield.db")
+    sqlite_db_path = Path(settings.SQLITE_DB_PATH)
     sqlite_db_path.parent.mkdir(parents=True, exist_ok=True)
     sqlite_url = f"sqlite:///{sqlite_db_path.absolute().as_posix()}"
     async_sqlite_url = f"sqlite+aiosqlite:///{sqlite_db_path.absolute().as_posix()}"

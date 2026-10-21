@@ -1,17 +1,22 @@
-"""Authoritative PDF policy ingestion and local Qdrant hybrid retrieval."""
+"""Authoritative PDF policy ingestion and Qdrant hybrid retrieval (embedded or Qdrant Cloud)."""
 
 from __future__ import annotations
 
 import hashlib
+import io
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
 from pypdf import PdfReader
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
+from qdrant_client.models import Distance, PayloadSchemaType, PointStruct, VectorParams
 
 from medishield.agents.policy import POLICY_STOP_WORDS, PolicyChunkRecord
+
+Embedder = Callable[[list[str]], list[list[float]]]
 
 
 def _tokens(text: str) -> set[str]:
@@ -30,6 +35,34 @@ def _embedding(text: str, dimensions: int = 128) -> list[float]:
     return [v / norm for v in values] if norm else values
 
 
+def hash_embedder(texts: list[str]) -> list[list[float]]:
+    return [_embedding(text) for text in texts]
+
+
+class GeminiEmbedder:
+    """Hosted embeddings for the cloud policy index (ADR-030). Raises on failure; never falls back."""
+
+    def __init__(self, api_key: str, model: str, dimensions: int) -> None:
+        from google import genai
+
+        self.client = genai.Client(api_key=api_key)
+        self.model = model
+        self.dimensions = dimensions
+
+    def __call__(self, texts: list[str]) -> list[list[float]]:
+        from google.genai import types
+
+        response = self.client.models.embed_content(
+            model=self.model,
+            contents=cast(list[Any], texts),
+            config=types.EmbedContentConfig(output_dimensionality=self.dimensions),
+        )
+        vectors = [list(item.values or []) for item in (response.embeddings or [])]
+        if len(vectors) != len(texts) or any(len(v) != self.dimensions for v in vectors):
+            raise RuntimeError("Embedding response did not match requested count or dimensions")
+        return vectors
+
+
 @dataclass(frozen=True)
 class ParsedPolicyChunk:
     chunk: PolicyChunkRecord
@@ -37,25 +70,48 @@ class ParsedPolicyChunk:
 
 
 class EmbeddedQdrantPolicyIndex:
-    """Persistent embedded Qdrant index, filtered by policy ID and version."""
+    """Persistent policy index filtered by policy ID and version (embedded or Qdrant Cloud)."""
 
-    collection_name = "authoritative_policy_chunks"
-
-    def __init__(self, path: str | Path) -> None:
-        self.client = QdrantClient(path=str(path))
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        *,
+        url: str | None = None,
+        api_key: str | None = None,
+        collection_name: str = "authoritative_policy_chunks",
+        vector_name: str | None = None,
+        embedder: Embedder = hash_embedder,
+        dimensions: int = 128,
+    ) -> None:
+        self.collection_name = collection_name
+        self.vector_name = vector_name
+        self.embedder = embedder
+        if url:
+            self.client = QdrantClient(url=url, api_key=api_key)
+        else:
+            self.client = QdrantClient(path=str(path))
         if not self.client.collection_exists(self.collection_name):
             self.client.create_collection(
-                self.collection_name, vectors_config=VectorParams(size=128, distance=Distance.COSINE)
+                self.collection_name,
+                vectors_config=VectorParams(size=dimensions, distance=Distance.COSINE),
             )
+        for field in ("policy_id", "version_tag"):
+            self.client.create_payload_index(self.collection_name, field, PayloadSchemaType.KEYWORD)
+
+    def _vector(self, vector: list[float]) -> Any:
+        return {self.vector_name: vector} if self.vector_name else vector
 
     def index(self, parsed: list[ParsedPolicyChunk]) -> None:
+        if not parsed:
+            return
+        vectors = self.embedder([item.chunk.chunk_text for item in parsed])
         points = []
-        for item in parsed:
+        for item, vector in zip(parsed, vectors, strict=True):
             chunk = item.chunk
             point_id = int(hashlib.sha256(chunk.chunk_id.encode()).hexdigest()[:15], 16)
             points.append(PointStruct(
                 id=point_id,
-                vector=_embedding(chunk.chunk_text),
+                vector=self._vector(vector),
                 payload={
                     "chunk_id": chunk.chunk_id, "policy_id": chunk.policy_id,
                     "version_tag": chunk.version_tag, "section_number": chunk.section_number,
@@ -65,29 +121,30 @@ class EmbeddedQdrantPolicyIndex:
                     "matching_rev_codes": getattr(chunk, "matching_rev_codes", []),
                 },
             ))
-        if points:
-            self.client.upsert(self.collection_name, points=points, wait=True)
+        self.client.upsert(self.collection_name, points=points, wait=True)
 
-    def search(self, policy_id: str, version_tag: str, query: str, top_k: int = 5) -> list[dict]:
+    def search(self, policy_id: str, version_tag: str, query: str, top_k: int = 5) -> list[dict[str, Any]]:
         # qdrant-client APIs changed; query_points is available in current supported releases.
         from qdrant_client.models import FieldCondition, Filter, MatchValue
+        query_vector = self.embedder([query])[0]
         result = self.client.query_points(
             self.collection_name,
-            query=_embedding(query),
+            query=query_vector,
+            using=self.vector_name,
             query_filter=Filter(must=[
                 FieldCondition(key="policy_id", match=MatchValue(value=policy_id)),
                 FieldCondition(key="version_tag", match=MatchValue(value=version_tag)),
             ]),
             limit=top_k,
         )
-        return [dict(point.payload, dense_score=float(point.score)) for point in result.points]
+        return [{**(point.payload or {}), "dense_score": float(point.score)} for point in result.points]
 
 
 class PolicyPdfIngestor:
     """Parses authoritative PDFs into page-preserving, section-bounded chunks."""
 
     def parse(self, pdf_bytes: bytes, policy_id: str, version_tag: str) -> list[ParsedPolicyChunk]:
-        reader = PdfReader(__import__("io").BytesIO(pdf_bytes))
+        reader = PdfReader(io.BytesIO(pdf_bytes))
         parsed: list[ParsedPolicyChunk] = []
         for page_number, page in enumerate(reader.pages, start=1):
             text = (page.extract_text() or "").strip()

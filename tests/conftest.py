@@ -6,6 +6,7 @@ import pytest
 # Ensure src/ and repo root are on sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+os.environ.setdefault("LANGSMITH_AGENTS_ONLY", "false")
 
 
 @pytest.fixture
